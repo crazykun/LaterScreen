@@ -114,7 +114,23 @@ crates/
 ### M5 打磨
 - [ ] Wayland portal 路径验证（GNOME/KDE/wlroots）
 - [ ] 多显示器混合 DPI
-- [ ] CI：三平台构建产物 + 体积回归检查
+- [ ] 多屏窗口定位真机验证：`with_position + with_fullscreen` 在部分 WM 上
+      fullscreen 可能忽略 position hint 落错屏（CI 测不了，需双屏手动确认）
+      ——✅ Deepin 25 (KWin/X11) 双屏实测通过（2026-08-17）：覆盖层正确落在
+      鼠标所在屏；其他 WM（GNOME/i3 等）待社区反馈
+- [ ] CI：三平台构建产物 + 体积回归检查（✅ 已搭，见 .github/workflows/ci.yml）；
+      远期注意 ldd 白名单对全静态产物会误报
+
+### 遗留 TODO（review 2026-08-17）
+
+- [ ] clipd 静默失败：`clipd_spawn` 把子进程 stderr 指向 null 且写完 stdin 即返回 Ok，
+      守护进程若起不来（X 连接失败等），UI 已提示"已复制"但剪贴板是空的。
+      方案：子进程持剪贴板成功后往 stdout 回写一个确认字节，父进程等确认再返回
+- [ ] clipd 僵尸进程：GUI 长会话中多次复制产生的子进程被覆盖退出后无人 wait，
+      变僵尸直至 GUI 退出。量小无害；父进程入口 `signal(SIGCHLD, SIG_IGN)`
+      即可让内核自动收割
+- [ ] Win/mac 指针查询（capture/src/other.rs cursor_position 返回 None）：
+      windows-rs GetCursorPos / objc2 NSEvent.mouseLocation，补齐后多屏跟随生效
 
 ## 5. 已知风险与对策
 
@@ -122,7 +138,7 @@ crates/
 |---|---|---|
 | Wayland 禁止直接抓屏 | Linux 部分桌面不可用 | 走 portal（M5）；X11 优先支持；边缘 compositor 明确声明不支持 |
 | "用完即走"与全局快捷键矛盾 | 无法自监听热键 | 快捷键绑定交给系统/桌面环境，绑定到 `lscreen` 命令；编辑期快捷键由 egui 处理 |
-| X11 剪贴板随进程退出丢失 | 复制不可靠 | ✅ 已解决：分离守护子进程（arboard wait()）持有剪贴板，被覆盖后自动退出 |
+| X11 剪贴板随进程退出丢失 | 复制不可靠 | ✅ 已解决：分离守护子进程（arboard wait()）持有剪贴板，被覆盖后自动退出；遗留确认回执/僵尸收割见「遗留 TODO」 |
 | 混合 DPI 多显示器 | 覆盖层/坐标错位 | 单屏已自洽（View 比例映射）；多屏混合 DPI 在 M5 与 capture_all 一并处理 |
 | 纯 Rust 无 H.264 编码器 | MP4 依赖问题 | 系统编码器；GIF 先行（✅ 已完成） |
 | 滚动截图拼接不稳 | 长图错位 | 特征行匹配 + 重叠区校验；M4 再攻坚 |

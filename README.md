@@ -33,6 +33,26 @@ lscreen shot -o out.png                # 无界面截全屏
 lscreen shot --region 100,100,800,600 --clipboard   # 截区域进剪贴板
 ```
 
+各子命令选项（完整以 `lscreen <子命令> --help` 为准）：
+
+| 子命令 | 选项 | 说明 |
+|---|---|---|
+| `shot` | `--region X,Y,W,H` | 截取区域，缺省整主屏 |
+| | `-o, --output <路径>` | 输出 PNG 路径，缺省 `~/Pictures/lscreen_时间戳.png` |
+| | `-c, --clipboard` | 同时复制到剪贴板 |
+| `record` | `--region X,Y,W,H` | 录制区域，缺省整主屏 |
+| | `--duration <秒>` | 最长录制时长，缺省 30 |
+| | `--fps <1-30>` | 帧率，缺省 10 |
+| | `--quality <1-100>` | GIF 编码质量，缺省 90 |
+| | `-o, --output <路径>` | 输出 `.gif` 路径，缺省 `~/Pictures` |
+| `ocr` | `--region X,Y,W,H` | 识别区域，缺省整主屏 |
+| | `-i, --input <图片>` | 从图片识别（PNG/JPEG），指定时忽略 `--region` |
+| | `--lang <语言>` | 识别语言，可多次，如 `--lang chi_sim --lang eng` |
+| `qr` | `--region X,Y,W,H` | 识别区域，缺省整主屏 |
+| | `-i, --input <图片>` | 从图片识别，指定时忽略 `--region` |
+| `pick` | — | 无选项；Ctrl+R/H/K 复制 RGB/HEX/CMYK |
+| `gui` | — | 无选项，与不带子命令等价 |
+
 交互模式快捷键：
 
 | 键 | 功能 |
@@ -50,13 +70,33 @@ lscreen shot --region 100,100,800,600 --clipboard   # 截区域进剪贴板
 注意：所有 `--region X,Y,W,H` 参数使用**物理像素**坐标（截图/录屏的实际像素），
 HiDPI 缩放下与桌面环境显示的"逻辑分辨率"不同。多显示器时坐标基于虚拟桌面原点。
 
-## 构建
+## 构建与运行
 
 ```bash
 cargo build --release        # 产物 target/release/lscreen
+cargo run --release          # 构建并直接进入交互截图（等价 lscreen）
+cargo test --workspace       # 单元测试（无需显示器）
+
+./target/release/lscreen --help              # 查看全部子命令
+./target/release/lscreen shot --help         # 查看某子命令的选项
 ```
 
 Linux 构建仅需 Rust 工具链（X11 协议为纯 Rust 实现，无 C 库依赖）。
+
+安装到系统（可选，全局命令 + 桌面快捷键绑定用）：
+
+```bash
+cargo install --path crates/app              # 装入 ~/.cargo/bin/lscreen
+# 或直接复制单文件：
+cp target/release/lscreen ~/.local/bin/
+```
+
+运行环境要求：
+
+- 交互模式（`lscreen` / `pick`）需要 X11 桌面（`DISPLAY`）；Wayland 会话暂不支持（M5）
+- `ocr` 在 Linux 依赖系统 tesseract（`sudo apt install tesseract-ocr tesseract-ocr-chi-sim`），
+  未安装时会给出明确引导；其余功能零外部依赖
+- Linux 上复制后由分离的守护子进程持有剪贴板，被覆盖后自动退出，无需常驻
 
 ## 架构
 
