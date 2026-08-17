@@ -70,3 +70,8 @@ pub fn capture_at(x: i32, y: i32) -> Result<Screenshot> {
 pub fn capture_all() -> Result<Vec<Screenshot>> {
     platform::capture_all()
 }
+
+/// 截取虚拟桌面上的任意矩形区域（物理像素坐标）。录屏采帧用。
+pub fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<Screenshot> {
+    platform::capture_region(x, y, w, h)
+}

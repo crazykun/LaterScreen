@@ -15,8 +15,9 @@
 - ✅ 二维码识别：工具栏按钮识别选区，或 `lscreen qr` 命令行识别屏幕/图片
 - ✅ OCR 文字识别：Linux（tesseract，唯一外部依赖），工具栏 OCR 按钮 + `lscreen ocr` 命令；
   Windows.Media.Ocr / macOS Vision 待 CI 真机环境接入
+- ✅ GIF 录屏：`lscreen record`（gifski 纯 Rust 编码，Ctrl+C 停止）
 - ✅ CLI 无界面模式
-- ⬜ 录屏 / 长截图（M4）、Wayland / 多屏 / CI（M5）
+- ⬜ MP4 录屏 / 滚动长截图 / 录制 GUI（M4b）、Wayland / 多屏 / CI（M5）
 
 ## 使用
 
@@ -27,6 +28,7 @@ lscreen qr                             # 识别主屏上的二维码，输出到
 lscreen qr -i photo.png                # 识别图片文件中的二维码
 lscreen ocr --region 0,0,800,600      # 识别屏幕区域文字（Linux 需安装 tesseract）
 lscreen ocr -i doc.png --lang chi_sim --lang eng   # 识别图片文字
+lscreen record --region 0,0,800,600 --fps 10 -o demo.gif  # 录屏 GIF，Ctrl+C 停止
 lscreen shot -o out.png                # 无界面截全屏
 lscreen shot --region 100,100,800,600 --clipboard   # 截区域进剪贴板
 ```

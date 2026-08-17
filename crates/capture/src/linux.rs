@@ -151,3 +151,31 @@ pub fn capture_all() -> Result<Vec<Screenshot>> {
             .collect()
     })
 }
+
+pub fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<Screenshot> {
+    with_conn(|conn, screen| {
+        // 裁剪到根窗口范围，避免 GetImage 越界报 BadMatch
+        let (sw, sh) = (
+            screen.width_in_pixels as i32,
+            screen.height_in_pixels as i32,
+        );
+        let x0 = x.clamp(0, sw);
+        let y0 = y.clamp(0, sh);
+        let x1 = (x + w as i32).clamp(x0, sw);
+        let y1 = (y + h as i32).clamp(y0, sh);
+        if x1 - x0 < 1 || y1 - y0 < 1 {
+            return Err(CaptureError("区域超出屏幕范围".into()));
+        }
+        grab(
+            conn,
+            screen,
+            &MonitorInfo {
+                x: x0,
+                y: y0,
+                width: (x1 - x0) as u32,
+                height: (y1 - y0) as u32,
+                primary: false,
+            },
+        )
+    })
+}

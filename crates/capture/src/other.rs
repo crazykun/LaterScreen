@@ -37,3 +37,21 @@ pub fn capture_at(x: i32, y: i32) -> Result<Screenshot> {
 pub fn capture_all() -> Result<Vec<Screenshot>> {
     Monitor::all().map_err(err)?.iter().map(shoot).collect()
 }
+
+pub fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<Screenshot> {
+    // xcap 的 capture_region 是显示器相对坐标；先定位区域左上角所在显示器
+    let monitor = Monitor::from_point(x, y).map_err(err)?;
+    let (mx, my) = (monitor.x().map_err(err)?, monitor.y().map_err(err)?);
+    let rel_x = (x - mx).max(0) as u32;
+    let rel_y = (y - my).max(0) as u32;
+    let img = monitor.capture_region(rel_x, rel_y, w, h).map_err(err)?;
+    let (width, height) = (img.width(), img.height());
+    Ok(Screenshot {
+        rgba: img.into_raw(),
+        width,
+        height,
+        origin: (x, y),
+        scale: monitor.scale_factor().map_err(err)?,
+        is_primary: false,
+    })
+}

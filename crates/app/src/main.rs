@@ -48,6 +48,24 @@ enum Cmd {
         #[arg(long = "lang")]
         languages: Vec<String>,
     },
+    /// 录制屏幕为 GIF（Ctrl+C 或时长到达后停止）
+    Record {
+        /// 录制区域，格式 X,Y,W,H（物理像素）；缺省为整个主屏
+        #[arg(long, value_name = "X,Y,W,H")]
+        region: Option<String>,
+        /// 最长录制时长（秒）
+        #[arg(long, default_value_t = 30.0)]
+        duration: f32,
+        /// 帧率 1-30
+        #[arg(long, default_value_t = 10)]
+        fps: u32,
+        /// 编码质量 1-100
+        #[arg(long, default_value_t = 90)]
+        quality: u8,
+        /// 输出文件路径（.gif）；缺省输出到 ~/Pictures
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
     /// 无界面截屏：立即截取并保存/复制
     Shot {
         /// 截取区域，格式 X,Y,W,H（物理像素）；缺省为整个主屏
@@ -73,6 +91,13 @@ fn main() {
             input,
             languages,
         }) => run_ocr(region, input, languages),
+        Some(Cmd::Record {
+            region,
+            duration,
+            fps,
+            quality,
+            output,
+        }) => run_record(region, duration, fps, quality, output),
         Some(Cmd::Shot {
             region,
             output,
@@ -186,6 +211,59 @@ fn run_shot(
         export::save_png(&rgba, w, h, &path)?;
         println!("{}", path.display());
     }
+    Ok(())
+}
+
+fn run_record(
+    region: Option<String>,
+    duration: f32,
+    fps: u32,
+    quality: u8,
+    output: Option<PathBuf>,
+) -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    // 录制区域：指定值或整个主屏
+    let (x, y, w, h) = match region {
+        Some(s) => {
+            let r = parse_region(&s)?;
+            (
+                r.min.x as i32,
+                r.min.y as i32,
+                r.width() as u32,
+                r.height() as u32,
+            )
+        }
+        None => {
+            let shot = lscreen_capture::capture_primary().map_err(|e| e.to_string())?;
+            (shot.origin.0, shot.origin.1, shot.width, shot.height)
+        }
+    };
+
+    let path = output.unwrap_or_else(|| export::default_save_path().with_extension("gif"));
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = stop.clone();
+        ctrlc::set_handler(move || stop.store(true, Ordering::Relaxed))
+            .map_err(|e| e.to_string())?;
+    }
+
+    eprintln!("录制中 {w}x{h}@{fps}fps，Ctrl+C 停止（最长 {duration}s）…");
+    let frames = lscreen_record::record_gif(
+        || {
+            lscreen_capture::capture_region(x, y, w, h)
+                .map(|s| (s.rgba, s.width, s.height))
+                .map_err(|e| lscreen_record::RecordError(e.to_string()))
+        },
+        &lscreen_record::GifOptions { fps, quality },
+        std::time::Duration::from_secs_f32(duration.max(0.1)),
+        &stop,
+        &path,
+    )
+    .map_err(|e| e.to_string())?;
+    eprintln!("已录制 {frames} 帧");
+    println!("{}", path.display());
     Ok(())
 }
 

@@ -105,7 +105,7 @@ fn parse_tsv(tsv: &str) -> OcrOutput {
     let mut cur_words: Vec<String> = Vec::new();
     let mut cur_confs: Vec<f32> = Vec::new();
 
-    let mut flush = |words: &mut Vec<String>, confs: &mut Vec<f32>, blocks: &mut Vec<TextBlock>| {
+    let flush = |words: &mut Vec<String>, confs: &mut Vec<f32>, blocks: &mut Vec<TextBlock>| {
         if words.is_empty() {
             return;
         }
