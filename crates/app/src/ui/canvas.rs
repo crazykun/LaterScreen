@@ -1,0 +1,689 @@
+//! 画布：背景绘制、选区框选、图元绘制与全部鼠标交互。
+//!
+//! 交互层图元绘制是 core 导出渲染（tiny-skia）的镜像实现，
+//! 几何参数（箭头头长、马赛克格子、笔刷半径）全部取自 Element 方法，两边不漂移。
+
+use eframe::egui;
+use egui::{
+    Align2, Color32, CursorIcon, FontId, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind,
+    TextureHandle, Vec2,
+};
+use lscreen_core::render::mosaic_cells;
+use lscreen_core::{Element, ElementKind, P2, RectF, Tool};
+
+use super::{egui_color, DragOp, SnipApp, Stage, TextEditState, View};
+
+const DIM: Color32 = Color32::from_black_alpha(120);
+const ACCENT: Color32 = Color32::from_rgb(0x21, 0x96, 0xf3);
+const UV_FULL: Rect = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
+/// 命中容差（逻辑点）
+const HIT_TOL_PT: f32 = 4.0;
+/// 选区角点手柄半径（逻辑点）
+const HANDLE_PT: f32 = 5.0;
+
+pub fn show(app: &mut SnipApp, ui: &mut egui::Ui, texture: &TextureHandle) {
+    let rect = ui.max_rect();
+    let view = View {
+        origin: rect.min,
+        scale: app.shot.width as f32 / rect.width().max(1.0),
+    };
+    let response = ui.allocate_rect(rect, Sense::click_and_drag());
+    let painter = ui.painter().clone();
+
+    painter.image(texture.id(), rect, UV_FULL, Color32::WHITE);
+
+    match app.stage {
+        Stage::Selecting => selecting(app, ui, &response, &painter, view, rect),
+        Stage::Editing => editing(app, ui, &response, &painter, view, rect, texture),
+    }
+}
+
+// ---------------------------------------------------------------- Selecting
+
+fn selecting(
+    app: &mut SnipApp,
+    ui: &egui::Ui,
+    response: &Response,
+    painter: &egui::Painter,
+    view: View,
+    screen: Rect,
+) {
+    ui.ctx().output_mut(|o| o.cursor_icon = CursorIcon::Crosshair);
+
+    if response.drag_started() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            app.drag = Some(DragOp::SelectRegion {
+                start: view.to_px(pos),
+            });
+        }
+    }
+
+    let mut current: Option<RectF> = None;
+    if let (Some(DragOp::SelectRegion { start }), Some(pos)) =
+        (&app.drag, response.interact_pointer_pos())
+    {
+        current = Some(RectF::from_points(*start, view.to_px(pos)));
+    }
+
+    match current {
+        Some(r) => {
+            dim_outside(painter, view, screen, r);
+            let rp = view.rect_pt(r);
+            painter.rect_stroke(rp, 0.0, Stroke::new(1.5, ACCENT), StrokeKind::Outside);
+            size_label(painter, rp, r);
+        }
+        None => {
+            painter.rect_filled(screen, 0.0, DIM);
+            painter.text(
+                screen.center(),
+                Align2::CENTER_CENTER,
+                "拖拽选择区域 · 单击全屏 · Esc 退出",
+                FontId::proportional(16.0),
+                Color32::from_white_alpha(200),
+            );
+        }
+    }
+
+    if response.drag_stopped() {
+        if let Some(r) = current {
+            if r.width() >= 4.0 && r.height() >= 4.0 {
+                app.region = r;
+                app.clamp_region();
+                app.stage = Stage::Editing;
+            }
+        }
+        app.drag = None;
+    }
+    if response.clicked() {
+        // 单击（未拖拽）：全屏选区
+        app.region = RectF::from_points(
+            P2::new(0.0, 0.0),
+            P2::new(app.shot.width as f32, app.shot.height as f32),
+        );
+        app.stage = Stage::Editing;
+    }
+}
+
+// ------------------------------------------------------------------ Editing
+
+fn editing(
+    app: &mut SnipApp,
+    ui: &egui::Ui,
+    response: &Response,
+    painter: &egui::Painter,
+    view: View,
+    screen: Rect,
+    texture: &TextureHandle,
+) {
+    let shift = ui.input(|i| i.modifiers.shift);
+    let pointer_px = response
+        .hover_pos()
+        .or_else(|| response.interact_pointer_pos())
+        .map(|p| view.to_px(p));
+
+    // ---- 输入 ----
+    if response.drag_started() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            on_press(app, view, view.to_px(pos), pos, shift);
+        }
+    } else if response.dragged() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            on_drag(app, view.to_px(pos), shift);
+        }
+    }
+    if response.drag_stopped() {
+        on_release(app);
+    }
+    if response.double_clicked() {
+        on_double_click(app, ui.ctx(), pointer_px);
+    }
+
+    // ---- 悬停状态（仅 Select 工具） ----
+    app.hover = None;
+    if app.tool == Tool::Select && app.drag.is_none() {
+        if let Some(p) = pointer_px {
+            app.hover = app.doc.hit_top(p, HIT_TOL_PT * view.scale);
+        }
+    }
+    update_cursor(app, ui, view, pointer_px);
+
+    // ---- 绘制 ----
+    dim_outside(painter, view, screen, app.region);
+    let region_pt = view.rect_pt(app.region);
+    let clipped = painter.with_clip_rect(region_pt.expand(1.0));
+    for e in &app.doc.elements.clone() {
+        draw_element(app, &clipped, view, e, texture);
+    }
+    draw_highlights(app, painter, view);
+
+    painter.rect_stroke(region_pt, 0.0, Stroke::new(1.5, ACCENT), StrokeKind::Outside);
+    for c in app.region.corners() {
+        let p = view.to_pt(c);
+        painter.rect_filled(
+            Rect::from_center_size(p, Vec2::splat(HANDLE_PT * 2.0)),
+            1.0,
+            Color32::WHITE,
+        );
+        painter.rect_stroke(
+            Rect::from_center_size(p, Vec2::splat(HANDLE_PT * 2.0)),
+            1.0,
+            Stroke::new(1.0, ACCENT),
+            StrokeKind::Outside,
+        );
+    }
+    size_label(painter, region_pt, app.region);
+}
+
+/// 命中选区角点：返回 (角点下标, 对角点)。
+fn hit_corner(app: &SnipApp, view: View, pos_pt: Pos2) -> Option<(usize, P2)> {
+    let corners = app.region.corners();
+    for (i, c) in corners.iter().enumerate() {
+        if view.to_pt(*c).distance(pos_pt) <= HANDLE_PT * 1.8 {
+            return Some((i, corners[(i + 2) % 4]));
+        }
+    }
+    None
+}
+
+fn on_press(app: &mut SnipApp, view: View, p: P2, pos_pt: Pos2, shift: bool) {
+    // 1. 选区角点优先
+    if let Some((_, anchor)) = hit_corner(app, view, pos_pt) {
+        app.drag = Some(DragOp::ResizeRegion { anchor });
+        return;
+    }
+    let inside = app.region.contains(p);
+
+    if app.tool == Tool::Select {
+        // 2. 已选中图元的控制点
+        if let Some(id) = app.selected {
+            if let Some(e) = app.doc.get(id) {
+                for (idx, cp) in e.control_points().iter().enumerate() {
+                    if view.to_pt(*cp).distance(pos_pt) <= HANDLE_PT * 1.8 {
+                        app.doc.begin_change();
+                        app.drag = Some(DragOp::ControlPoint { id, idx });
+                        return;
+                    }
+                }
+            }
+        }
+        // 3. 命中图元 → 选中并准备移动
+        if let Some(id) = app.doc.hit_top(p, HIT_TOL_PT * view.scale) {
+            app.selected = Some(id);
+            app.doc.begin_change();
+            app.drag = Some(DragOp::MoveElem { id, last: p });
+            return;
+        }
+        app.selected = None;
+        // 4. 选区内空白 → 移动选区
+        if inside {
+            app.drag = Some(DragOp::MoveRegion { last: p });
+        }
+        return;
+    }
+
+    if !inside {
+        return;
+    }
+    // 5. 绘图工具：新建图元
+    let style = app.style;
+    app.doc.begin_change();
+    let kind = match app.tool {
+        Tool::Rect => ElementKind::Rect {
+            rect: RectF::from_points(p, p),
+        },
+        Tool::Ellipse => ElementKind::Ellipse {
+            rect: RectF::from_points(p, p),
+        },
+        Tool::Arrow => ElementKind::Arrow { from: p, to: p },
+        Tool::Line => ElementKind::Line { from: p, to: p },
+        // 曲线工具 + Shift = 直线
+        Tool::Curve => {
+            if shift {
+                ElementKind::Line { from: p, to: p }
+            } else {
+                ElementKind::Curve { points: vec![p] }
+            }
+        }
+        Tool::Marker => ElementKind::Marker {
+            center: p,
+            number: app.doc.next_marker_number(),
+        },
+        Tool::Mosaic => ElementKind::Mosaic { points: vec![p] },
+        Tool::Eraser => ElementKind::Eraser { points: vec![p] },
+        Tool::Text => {
+            let id = app.doc.add(
+                ElementKind::Text {
+                    pos: p,
+                    content: String::new(),
+                    size: P2::new(0.0, 0.0),
+                },
+                style,
+            );
+            app.text_edit = Some(TextEditState {
+                id,
+                buffer: String::new(),
+                is_new: true,
+            });
+            return;
+        }
+        Tool::Select => unreachable!(),
+    };
+    let id = app.doc.add(kind, style);
+    app.drag = Some(DragOp::Draw { id, start: p });
+}
+
+fn on_drag(app: &mut SnipApp, p: P2, shift: bool) {
+    let Some(op) = &mut app.drag else { return };
+    match op {
+        DragOp::Draw { id, start, .. } => {
+            let (id, start) = (*id, *start);
+            let Some(e) = app.doc.get_mut(id) else { return };
+            match &mut e.kind {
+                ElementKind::Rect { rect } | ElementKind::Ellipse { rect } => {
+                    // Shift：正方形 / 正圆
+                    let p2 = if shift { constrain_square(start, p) } else { p };
+                    *rect = RectF::from_points(start, p2);
+                }
+                ElementKind::Arrow { to, .. } | ElementKind::Line { to, .. } => *to = p,
+                ElementKind::Curve { points }
+                | ElementKind::Mosaic { points }
+                | ElementKind::Eraser { points } => {
+                    if points.last().map_or(true, |l| l.dist(p) > 1.5) {
+                        points.push(p);
+                    }
+                }
+                ElementKind::Marker { center, .. } => *center = p,
+                ElementKind::Text { .. } => {}
+            }
+        }
+        DragOp::MoveElem { id, last } => {
+            let (dx, dy) = (p.x - last.x, p.y - last.y);
+            *last = p;
+            let id = *id;
+            if let Some(e) = app.doc.get_mut(id) {
+                e.translate(dx, dy);
+            }
+        }
+        DragOp::ControlPoint { id, idx } => {
+            let (id, idx) = (*id, *idx);
+            if let Some(e) = app.doc.get_mut(id) {
+                e.set_control_point(idx, p);
+            }
+        }
+        DragOp::MoveRegion { last } => {
+            let (dx, dy) = (p.x - last.x, p.y - last.y);
+            *last = p;
+            app.region = app.region.translate(dx, dy);
+            app.clamp_region();
+        }
+        DragOp::ResizeRegion { anchor } => {
+            app.region = RectF::from_points(*anchor, p);
+            app.clamp_region();
+        }
+        DragOp::SelectRegion { .. } => {}
+    }
+}
+
+fn on_release(app: &mut SnipApp) {
+    if let Some(DragOp::Draw { id, .. }) = app.drag {
+        // 拖拽出的退化图形（没有实际尺寸）直接回滚
+        let degenerate = app.doc.get(id).is_some_and(|e| {
+            let b = e.bounds();
+            match e.kind {
+                ElementKind::Rect { .. }
+                | ElementKind::Ellipse { .. }
+                | ElementKind::Arrow { .. }
+                | ElementKind::Line { .. } => b.width() + b.height() < 3.0,
+                _ => false,
+            }
+        });
+        if degenerate {
+            app.doc.cancel_change();
+        }
+    }
+    app.drag = None;
+}
+
+fn on_double_click(app: &mut SnipApp, ctx: &egui::Context, pointer_px: Option<P2>) {
+    let Some(p) = pointer_px else { return };
+    // Select 工具双击文本 → 进入编辑
+    if app.tool == Tool::Select {
+        if let Some(id) = app.hover.or(app.selected) {
+            if let Some(Element {
+                kind: ElementKind::Text { content, .. },
+                ..
+            }) = app.doc.get(id)
+            {
+                let buffer = content.clone();
+                app.doc.begin_change();
+                app.text_edit = Some(TextEditState {
+                    id,
+                    buffer,
+                    is_new: false,
+                });
+                return;
+            }
+        }
+    }
+    // 其余情况：双击选区内 = 复制并退出
+    if app.region.contains(p) {
+        app.copy_and_exit(ctx);
+    }
+}
+
+fn constrain_square(start: P2, p: P2) -> P2 {
+    let (dx, dy) = (p.x - start.x, p.y - start.y);
+    let side = dx.abs().max(dy.abs());
+    P2::new(
+        start.x + side * dx.signum(),
+        start.y + side * dy.signum(),
+    )
+}
+
+fn update_cursor(app: &SnipApp, ui: &egui::Ui, view: View, pointer_px: Option<P2>) {
+    let Some(p) = pointer_px else { return };
+    let pos_pt = view.to_pt(p);
+    let icon = if hit_corner(app, view, pos_pt).is_some() {
+        CursorIcon::Grab
+    } else if app.tool == Tool::Select {
+        if app.hover.is_some() {
+            CursorIcon::Move
+        } else if app.region.contains(p) {
+            CursorIcon::Grab
+        } else {
+            CursorIcon::Default
+        }
+    } else if app.tool == Tool::Text {
+        CursorIcon::Text
+    } else if app.region.contains(p) {
+        CursorIcon::Crosshair
+    } else {
+        CursorIcon::Default
+    };
+    ui.ctx().output_mut(|o| o.cursor_icon = icon);
+}
+
+// ------------------------------------------------------------------- 绘制
+
+fn dim_outside(painter: &egui::Painter, view: View, screen: Rect, region: RectF) {
+    let r = view.rect_pt(region);
+    let top = Rect::from_min_max(screen.min, Pos2::new(screen.max.x, r.min.y));
+    let bottom = Rect::from_min_max(Pos2::new(screen.min.x, r.max.y), screen.max);
+    let left = Rect::from_min_max(Pos2::new(screen.min.x, r.min.y), Pos2::new(r.min.x, r.max.y));
+    let right = Rect::from_min_max(Pos2::new(r.max.x, r.min.y), Pos2::new(screen.max.x, r.max.y));
+    for part in [top, bottom, left, right] {
+        if part.width() > 0.0 && part.height() > 0.0 {
+            painter.rect_filled(part, 0.0, DIM);
+        }
+    }
+}
+
+fn size_label(painter: &egui::Painter, region_pt: Rect, region: RectF) {
+    let text = format!("{} × {}", region.width().round(), region.height().round());
+    let pos = Pos2::new(region_pt.min.x, (region_pt.min.y - 22.0).max(4.0));
+    let galley = painter.layout_no_wrap(text, FontId::proportional(13.0), Color32::WHITE);
+    let bg = Rect::from_min_size(pos, galley.size() + Vec2::new(10.0, 6.0));
+    painter.rect_filled(bg, 3.0, Color32::from_black_alpha(180));
+    painter.galley(pos + Vec2::new(5.0, 3.0), galley, Color32::WHITE);
+}
+
+fn draw_element(
+    app: &mut SnipApp,
+    painter: &egui::Painter,
+    view: View,
+    e: &Element,
+    texture: &TextureHandle,
+) {
+    let color = egui_color(e.style.color);
+    let stroke = Stroke::new(view.len_pt(e.style.width), color);
+
+    match &e.kind {
+        ElementKind::Rect { rect } => {
+            painter.rect_stroke(view.rect_pt(*rect), 0.0, stroke, StrokeKind::Middle);
+        }
+        ElementKind::Ellipse { rect } => {
+            let r = view.rect_pt(*rect);
+            painter.add(egui::epaint::EllipseShape {
+                center: r.center(),
+                radius: r.size() / 2.0,
+                fill: Color32::TRANSPARENT,
+                stroke,
+                angle: 0.0,
+            });
+        }
+        ElementKind::Line { from, to } => {
+            painter.line_segment([view.to_pt(*from), view.to_pt(*to)], stroke);
+        }
+        ElementKind::Arrow { from, to } => {
+            draw_arrow(painter, view, *from, *to, e.style.width, color, stroke);
+        }
+        ElementKind::Curve { points } => {
+            let pts: Vec<Pos2> = points.iter().map(|p| view.to_pt(*p)).collect();
+            if pts.len() == 1 {
+                painter.circle_filled(pts[0], stroke.width / 2.0, color);
+            } else {
+                painter.add(Shape::line(pts, stroke));
+            }
+        }
+        ElementKind::Marker { center, number } => {
+            let c = view.to_pt(*center);
+            painter.circle_filled(c, view.len_pt(e.marker_radius()), color);
+            painter.text(
+                c,
+                Align2::CENTER_CENTER,
+                number.to_string(),
+                FontId::proportional(view.len_pt(e.style.font_size)),
+                Color32::WHITE,
+            );
+        }
+        ElementKind::Text { pos, content, .. } => {
+            // 编辑中的文本由编辑窗口呈现，避免重影
+            if app.text_edit.as_ref().is_some_and(|t| t.id == e.id) {
+                return;
+            }
+            painter.text(
+                view.to_pt(*pos),
+                Align2::LEFT_TOP,
+                content,
+                FontId::proportional(view.len_pt(e.style.font_size)),
+                color,
+            );
+        }
+        ElementKind::Mosaic { points } => {
+            let (n_cached, cells) = app
+                .mosaic_cache
+                .entry(e.id)
+                .or_insert_with(|| (0, Vec::new()));
+            if *n_cached != points.len() {
+                *cells = mosaic_cells(
+                    &app.shot.rgba,
+                    app.shot.width,
+                    app.shot.height,
+                    points,
+                    e.mosaic_brush(),
+                    e.mosaic_cell(),
+                );
+                *n_cached = points.len();
+            }
+            for (x, y, size, c) in cells.iter() {
+                let min = view.to_pt(P2::new(*x, *y));
+                let cell = Rect::from_min_size(min, Vec2::splat(view.len_pt(*size)));
+                painter.rect_filled(cell, 0.0, egui_color(*c));
+            }
+        }
+        ElementKind::Eraser { points } => {
+            // 用原图纹理沿笔迹盖章，近似导出层的「原图回贴」
+            let brush_pt = view.len_pt(e.eraser_brush());
+            let (w, h) = (app.shot.width as f32, app.shot.height as f32);
+            let stamp = |p: P2| {
+                let center = view.to_pt(p);
+                let rect = Rect::from_center_size(center, Vec2::splat(brush_pt * 2.0));
+                let uv = Rect::from_min_max(
+                    Pos2::new(
+                        (p.x - e.eraser_brush()) / w,
+                        (p.y - e.eraser_brush()) / h,
+                    ),
+                    Pos2::new(
+                        (p.x + e.eraser_brush()) / w,
+                        (p.y + e.eraser_brush()) / h,
+                    ),
+                );
+                painter.image(texture.id(), rect, uv, Color32::WHITE);
+            };
+            match points.as_slice() {
+                [] => {}
+                [p] => stamp(*p),
+                pts => {
+                    let step = e.eraser_brush() * 0.6;
+                    for seg in pts.windows(2) {
+                        let (a, b) = (seg[0], seg[1]);
+                        let n = (a.dist(b) / step).ceil().max(1.0) as i32;
+                        for i in 0..=n {
+                            let t = i as f32 / n as f32;
+                            stamp(P2::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn draw_arrow(
+    painter: &egui::Painter,
+    view: View,
+    from: P2,
+    to: P2,
+    width_px: f32,
+    color: Color32,
+    stroke: Stroke,
+) {
+    let len = from.dist(to);
+    if len < 1.0 {
+        return;
+    }
+    let head = (width_px * 4.5).clamp(10.0, len * 0.5);
+    let (ux, uy) = ((to.x - from.x) / len, (to.y - from.y) / len);
+    let base = P2::new(to.x - ux * head, to.y - uy * head);
+    let (px, py) = (-uy, ux);
+    let half = head * 0.5;
+    painter.line_segment([view.to_pt(from), view.to_pt(base)], stroke);
+    painter.add(Shape::convex_polygon(
+        vec![
+            view.to_pt(to),
+            view.to_pt(P2::new(base.x + px * half, base.y + py * half)),
+            view.to_pt(P2::new(base.x - px * half, base.y - py * half)),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+}
+
+fn draw_highlights(app: &SnipApp, painter: &egui::Painter, view: View) {
+    if app.tool != Tool::Select {
+        return;
+    }
+    if let Some(id) = app.hover.filter(|h| Some(*h) != app.selected) {
+        if let Some(e) = app.doc.get(id) {
+            painter.rect_stroke(
+                view.rect_pt(e.bounds()).expand(4.0),
+                2.0,
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(0x21, 0x96, 0xf3, 140)),
+                StrokeKind::Outside,
+            );
+        }
+    }
+    if let Some(e) = app.selected.and_then(|id| app.doc.get(id)) {
+        painter.rect_stroke(
+            view.rect_pt(e.bounds()).expand(4.0),
+            2.0,
+            Stroke::new(1.5, ACCENT),
+            StrokeKind::Outside,
+        );
+        for cp in e.control_points() {
+            let p = view.to_pt(cp);
+            painter.circle_filled(p, HANDLE_PT, Color32::WHITE);
+            painter.circle_stroke(p, HANDLE_PT, Stroke::new(1.5, ACCENT));
+        }
+    }
+}
+
+// -------------------------------------------------------------- 文本编辑器
+
+pub fn show_text_editor(app: &mut SnipApp, ctx: &egui::Context) {
+    let Some(edit) = &mut app.text_edit else {
+        return;
+    };
+    let Some(elem) = app.doc.get(edit.id) else {
+        app.text_edit = None;
+        return;
+    };
+    let (pos, style) = match &elem.kind {
+        ElementKind::Text { pos, .. } => (*pos, elem.style),
+        _ => {
+            app.text_edit = None;
+            return;
+        }
+    };
+    let screen = ctx.content_rect();
+    let view = View {
+        origin: screen.min,
+        scale: app.shot.width as f32 / screen.width().max(1.0),
+    };
+    let anchor = view.to_pt(pos);
+    let font_pt = view.len_pt(style.font_size);
+
+    let mut commit = false;
+    let mut cancel = false;
+    egui::Area::new(egui::Id::new("text-editor"))
+        .fixed_pos(anchor)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                let te = egui::TextEdit::multiline(&mut edit.buffer)
+                    .font(FontId::proportional(font_pt))
+                    .text_color(egui_color(style.color))
+                    .desired_rows(1)
+                    .desired_width(320.0)
+                    .hint_text("输入文本…");
+                let r = ui.add(te);
+                r.request_focus();
+                ui.horizontal(|ui| {
+                    if ui.button("确定 (Ctrl+Enter)").clicked()
+                        || ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter))
+                    {
+                        commit = true;
+                    }
+                    if ui.button("取消").clicked()
+                        || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                    {
+                        cancel = true;
+                    }
+                });
+            });
+        });
+
+    if commit {
+        let edit = app.text_edit.take().unwrap();
+        let content = edit.buffer.trim_end().to_string();
+        if content.is_empty() {
+            if edit.is_new {
+                app.doc.cancel_change();
+            } else {
+                // 既有文本清空 = 删除
+                app.doc.remove(edit.id);
+            }
+        } else {
+            let (w, h) = app.renderer.measure_text(&content, style.font_size);
+            if let Some(e) = app.doc.get_mut(edit.id) {
+                if let ElementKind::Text { content: c, size, .. } = &mut e.kind {
+                    *c = content;
+                    *size = P2::new(w.max(10.0), h.max(style.font_size));
+                }
+            }
+        }
+    } else if cancel {
+        let edit = app.text_edit.take().unwrap();
+        let _ = edit;
+        app.doc.cancel_change();
+    }
+}

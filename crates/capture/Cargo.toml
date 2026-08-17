@@ -1,0 +1,11 @@
+[package]
+name = "lscreen-capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["randr"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+xcap = "0.9"

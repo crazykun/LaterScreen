@@ -1,0 +1,13 @@
+[package]
+name = "lscreen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+arboard = { version = "3", default-features = false, features = ["image-data"] }
+clap = { version = "4", features = ["derive"] }
+eframe = { version = "0.35", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+lscreen-capture = { version = "0.1.0", path = "../capture" }
+lscreen-core = { version = "0.1.0", path = "../core" }
