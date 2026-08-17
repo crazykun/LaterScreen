@@ -54,12 +54,51 @@ pub fn default_save_path() -> PathBuf {
 }
 
 fn timestamp() -> String {
-    // 避免引入 chrono：用 UNIX 秒数换算本地无关的紧凑时间戳
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("{secs}")
+        .unwrap_or(0) as i64;
+    let (y, mo, d, h, mi, s) = local_civil(secs);
+    format!("{y:04}{mo:02}{d:02}_{h:02}{mi:02}{s:02}")
+}
+
+/// unix 秒 → 本地时间 (年,月,日,时,分,秒)。
+/// unix 平台走 libc localtime_r；其余平台退化为 UTC（civil-from-days 算法）。
+fn local_civil(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
+    #[cfg(unix)]
+    {
+        let t = secs as libc::time_t;
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        if !unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+            return (
+                tm.tm_year as i64 + 1900,
+                tm.tm_mon as u32 + 1,
+                tm.tm_mday as u32,
+                tm.tm_hour as u32,
+                tm.tm_min as u32,
+                tm.tm_sec as u32,
+            );
+        }
+    }
+    utc_civil(secs)
+}
+
+/// UTC 的 civil-from-days（Howard Hinnant 算法）。
+fn utc_civil(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
+    let days = secs.div_euclid(86400);
+    let rem = secs.rem_euclid(86400);
+    let (h, mi, s) = (rem / 3600, rem % 3600 / 60, rem % 60);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m as u32, d as u32, h as u32, mi as u32, s as u32)
 }
 
 pub fn save_png(rgba: &[u8], w: u32, h: u32, path: &PathBuf) -> Result<(), String> {
@@ -69,24 +108,108 @@ pub fn save_png(rgba: &[u8], w: u32, h: u32, path: &PathBuf) -> Result<(), Strin
 }
 
 pub fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
-    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-    cb.set_text(text).map_err(|e| e.to_string())?;
     #[cfg(target_os = "linux")]
-    std::thread::sleep(std::time::Duration::from_millis(150));
-    Ok(())
+    {
+        clipd_spawn(&format!("txt\n{text}").into_bytes())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+        cb.set_text(text).map_err(|e| e.to_string())
+    }
 }
 
 pub fn copy_to_clipboard(rgba: &[u8], w: u32, h: u32) -> Result<(), String> {
-    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-    cb.set_image(arboard::ImageData {
-        width: w as usize,
-        height: h as usize,
-        bytes: Cow::Borrowed(rgba),
-    })
-    .map_err(|e| e.to_string())?;
-    // X11 下剪贴板数据随进程退出丢失（除非有剪贴板管理器）。
-    // 短暂驻留给管理器接管的时间窗口；彻底方案（fork 常驻直至被覆盖）在 M5。
     #[cfg(target_os = "linux")]
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    {
+        let mut payload = format!("img {w} {h}\n").into_bytes();
+        payload.extend_from_slice(rgba);
+        clipd_spawn(&payload)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+        cb.set_image(arboard::ImageData {
+            width: w as usize,
+            height: h as usize,
+            bytes: Cow::Borrowed(rgba),
+        })
+        .map_err(|e| e.to_string())
+    }
+}
+
+/// X11 剪贴板数据随所有者进程退出而消失。方案：用自身可执行文件拉起一个
+/// 分离的守护子进程持有剪贴板（arboard wait()），内容被其他应用覆盖后自动退出。
+/// 主进程写完数据立即返回，保持「用完即走」。
+#[cfg(target_os = "linux")]
+fn clipd_spawn(payload: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut child = Command::new(exe)
+        .arg(CLIPD_ARG)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("启动剪贴板守护进程失败: {e}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "无法写入守护进程".to_string())?
+        .write_all(payload)
+        .map_err(|e| e.to_string())?;
+    // 不 wait()：子进程被 init 收养，持有剪贴板直到被覆盖
     Ok(())
+}
+
+/// 隐藏子命令名：`lscreen __clipd`
+pub const CLIPD_ARG: &str = "__clipd";
+
+/// 守护进程入口：stdin 协议为一行头部 + 数据体。
+/// `txt\n<utf8>` 或 `img W H\n<raw rgba>`
+#[cfg(target_os = "linux")]
+pub fn clipd_main() -> Result<(), String> {
+    use arboard::SetExtLinux;
+    use std::io::Read;
+
+    let mut input = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut input)
+        .map_err(|e| e.to_string())?;
+    let nl = input
+        .iter()
+        .position(|&b| b == b'\n')
+        .ok_or_else(|| "缺少协议头".to_string())?;
+    let header = String::from_utf8_lossy(&input[..nl]).to_string();
+    let body = &input[nl + 1..];
+
+    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    if header == "txt" {
+        let text = String::from_utf8_lossy(body).to_string();
+        cb.set().wait().text(text).map_err(|e| e.to_string())
+    } else if let Some(dims) = header.strip_prefix("img ") {
+        let mut it = dims.split_whitespace();
+        let (w, h): (usize, usize) = match (
+            it.next().and_then(|v| v.parse().ok()),
+            it.next().and_then(|v| v.parse().ok()),
+        ) {
+            (Some(w), Some(h)) => (w, h),
+            _ => return Err("协议头尺寸无效".into()),
+        };
+        if body.len() != w * h * 4 {
+            return Err("图像数据长度不符".into());
+        }
+        cb.set()
+            .wait()
+            .image(arboard::ImageData {
+                width: w,
+                height: h,
+                bytes: Cow::Borrowed(body),
+            })
+            .map_err(|e| e.to_string())
+    } else {
+        Err(format!("未知协议头: {header}"))
+    }
 }

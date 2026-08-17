@@ -81,6 +81,17 @@ enum Cmd {
 }
 
 fn main() {
+    // 剪贴板守护进程（内部机制，见 export::clipd_main）：在 clap 之前拦截，
+    // 不出现在 --help 中
+    #[cfg(target_os = "linux")]
+    if std::env::args().nth(1).as_deref() == Some(export::CLIPD_ARG) {
+        if let Err(e) = export::clipd_main() {
+            eprintln!("lscreen clipd: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let cli = Cli::parse();
     let result = match cli.cmd {
         None | Some(Cmd::Gui) => run_gui(ui::Mode::Snip),
@@ -111,11 +122,30 @@ fn main() {
 }
 
 fn run_gui(mode: ui::Mode) -> Result<(), String> {
-    // 先截屏再开窗口，避免把自己截进去
-    let shot = lscreen_capture::capture_primary().map_err(|e| e.to_string())?;
+    // 先截屏再开窗口，避免把自己截进去。
+    // 多显示器：截鼠标所在屏，并把覆盖层窗口钉到同一块屏（指针查询不可用时回退主屏）。
+    let shot = match lscreen_capture::cursor_position() {
+        Some((x, y)) => lscreen_capture::capture_at(x, y)
+            .or_else(|_| lscreen_capture::capture_primary()),
+        None => lscreen_capture::capture_primary(),
+    }
+    .map_err(|e| e.to_string())?;
     let font = font::load_system_font();
 
+    // origin 为物理像素；X11 下 winit 逻辑坐标与物理一致（scale=1），
+    // 其余平台按截屏缩放比换算
+    let scale = if shot.scale > 0.0 { shot.scale } else { 1.0 };
+    let pos = eframe::egui::Pos2::new(
+        shot.origin.0 as f32 / scale,
+        shot.origin.1 as f32 / scale,
+    );
+    let size = eframe::egui::Vec2::new(
+        shot.width as f32 / scale,
+        shot.height as f32 / scale,
+    );
     let viewport = eframe::egui::ViewportBuilder::default()
+        .with_position(pos)
+        .with_inner_size(size)
         .with_fullscreen(true)
         .with_decorations(false)
         .with_always_on_top();

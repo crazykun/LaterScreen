@@ -75,3 +75,8 @@ pub fn capture_all() -> Result<Vec<Screenshot>> {
 pub fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<Screenshot> {
     platform::capture_region(x, y, w, h)
 }
+
+/// 当前鼠标指针的虚拟桌面坐标。查询失败（平台未实现/无指针设备）返回 None。
+pub fn cursor_position() -> Option<(i32, i32)> {
+    platform::cursor_position()
+}

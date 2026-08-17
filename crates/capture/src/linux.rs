@@ -152,6 +152,18 @@ pub fn capture_all() -> Result<Vec<Screenshot>> {
     })
 }
 
+pub fn cursor_position() -> Option<(i32, i32)> {
+    with_conn(|conn, screen| {
+        let reply = conn
+            .query_pointer(screen.root)
+            .map_err(err)?
+            .reply()
+            .map_err(err)?;
+        Ok((reply.root_x as i32, reply.root_y as i32))
+    })
+    .ok()
+}
+
 pub fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<Screenshot> {
     with_conn(|conn, screen| {
         // 裁剪到根窗口范围，避免 GetImage 越界报 BadMatch

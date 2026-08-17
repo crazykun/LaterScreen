@@ -38,6 +38,12 @@ pub fn capture_all() -> Result<Vec<Screenshot>> {
     Monitor::all().map_err(err)?.iter().map(shoot).collect()
 }
 
+/// Win/mac：xcap 未暴露指针查询；返回 None 时上层回退主显示器。
+/// TODO(M5): windows-rs GetCursorPos / objc2 NSEvent.mouseLocation
+pub fn cursor_position() -> Option<(i32, i32)> {
+    None
+}
+
 pub fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<Screenshot> {
     // xcap 的 capture_region 是显示器相对坐标；先定位区域左上角所在显示器
     let monitor = Monitor::from_point(x, y).map_err(err)?;

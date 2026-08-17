@@ -91,6 +91,8 @@ pub struct SnipApp {
     pub cursor_px: Option<P2>,
     /// 结果面板（二维码/OCR 共用）：(标题, 文本条目)
     pub results_panel: Option<(String, Vec<String>)>,
+    /// 后台识别任务（OCR/QR 在线程中跑，避免 UI 假死）
+    scan_job: Option<std::sync::mpsc::Receiver<ScanOutcome>>,
     toast: Option<(String, f64)>,
     /// 复制/保存出错时置 false 阻止退出
     close_requested: bool,
@@ -123,6 +125,7 @@ impl SnipApp {
             mosaic_cache: HashMap::new(),
             cursor_px: None,
             results_panel: None,
+            scan_job: None,
             toast: None,
             close_requested: false,
         }
@@ -286,27 +289,37 @@ impl SnipApp {
         }
     }
 
-    /// 扫描当前选区内的二维码，结果放入面板。
+    /// 扫描当前选区内的二维码（后台线程）。
     pub fn scan_qr(&mut self, ctx: &egui::Context) {
+        if self.scan_job.is_some() {
+            self.toast(ctx, "识别进行中…");
+            return;
+        }
         let (rgba, w, h) = export::crop_rgba(
             &self.shot.rgba,
             self.shot.width,
             self.shot.height,
             self.region,
         );
-        let found = lscreen_core::qr::detect(&rgba, w, h);
-        if found.is_empty() {
-            self.toast(ctx, "选区内未识别到二维码");
-        } else {
-            self.results_panel = Some((
-                "二维码识别结果".into(),
-                found.into_iter().map(|r| r.content).collect(),
-            ));
-        }
+        self.spawn_scan(ctx, move || {
+            let found = lscreen_core::qr::detect(&rgba, w, h);
+            if found.is_empty() {
+                ScanOutcome::Empty("选区内未识别到二维码".into())
+            } else {
+                ScanOutcome::Ok(
+                    "二维码识别结果".into(),
+                    found.into_iter().map(|r| r.content).collect(),
+                )
+            }
+        });
     }
 
-    /// 识别当前选区内的文字。同步调用，大图会短暂卡顿（异步化排在 M5）。
+    /// 识别当前选区内的文字（后台线程，tesseract 大图可达秒级）。
     pub fn scan_ocr(&mut self, ctx: &egui::Context) {
+        if self.scan_job.is_some() {
+            self.toast(ctx, "识别进行中…");
+            return;
+        }
         let engine = lscreen_ocr::default_engine(&[]);
         if !engine.available() {
             self.toast(ctx, engine.describe());
@@ -318,12 +331,48 @@ impl SnipApp {
             self.shot.height,
             self.region,
         );
-        match engine.recognize(&rgba, w, h) {
+        self.spawn_scan(ctx, move || match engine.recognize(&rgba, w, h) {
             Ok(out) if !out.is_empty() => {
-                self.results_panel = Some(("文字识别结果".into(), vec![out.plain_text()]));
+                ScanOutcome::Ok("文字识别结果".into(), vec![out.plain_text()])
             }
-            Ok(_) => self.toast(ctx, "选区内未识别到文字"),
-            Err(e) => self.toast(ctx, format!("识别失败: {e}")),
+            Ok(_) => ScanOutcome::Empty("选区内未识别到文字".into()),
+            Err(e) => ScanOutcome::Empty(format!("识别失败: {e}")),
+        });
+    }
+
+    fn spawn_scan(
+        &mut self,
+        ctx: &egui::Context,
+        job: impl FnOnce() -> ScanOutcome + Send + 'static,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.scan_job = Some(rx);
+        self.toast(ctx, "识别中…");
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(job());
+            repaint.request_repaint();
+        });
+    }
+
+    /// 每帧轮询后台识别结果。
+    fn poll_scan(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.scan_job else { return };
+        match rx.try_recv() {
+            Ok(ScanOutcome::Ok(title, items)) => {
+                self.scan_job = None;
+                self.toast = None;
+                self.results_panel = Some((title, items));
+            }
+            Ok(ScanOutcome::Empty(msg)) => {
+                self.scan_job = None;
+                self.toast(ctx, msg);
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.scan_job = None;
+                self.toast(ctx, "识别线程异常退出");
+            }
         }
     }
 
@@ -388,6 +437,7 @@ impl eframe::App for SnipApp {
             return;
         }
         self.handle_keys(&ctx);
+        self.poll_scan(&ctx);
 
         let texture = self.texture(&ctx);
         canvas::show(self, ui, &texture);
@@ -399,6 +449,14 @@ impl eframe::App for SnipApp {
         self.show_results(&ctx);
         self.show_toast(&ctx);
     }
+}
+
+/// 后台识别任务的结果。
+enum ScanOutcome {
+    /// (面板标题, 条目)
+    Ok(String, Vec<String>),
+    /// 无结果或失败，toast 提示
+    Empty(String),
 }
 
 /// 取色输出格式。

@@ -14,3 +14,6 @@ lscreen-capture = { version = "0.1.0", path = "../capture" }
 lscreen-core = { version = "0.1.0", path = "../core" }
 lscreen-ocr = { version = "0.1.0", path = "../ocr" }
 lscreen-record = { version = "0.1.0", path = "../record" }
+
+[target."cfg(unix)".dependencies]
+libc = "0.2"

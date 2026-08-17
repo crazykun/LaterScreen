@@ -53,7 +53,8 @@ impl OcrOutput {
 }
 
 /// 文字识别引擎抽象。实现方接收 RGBA 像素。
-pub trait TextRecognizer {
+/// `Send` 约束：允许调用方把识别任务移入后台线程。
+pub trait TextRecognizer: Send {
     /// 引擎是否可用（依赖是否就绪）。不可用时 `recognize` 返回引导性错误。
     fn available(&self) -> bool;
 

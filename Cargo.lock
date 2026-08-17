@@ -2038,6 +2038,7 @@ dependencies = [
  "ctrlc",
  "eframe",
  "image",
+ "libc",
  "lscreen-capture",
  "lscreen-core",
  "lscreen-ocr",
