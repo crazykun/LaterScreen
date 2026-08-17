@@ -11,3 +11,4 @@ eframe = { version = "0.35", default-features = false, features = ["glow", "defa
 image = { version = "0.25", default-features = false, features = ["png"] }
 lscreen-capture = { version = "0.1.0", path = "../capture" }
 lscreen-core = { version = "0.1.0", path = "../core" }
+lscreen-ocr = { version = "0.1.0", path = "../ocr" }

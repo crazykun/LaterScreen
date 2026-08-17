@@ -89,8 +89,8 @@ pub struct SnipApp {
     pub mosaic_cache: HashMap<u64, (usize, Vec<(f32, f32, f32, Rgba)>)>,
     /// 指针当前所在的图像像素坐标（取色用）
     pub cursor_px: Option<P2>,
-    /// 二维码识别结果窗口内容；None 表示未打开
-    pub qr_results: Option<Vec<String>>,
+    /// 结果面板（二维码/OCR 共用）：(标题, 文本条目)
+    pub results_panel: Option<(String, Vec<String>)>,
     toast: Option<(String, f64)>,
     /// 复制/保存出错时置 false 阻止退出
     close_requested: bool,
@@ -122,7 +122,7 @@ impl SnipApp {
             text_edit: None,
             mosaic_cache: HashMap::new(),
             cursor_px: None,
-            qr_results: None,
+            results_panel: None,
             toast: None,
             close_requested: false,
         }
@@ -276,8 +276,8 @@ impl SnipApp {
             }
         }
         if esc {
-            if self.qr_results.is_some() {
-                self.qr_results = None;
+            if self.results_panel.is_some() {
+                self.results_panel = None;
             } else if self.selected.is_some() {
                 self.selected = None;
             } else {
@@ -286,7 +286,7 @@ impl SnipApp {
         }
     }
 
-    /// 扫描当前选区内的二维码，结果放入弹窗。
+    /// 扫描当前选区内的二维码，结果放入面板。
     pub fn scan_qr(&mut self, ctx: &egui::Context) {
         let (rgba, w, h) = export::crop_rgba(
             &self.shot.rgba,
@@ -298,41 +298,64 @@ impl SnipApp {
         if found.is_empty() {
             self.toast(ctx, "选区内未识别到二维码");
         } else {
-            self.qr_results = Some(found.into_iter().map(|r| r.content).collect());
+            self.results_panel = Some((
+                "二维码识别结果".into(),
+                found.into_iter().map(|r| r.content).collect(),
+            ));
         }
     }
 
-    fn show_qr_results(&mut self, ctx: &egui::Context) {
-        let Some(results) = self.qr_results.clone() else {
+    /// 识别当前选区内的文字。同步调用，大图会短暂卡顿（异步化排在 M5）。
+    pub fn scan_ocr(&mut self, ctx: &egui::Context) {
+        let engine = lscreen_ocr::default_engine(&[]);
+        if !engine.available() {
+            self.toast(ctx, engine.describe());
+            return;
+        }
+        let (rgba, w, h) = export::crop_rgba(
+            &self.shot.rgba,
+            self.shot.width,
+            self.shot.height,
+            self.region,
+        );
+        match engine.recognize(&rgba, w, h) {
+            Ok(out) if !out.is_empty() => {
+                self.results_panel = Some(("文字识别结果".into(), vec![out.plain_text()]));
+            }
+            Ok(_) => self.toast(ctx, "选区内未识别到文字"),
+            Err(e) => self.toast(ctx, format!("识别失败: {e}")),
+        }
+    }
+
+    fn show_results(&mut self, ctx: &egui::Context) {
+        let Some((title, items)) = self.results_panel.clone() else {
             return;
         };
         let mut open = true;
-        egui::Window::new("二维码识别结果")
+        egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.set_max_width(420.0);
-                for (i, content) in results.iter().enumerate() {
-                    if i > 0 {
-                        ui.separator();
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(truncate(content, 120)).monospace(),
-                        );
-                    });
-                    if ui.button("复制内容").clicked() {
-                        match export::copy_text_to_clipboard(content) {
-                            Ok(()) => self.toast(ctx, "已复制二维码内容"),
-                            Err(e) => self.toast(ctx, format!("复制失败: {e}")),
+                ui.set_max_width(460.0);
+                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                    for (i, content) in items.iter().enumerate() {
+                        if i > 0 {
+                            ui.separator();
+                        }
+                        ui.label(egui::RichText::new(truncate(content, 600)).monospace());
+                        if ui.button("复制内容").clicked() {
+                            match export::copy_text_to_clipboard(content) {
+                                Ok(()) => self.toast(ctx, "已复制"),
+                                Err(e) => self.toast(ctx, format!("复制失败: {e}")),
+                            }
                         }
                     }
-                }
+                });
             });
         if !open {
-            self.qr_results = None;
+            self.results_panel = None;
         }
     }
 
@@ -373,7 +396,7 @@ impl eframe::App for SnipApp {
             toolbar::show(self, &ctx);
         }
         canvas::show_text_editor(self, &ctx);
-        self.show_qr_results(&ctx);
+        self.show_results(&ctx);
         self.show_toast(&ctx);
     }
 }

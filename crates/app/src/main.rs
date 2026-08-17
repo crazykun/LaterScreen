@@ -36,6 +36,18 @@ enum Cmd {
         #[arg(short, long)]
         input: Option<PathBuf>,
     },
+    /// 文字识别（OCR）：从屏幕区域或图片文件，结果输出到 stdout
+    Ocr {
+        /// 识别区域，格式 X,Y,W,H（物理像素）；缺省为整个主屏
+        #[arg(long, value_name = "X,Y,W,H")]
+        region: Option<String>,
+        /// 从图片文件识别（PNG/JPEG），指定时忽略 --region
+        #[arg(short, long)]
+        input: Option<PathBuf>,
+        /// 识别语言（可多次指定），如 --lang chi_sim --lang eng
+        #[arg(long = "lang")]
+        languages: Vec<String>,
+    },
     /// 无界面截屏：立即截取并保存/复制
     Shot {
         /// 截取区域，格式 X,Y,W,H（物理像素）；缺省为整个主屏
@@ -56,6 +68,11 @@ fn main() {
         None | Some(Cmd::Gui) => run_gui(ui::Mode::Snip),
         Some(Cmd::Pick) => run_gui(ui::Mode::Pick),
         Some(Cmd::Qr { region, input }) => run_qr(region, input),
+        Some(Cmd::Ocr {
+            region,
+            input,
+            languages,
+        }) => run_ocr(region, input, languages),
         Some(Cmd::Shot {
             region,
             output,
@@ -89,26 +106,34 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-fn run_qr(region: Option<String>, input: Option<PathBuf>) -> Result<(), String> {
-    let (rgba, w, h) = match input {
+/// 无头模式的图像来源：文件优先，否则截屏（可选区域裁剪）。
+fn acquire_image(
+    region: Option<String>,
+    input: Option<PathBuf>,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    match input {
         Some(path) => {
             let img = image::open(&path)
                 .map_err(|e| format!("无法读取 {}: {e}", path.display()))?
                 .into_rgba8();
             let (w, h) = (img.width(), img.height());
-            (img.into_raw(), w, h)
+            Ok((img.into_raw(), w, h))
         }
         None => {
             let shot = lscreen_capture::capture_primary().map_err(|e| e.to_string())?;
             match region {
                 Some(s) => {
                     let r = parse_region(&s)?;
-                    export::crop_rgba(&shot.rgba, shot.width, shot.height, r)
+                    Ok(export::crop_rgba(&shot.rgba, shot.width, shot.height, r))
                 }
-                None => (shot.rgba, shot.width, shot.height),
+                None => Ok((shot.rgba, shot.width, shot.height)),
             }
         }
-    };
+    }
+}
+
+fn run_qr(region: Option<String>, input: Option<PathBuf>) -> Result<(), String> {
+    let (rgba, w, h) = acquire_image(region, input)?;
     let found = lscreen_core::qr::detect(&rgba, w, h);
     if found.is_empty() {
         return Err("未识别到二维码".into());
@@ -116,6 +141,24 @@ fn run_qr(region: Option<String>, input: Option<PathBuf>) -> Result<(), String> 
     for r in found {
         println!("{}", r.content);
     }
+    Ok(())
+}
+
+fn run_ocr(
+    region: Option<String>,
+    input: Option<PathBuf>,
+    languages: Vec<String>,
+) -> Result<(), String> {
+    let engine = lscreen_ocr::default_engine(&languages);
+    if !engine.available() {
+        return Err(engine.describe());
+    }
+    let (rgba, w, h) = acquire_image(region, input)?;
+    let out = engine.recognize(&rgba, w, h).map_err(|e| e.to_string())?;
+    if out.is_empty() {
+        return Err("未识别到文字".into());
+    }
+    println!("{}", out.plain_text());
     Ok(())
 }
 

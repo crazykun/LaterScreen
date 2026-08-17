@@ -1932,6 +1932,7 @@ dependencies = [
  "image",
  "lscreen-capture",
  "lscreen-core",
+ "lscreen-ocr",
 ]
 
 [[package]]
@@ -1951,6 +1952,13 @@ dependencies = [
  "qrcode",
  "rqrr",
  "tiny-skia",
+]
+
+[[package]]
+name = "lscreen-ocr"
+version = "0.1.0"
+dependencies = [
+ "image",
 ]
 
 [[package]]
