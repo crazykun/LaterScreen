@@ -5,6 +5,7 @@ pub mod color;
 pub mod geom;
 pub mod history;
 pub mod model;
+pub mod qr;
 pub mod render;
 
 pub use geom::{P2, RectF};

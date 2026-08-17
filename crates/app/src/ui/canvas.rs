@@ -32,10 +32,148 @@ pub fn show(app: &mut SnipApp, ui: &mut egui::Ui, texture: &TextureHandle) {
 
     painter.image(texture.id(), rect, UV_FULL, Color32::WHITE);
 
+    // 记录指针的图像像素坐标（取色快捷键用）
+    app.cursor_px = response
+        .hover_pos()
+        .or_else(|| response.interact_pointer_pos())
+        .map(|p| view.to_px(p));
+
+    if app.mode == super::Mode::Pick {
+        picking(app, ui, &response, &painter, view, rect, texture);
+        return;
+    }
+
     match app.stage {
         Stage::Selecting => selecting(app, ui, &response, &painter, view, rect),
         Stage::Editing => editing(app, ui, &response, &painter, view, rect, texture),
     }
+
+    // 框选阶段显示取景放大镜（Editing 阶段指针要服务绘图工具，不显示）
+    if matches!(app.stage, Stage::Selecting) {
+        if let Some(p) = app.cursor_px {
+            draw_magnifier(app, &painter, view, rect, p, texture);
+        }
+    }
+}
+
+/// Pick 模式：全屏取色器。单击复制 HEX 并退出。
+fn picking(
+    app: &mut SnipApp,
+    ui: &egui::Ui,
+    response: &Response,
+    painter: &egui::Painter,
+    view: View,
+    screen: Rect,
+    texture: &TextureHandle,
+) {
+    ui.ctx().output_mut(|o| o.cursor_icon = CursorIcon::Crosshair);
+    if let Some(p) = app.cursor_px {
+        draw_magnifier(app, painter, view, screen, p, texture);
+    }
+    if response.clicked() {
+        app.copy_color(ui.ctx(), super::ColorFormat::Hex);
+    }
+}
+
+/// 取景放大镜：像素网格 + 十字线 + 颜色值 + 快捷键提示。
+fn draw_magnifier(
+    app: &SnipApp,
+    painter: &egui::Painter,
+    view: View,
+    screen: Rect,
+    p: P2,
+    texture: &TextureHandle,
+) {
+    let Some(px) = app.shot.pixel(p.x as u32, p.y as u32) else {
+        return;
+    };
+    let color = lscreen_core::Rgba(px);
+
+    // 源区域：以指针为中心的 13×13 像素，放大到 156pt
+    const SRC: f32 = 13.0;
+    const ZOOM_SIZE: f32 = 156.0;
+    let (w, h) = (app.shot.width as f32, app.shot.height as f32);
+    let half = SRC / 2.0;
+    let (cx, cy) = (p.x.floor() + 0.5, p.y.floor() + 0.5);
+    let uv = Rect::from_min_max(
+        Pos2::new((cx - half) / w, (cy - half) / h),
+        Pos2::new((cx + half) / w, (cy + half) / h),
+    );
+
+    // 面板位置：跟随指针右下，越界翻转
+    let cursor_pt = view.to_pt(p);
+    let info_h = 64.0;
+    let panel = Vec2::new(ZOOM_SIZE, ZOOM_SIZE + info_h);
+    let mut anchor = cursor_pt + Vec2::new(24.0, 24.0);
+    if anchor.x + panel.x > screen.max.x - 8.0 {
+        anchor.x = cursor_pt.x - 24.0 - panel.x;
+    }
+    if anchor.y + panel.y > screen.max.y - 8.0 {
+        anchor.y = cursor_pt.y - 24.0 - panel.y;
+    }
+    let zoom_rect = Rect::from_min_size(anchor, Vec2::splat(ZOOM_SIZE));
+
+    // 放大图（纹理放大过滤为最近邻，像素格清晰）
+    painter.rect_filled(
+        Rect::from_min_size(anchor, panel).expand(1.0),
+        3.0,
+        Color32::from_black_alpha(230),
+    );
+    painter.image(texture.id(), zoom_rect, uv, Color32::WHITE);
+    // 中心十字线
+    let cell = ZOOM_SIZE / SRC;
+    let c = zoom_rect.center();
+    let cross = Stroke::new(1.0, Color32::from_rgba_unmultiplied(0x21, 0x96, 0xf3, 180));
+    painter.line_segment(
+        [Pos2::new(zoom_rect.min.x, c.y), Pos2::new(zoom_rect.max.x, c.y)],
+        cross,
+    );
+    painter.line_segment(
+        [Pos2::new(c.x, zoom_rect.min.y), Pos2::new(c.x, zoom_rect.max.y)],
+        cross,
+    );
+    painter.rect_stroke(
+        Rect::from_center_size(c, Vec2::splat(cell)),
+        0.0,
+        Stroke::new(1.0, Color32::WHITE),
+        StrokeKind::Outside,
+    );
+
+    // 信息区：色块 + 坐标 + RGB/HEX
+    let pad = 6.0;
+    let info_top = zoom_rect.max.y + pad;
+    painter.rect_filled(
+        Rect::from_min_size(Pos2::new(anchor.x + pad, info_top), Vec2::splat(14.0)),
+        2.0,
+        egui_color(color),
+    );
+    let text_x = anchor.x + pad + 20.0;
+    painter.text(
+        Pos2::new(text_x, info_top),
+        Align2::LEFT_TOP,
+        format!(
+            "{}  ({}, {})",
+            lscreen_core::color::to_hex(color),
+            p.x as u32,
+            p.y as u32
+        ),
+        FontId::monospace(12.0),
+        Color32::WHITE,
+    );
+    painter.text(
+        Pos2::new(anchor.x + pad, info_top + 18.0),
+        Align2::LEFT_TOP,
+        format!("RGB {}", lscreen_core::color::to_rgb_str(color)),
+        FontId::monospace(12.0),
+        Color32::from_white_alpha(220),
+    );
+    painter.text(
+        Pos2::new(anchor.x + pad, info_top + 36.0),
+        Align2::LEFT_TOP,
+        "Ctrl+R/H/K 复制 RGB/HEX/CMYK",
+        FontId::proportional(11.0),
+        Color32::from_white_alpha(150),
+    );
 }
 
 // ---------------------------------------------------------------- Selecting

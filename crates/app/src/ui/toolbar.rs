@@ -145,6 +145,9 @@ fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     {
         app.copy_and_exit(ctx);
     }
+    if ui.button("二维码").on_hover_text("识别选区内的二维码").clicked() {
+        app.scan_qr(ctx);
+    }
     if ui.button("✕").on_hover_text("Esc 退出").clicked() {
         app.request_close(ctx);
     }

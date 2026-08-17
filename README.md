@@ -3,7 +3,7 @@
 跨平台截图标注工具（Windows / macOS / Linux）。单文件、体积小、启动快、用完即走。
 命令名 `lscreen`，官网 [ailater.com](https://ailater.com)。
 
-## 当前状态（M1 已完成）
+## 当前状态（M1、M2 已完成）
 
 - ✅ 截屏：Linux X11（x11rb 纯 Rust）、Win/mac（xcap 系统 API）
 - ✅ 交互式标注：矩形、椭圆（Shift 正圆/正方形）、箭头、画笔曲线（Shift 直线）、
@@ -11,13 +11,18 @@
 - ✅ 编辑已绘制元素：悬停高亮、拖拽移动、控制点调整、Delete 删除、双击文本改内容
 - ✅ 撤销（Ctrl+Z）/ 重做（Ctrl+Y）
 - ✅ 保存 PNG（Ctrl+S）、复制到剪贴板（Ctrl+C / Enter / 双击选区）
+- ✅ 取景框拾色器：像素放大镜，Ctrl+R / Ctrl+H / Ctrl+K 复制 RGB / HEX / CMYK
+- ✅ 二维码识别：工具栏按钮识别选区，或 `lscreen qr` 命令行识别屏幕/图片
 - ✅ CLI 无界面模式
-- ⬜ 取色器 / 二维码（M2）、OCR（M3）、录屏 / 长截图（M4）、Wayland（M5）
+- ⬜ OCR（M3）、录屏 / 长截图（M4）、Wayland（M5）
 
 ## 使用
 
 ```bash
 lscreen                                # 交互式截图（框选 → 标注 → 复制/保存）
+lscreen pick                           # 屏幕取色器（单击复制 HEX 并退出）
+lscreen qr                             # 识别主屏上的二维码，输出到 stdout
+lscreen qr -i photo.png                # 识别图片文件中的二维码
 lscreen shot -o out.png                # 无界面截全屏
 lscreen shot --region 100,100,800,600 --clipboard   # 截区域进剪贴板
 ```
@@ -27,11 +32,12 @@ lscreen shot --region 100,100,800,600 --clipboard   # 截区域进剪贴板
 | 键 | 功能 |
 |---|---|
 | 拖拽 / 单击 | 框选区域 / 全屏 |
+| Ctrl+R / Ctrl+H / Ctrl+K | 复制指针处颜色 RGB / HEX / CMYK |
 | Ctrl+Z / Ctrl+Y | 撤销 / 重做 |
 | Ctrl+S | 保存 PNG 并退出 |
 | Ctrl+C / Enter / 双击 | 复制到剪贴板并退出 |
 | Delete | 删除选中元素 |
-| Esc | 取消选中 / 退出 |
+| Esc | 关闭弹窗 / 取消选中 / 退出 |
 
 全局唤起快捷键请在系统/桌面环境的快捷键设置中绑定 `lscreen` 命令（进程不驻留）。
 

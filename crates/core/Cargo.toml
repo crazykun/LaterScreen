@@ -7,4 +7,8 @@ license.workspace = true
 [dependencies]
 ab_glyph = "0.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rqrr = "0.10.1"
 tiny-skia = "0.12"
+
+[dev-dependencies]
+qrcode = { version = "0.14.1", default-features = false }

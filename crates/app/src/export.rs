@@ -5,6 +5,24 @@ use lscreen_core::{Element, RectF};
 use std::borrow::Cow;
 use std::path::PathBuf;
 
+/// 从整幅 RGBA 中裁剪出 region（图像物理像素坐标）。
+pub fn crop_rgba(rgba: &[u8], w: u32, h: u32, region: RectF) -> (Vec<u8>, u32, u32) {
+    let x0 = (region.min.x.round().max(0.0) as u32).min(w);
+    let y0 = (region.min.y.round().max(0.0) as u32).min(h);
+    let x1 = (region.max.x.round().max(0.0) as u32).clamp(x0, w);
+    let y1 = (region.max.y.round().max(0.0) as u32).clamp(y0, h);
+    let (cw, ch) = (x1 - x0, y1 - y0);
+    if cw == 0 || ch == 0 {
+        return (rgba.to_vec(), w, h);
+    }
+    let mut out = Vec::with_capacity((cw * ch * 4) as usize);
+    for y in y0..y1 {
+        let start = ((y * w + x0) * 4) as usize;
+        out.extend_from_slice(&rgba[start..start + (cw * 4) as usize]);
+    }
+    (out, cw, ch)
+}
+
 /// 合成并裁剪出选区的 RGBA。region 为图像物理像素坐标。
 pub fn compose(
     renderer: &Renderer,
@@ -15,20 +33,7 @@ pub fn compose(
     region: RectF,
 ) -> (Vec<u8>, u32, u32) {
     let full = renderer.render(rgba, w, h, elements);
-    let x0 = (region.min.x.round().max(0.0) as u32).min(w);
-    let y0 = (region.min.y.round().max(0.0) as u32).min(h);
-    let x1 = (region.max.x.round().max(0.0) as u32).clamp(x0, w);
-    let y1 = (region.max.y.round().max(0.0) as u32).clamp(y0, h);
-    let (cw, ch) = (x1 - x0, y1 - y0);
-    if cw == 0 || ch == 0 {
-        return (full, w, h);
-    }
-    let mut out = Vec::with_capacity((cw * ch * 4) as usize);
-    for y in y0..y1 {
-        let start = ((y * w + x0) * 4) as usize;
-        out.extend_from_slice(&full[start..start + (cw * 4) as usize]);
-    }
-    (out, cw, ch)
+    crop_rgba(&full, w, h, region)
 }
 
 /// 默认保存路径：~/Pictures（存在时）或当前目录，文件名带时间戳。
@@ -61,6 +66,14 @@ pub fn save_png(rgba: &[u8], w: u32, h: u32, path: &PathBuf) -> Result<(), Strin
     let img = image::RgbaImage::from_raw(w, h, rgba.to_vec())
         .ok_or_else(|| "invalid image buffer".to_string())?;
     img.save(path).map_err(|e| e.to_string())
+}
+
+pub fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    cb.set_text(text).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "linux")]
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    Ok(())
 }
 
 pub fn copy_to_clipboard(rgba: &[u8], w: u32, h: u32) -> Result<(), String> {
