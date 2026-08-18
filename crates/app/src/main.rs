@@ -14,7 +14,7 @@ use std::path::PathBuf;
 #[command(
     name = "lscreen",
     version,
-    about = "LaterScreen (ailater.com) - 跨平台截图标注工具（截图/标注/取色/OCR）"
+    about = "LaterScreen - 跨平台截图标注工具（截图/标注/取色/OCR）"
 )]
 struct Cli {
     #[command(subcommand)]
