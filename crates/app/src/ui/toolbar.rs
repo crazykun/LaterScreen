@@ -295,21 +295,30 @@ fn draw_tool_icon(tool: Tool, p: &egui::Painter, r: Rect, c: Color32) {
             }
         }
         Tool::Eraser => {
-            // 刷子：斜握刷柄 + 实心刷头（比平行四边形橡皮更易辨认）
+            // 正立排刷：上柄 + 中箍 + 刷毛竖线（斜置版本会被误读成箭头）
             let w = r.width();
             let o = r.min;
-            let tip = o + Vec2::new(w * 0.06, w * 0.94);
-            let base_a = o + Vec2::new(w * 0.30, w * 0.48);
-            let base_b = o + Vec2::new(w * 0.52, w * 0.70);
-            p.add(Shape::convex_polygon(
-                vec![tip, base_a, base_b],
+            p.rect_filled(
+                Rect::from_min_max(o + Vec2::new(w * 0.40, 0.0), o + Vec2::new(w * 0.60, w * 0.30)),
+                0.5,
                 c,
-                Stroke::NONE,
-            ));
-            p.line_segment(
-                [o + Vec2::new(w * 0.92, w * 0.08), o + Vec2::new(w * 0.44, w * 0.56)],
-                Stroke::new(1.8, c),
             );
+            p.rect_filled(
+                Rect::from_min_max(
+                    o + Vec2::new(w * 0.20, w * 0.32),
+                    o + Vec2::new(w * 0.80, w * 0.54),
+                ),
+                0.5,
+                c,
+            );
+            let s = Stroke::new(1.2, c);
+            for i in 0..4 {
+                let x = o.x + w * (0.26 + i as f32 * 0.16);
+                p.line_segment(
+                    [Pos2::new(x, o.y + w * 0.60), Pos2::new(x, o.y + w * 0.95)],
+                    s,
+                );
+            }
         }
         Tool::Line => {
             p.line_segment([r.left_bottom(), r.right_top()], Stroke::new(1.4, c));
