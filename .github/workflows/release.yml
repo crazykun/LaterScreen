@@ -36,7 +36,7 @@ jobs:
           - { os: macos-latest,   target: aarch64-apple-darwin }
           - { os: macos-latest,   target: x86_64-apple-darwin }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -62,7 +62,7 @@ jobs:
       - name: 构建并打包
         shell: bash
         run: bash scripts/package.sh "${{ matrix.target }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: |
@@ -79,7 +79,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -87,7 +87,7 @@ jobs:
         run: cd dist && sha256sum * > SHA256SUMS
       - name: 发布 GitHub Release（仅 tag 触发）
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           generate_release_notes: true
