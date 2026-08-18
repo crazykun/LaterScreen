@@ -4,8 +4,9 @@
 # 平台矩阵：
 #   Linux   x64 / arm64 / armv7 / x86（ubuntu-22.04，交叉 gcc 链接，
 #           项目链接期仅 libc，见 scripts/package.sh 头部说明）
-#   Windows x64（MSVC）
-#   macOS   arm64 / x64
+#           每个架构出 tar.gz + deb + rpm + AppImage
+#   Windows x64（MSVC）：zip + NSIS 安装器 exe
+#   macOS   arm64 / x64：tar.gz
 name: Release
 
 on:
@@ -42,9 +43,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - name: 安装交叉链接器
-        if: matrix.apt
-        run: sudo apt-get update -q && sudo apt-get install -y -q ${{ matrix.apt }}
+      - name: 安装打包工具（Linux：交叉 gcc + rpm + appimagetool）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q rpm ${{ matrix.apt }}
+          sudo curl -fsSL -o /usr/local/bin/appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          sudo chmod +x /usr/local/bin/appimagetool
+      - name: 安装打包工具（Windows：NSIS）
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          if ! command -v makensis >/dev/null; then
+            choco install nsis -y
+            echo 'C:\Program Files (x86)\NSIS' >> "$GITHUB_PATH"
+          fi
       - name: 构建并打包
         shell: bash
         run: bash scripts/package.sh "${{ matrix.target }}"
@@ -54,6 +68,10 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.deb
+            dist/*.rpm
+            dist/*.AppImage
+            dist/*.exe
           if-no-files-found: error
 
   release:

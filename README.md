@@ -101,7 +101,11 @@ cp target/release/lscreen ~/.local/bin/
 
 ## 打包发布
 
-一键打包脚本 `scripts/package.sh`，产物统一进 `dist/`（tar.gz / zip + SHA256SUMS）：
+一键打包脚本 `scripts/package.sh`，产物统一进 `dist/`（含 SHA256SUMS）：
+
+- **Linux**（x64 / arm64 / armv7 / x86）：tar.gz + **deb + rpm + AppImage**
+- **Windows**（x64）：zip + **NSIS 安装器 exe**
+- **macOS**（arm64 / x64）：tar.gz（仅 CI 出包）
 
 ```bash
 scripts/package.sh              # 打包本机具备工具链的全部默认目标
@@ -111,15 +115,16 @@ scripts/package.sh aarch64-unknown-linux-gnu   # 指定目标
 # Linux 交叉目标只需装对应交叉 gcc（项目链接期仅依赖 libc）：
 sudo apt install gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf \
                  gcc-i686-linux-gnu gcc-mingw-w64-x86-64
+# 原生包格式的工具（缺哪个就跳过哪种格式，不影响 tar.gz）：
+sudo apt install rpm nsis      # rpm 包 + Windows 安装器
+# AppImage: github.com/AppImage/appimagetool 下载放入 PATH
 ```
 
 全平台出包（含 macOS arm64/x64、Windows MSVC）走 GitHub Actions：
 
 ```bash
-git tag v0.1.0 && git push --tags   # 自动构建 7 个平台包并发布 GitHub Release
+git tag v0.1.0 && git push --tags   # 自动构建全平台包并发布 GitHub Release
 ```
-
-覆盖平台：Linux x64 / arm64 / armv7 / x86，Windows x64，macOS arm64 / x64。
 
 ## 架构
 

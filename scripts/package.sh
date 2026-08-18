@@ -66,6 +66,106 @@ sha256() {
     if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi
 }
 
+# ---------------- 平台原生包：deb / rpm / AppImage / NSIS exe ----------------
+# 对应工具缺失时跳过该格式并提示安装方式，不影响 tar.gz/zip 主产物。
+
+deb_arch() { case "$1" in x86_64-*) echo amd64;; aarch64-*) echo arm64;; armv7-*) echo armhf;; i686-*) echo i386;; esac; }
+rpm_arch() { case "$1" in x86_64-*) echo x86_64;; aarch64-*) echo aarch64;; armv7-*) echo armv7hl;; i686-*) echo i686;; esac; }
+ai_arch()  { case "$1" in x86_64-*) echo x86_64;; aarch64-*) echo aarch64;; armv7-*) echo armhf;; i686-*) echo i686;; esac; }
+
+# FHS 目录树：二进制 + desktop 入口 + 图标（deb/rpm/AppImage 共用）
+stage_fhs() { # $1=根目录 $2=二进制
+    install -Dm755 "$2" "$1/usr/bin/lscreen"
+    install -Dm644 packaging/lscreen.desktop "$1/usr/share/applications/lscreen.desktop"
+    install -Dm644 packaging/icon.png "$1/usr/share/icons/hicolor/256x256/apps/lscreen.png"
+}
+
+make_deb() { # $1=target $2=bin
+    command -v dpkg-deb >/dev/null || { echo "    跳过 deb：无 dpkg-deb"; return; }
+    local arch root out
+    arch=$(deb_arch "$1")
+    root="$DIST/.stage/deb-$1"
+    rm -rf "$root" && stage_fhs "$root" "$2"
+    mkdir -p "$root/DEBIAN"
+    cat > "$root/DEBIAN/control" <<EOF
+Package: lscreen
+Version: $VERSION
+Architecture: $arch
+Maintainer: crazykun <crazykun@users.noreply.github.com>
+Section: graphics
+Priority: optional
+Depends: libc6
+Homepage: https://github.com/crazykun/LaterScreen
+Description: Screenshot & annotation tool (LaterScreen)
+ 跨平台截图标注工具：截图、标注、取色、二维码识别、OCR。
+EOF
+    out="$DIST/lscreen_${VERSION}_$arch.deb"
+    dpkg-deb --build --root-owner-group "$root" "$out" >/dev/null
+    echo "    $out ($(du -h "$out" | cut -f1))"
+}
+
+make_rpm() { # $1=target $2=bin
+    command -v rpmbuild >/dev/null || { echo "    跳过 rpm：无 rpmbuild（sudo apt install rpm）"; return; }
+    local arch top out
+    arch=$(rpm_arch "$1")
+    top="$PWD/$DIST/.stage/rpmtop-$1"
+    rm -rf "$top" && stage_fhs "$top/SOURCES/fhs" "$2"
+    cat > "$top/lscreen.spec" <<EOF
+Name: lscreen
+Version: $VERSION
+Release: 1
+Summary: Screenshot & annotation tool (LaterScreen)
+License: MIT
+URL: https://github.com/crazykun/LaterScreen
+AutoReqProv: no
+%global debug_package %{nil}
+%define __os_install_post %{nil}
+%define _build_id_links none
+%description
+跨平台截图标注工具：截图、标注、取色、二维码识别、OCR。
+%install
+cp -a %{_sourcedir}/fhs/. %{buildroot}/
+%files
+/usr/bin/lscreen
+/usr/share/applications/lscreen.desktop
+/usr/share/icons/hicolor/256x256/apps/lscreen.png
+EOF
+    rpmbuild -bb --quiet --target "$arch" --define "_topdir $top" "$top/lscreen.spec" >/dev/null
+    out="$DIST/lscreen-$VERSION-1.$arch.rpm"
+    cp "$top/RPMS/$arch/lscreen-$VERSION-1.$arch.rpm" "$out"
+    echo "    $out ($(du -h "$out" | cut -f1))"
+}
+
+make_appimage() { # $1=target $2=bin
+    command -v appimagetool >/dev/null || {
+        echo "    跳过 AppImage：无 appimagetool（github.com/AppImage/appimagetool releases）"
+        return
+    }
+    local arch appdir out
+    arch=$(ai_arch "$1")
+    appdir="$DIST/.stage/AppDir-$1"
+    rm -rf "$appdir" && stage_fhs "$appdir" "$2"
+    ln -sf usr/bin/lscreen "$appdir/AppRun"
+    cp packaging/lscreen.desktop "$appdir/"
+    cp packaging/icon.png "$appdir/lscreen.png"
+    ln -sf lscreen.png "$appdir/.DirIcon"
+    out="$DIST/lscreen-v$VERSION-$arch.AppImage"
+    # EXTRACT_AND_RUN：无 FUSE 环境（CI 容器）也能跑
+    ARCH=$arch APPIMAGE_EXTRACT_AND_RUN=1 appimagetool "$appdir" "$out" >/dev/null
+    echo "    $out ($(du -h "$out" | cut -f1))"
+}
+
+make_nsis() { # $1=target $2=bin
+    command -v makensis >/dev/null || {
+        echo "    跳过 exe 安装器：无 makensis（sudo apt install nsis / choco install nsis）"
+        return
+    }
+    local out="$DIST/lscreen-v$VERSION-$1-setup.exe"
+    makensis -V2 -DVERSION="$VERSION" -DBINDIR="$(dirname "$2")" -DOUTFILE="$out" \
+        packaging/installer.nsi >/dev/null
+    echo "    $out ($(du -h "$out" | cut -f1))"
+}
+
 build_and_pack() {
     local t=$1 linker bin name stage out
     echo "==> 构建 $t"
@@ -102,6 +202,15 @@ build_and_pack() {
         tar -czf "$out" -C "$DIST/.stage" "$name"
     fi
     echo "    $out ($(du -h "$out" | cut -f1))"
+
+    # 平台原生包
+    if [[ $t == *linux* ]]; then
+        make_deb "$t" "$bin"
+        make_rpm "$t" "$bin"
+        make_appimage "$t" "$bin"
+    elif [[ $t == *windows* ]]; then
+        make_nsis "$t" "$bin"
+    fi
 }
 
 if [[ ${1:-} == --list ]]; then
@@ -141,7 +250,7 @@ rm -rf "$DIST/.stage"
 # 汇总校验和（覆盖式重建，包含 dist 下全部既有包）
 (
     cd "$DIST"
-    archives=$(ls *.tar.gz *.zip 2>/dev/null || true)
+    archives=$(ls *.tar.gz *.zip *.deb *.rpm *.AppImage *.exe 2>/dev/null || true)
     # shellcheck disable=SC2086
     [[ -n $archives ]] && sha256 $archives > SHA256SUMS
 )

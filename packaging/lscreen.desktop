@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=LaterScreen
+Name[zh_CN]=LaterScreen 截图
+Comment=Screenshot, annotate, color pick, QR & OCR
+Comment[zh_CN]=截图标注、取色、二维码识别与 OCR
+Exec=lscreen
+Icon=lscreen
+Terminal=false
+Categories=Utility;Graphics;
+Keywords=screenshot;capture;annotate;截图;
