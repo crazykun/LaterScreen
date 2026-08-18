@@ -287,6 +287,14 @@ fn editing(
     if response.drag_stopped() {
         on_release(app);
     }
+    // 原地单击：egui 的 drag_started 需要越过拖动阈值（约 6px），静止点击不会触发。
+    // 点击型工具（文本/标号）和 Select 的点选必须单独走一遍 press/release
+    if response.clicked() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            on_press(app, view, view.to_px(pos), pos, shift);
+            on_release(app);
+        }
+    }
     if response.double_clicked() {
         on_double_click(app, ui.ctx(), pointer_px);
     }

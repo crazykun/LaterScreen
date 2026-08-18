@@ -154,7 +154,7 @@ fn color_picker(app: &mut SnipApp, ui: &mut egui::Ui) {
     egui::Popup::menu(&resp)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
-            ui.set_max_width(4.0 * (BTN + 4.0));
+            ui.set_max_width(220.0);
             ui.horizontal_wrapped(|ui| {
                 for c in PALETTE {
                     let (rect, resp) =
@@ -184,19 +184,22 @@ fn color_picker(app: &mut SnipApp, ui: &mut egui::Ui) {
                 }
             });
             ui.separator();
-            ui.horizontal(|ui| {
-                ui.label("自定义");
-                let mut c32 = egui_color(app.style.color);
-                if ui.color_edit_button_srgba(&mut c32).changed() {
-                    app.style.color = Rgba([c32.r(), c32.g(), c32.b(), c32.a()]);
-                    // 取色器拖动每帧触发 changed()，按时间窗节流快照：
-                    // 间隔 >0.6s 视为新一次调整，压一次撤销快照
-                    let now = ui.input(|i| i.time);
-                    let snapshot = now - app.color_drag_at > 0.6;
-                    app.color_drag_at = now;
-                    apply_style_to_selected(app, snapshot);
-                }
-            });
+            // 内联完整取色器：不用 color_edit_button 的嵌套 popup——
+            // 嵌套弹层会被外层 popup 的关闭逻辑连坐，点开即塌
+            let mut c32 = egui_color(app.style.color);
+            if egui::color_picker::color_picker_color32(
+                ui,
+                &mut c32,
+                egui::color_picker::Alpha::Opaque,
+            ) {
+                app.style.color = Rgba([c32.r(), c32.g(), c32.b(), 0xff]);
+                // 取色器拖动每帧触发变更，按时间窗节流快照：
+                // 间隔 >0.6s 视为新一次调整，压一次撤销快照
+                let now = ui.input(|i| i.time);
+                let snapshot = now - app.color_drag_at > 0.6;
+                app.color_drag_at = now;
+                apply_style_to_selected(app, snapshot);
+            }
         });
 }
 
