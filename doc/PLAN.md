@@ -181,12 +181,12 @@ Snipaste 的招牌能力：截完把图钉在屏幕上置顶悬浮，方便对�
 
 ### 遗留 TODO（review 2026-08-17）
 
-- [ ] clipd 静默失败：`clipd_spawn` 把子进程 stderr 指向 null 且写完 stdin 即返回 Ok，
-      守护进程若起不来（X 连接失败等），UI 已提示"已复制"但剪贴板是空的。
-      方案：子进程持剪贴板成功后往 stdout 回写一个确认字节，父进程等确认再返回
-- [ ] clipd 僵尸进程：GUI 长会话中多次复制产生的子进程被覆盖退出后无人 wait，
-      变僵尸直至 GUI 退出。量小无害；父进程入口 `signal(SIGCHLD, SIG_IGN)`
-      即可让内核自动收割
+- [x] clipd 静默失败（✅ 2026-08-18）：守护进程在 X 连接 + 协议校验全部通过后
+      向 stdout 回写确认字节，父进程读到 ack 才返回 Ok；子进程提前退出则读到
+      EOF，报"守护进程启动失败"
+- [x] clipd 僵尸进程（✅ 2026-08-18）：父进程用分离线程 wait 子进程；
+      不用 `signal(SIGCHLD, SIG_IGN)` 是因为它会全局生效，
+      破坏 OCR tesseract 子进程的 wait_with_output
 - [ ] Win/mac 指针查询（capture/src/other.rs cursor_position 返回 None）：
       windows-rs GetCursorPos / objc2 NSEvent.mouseLocation，补齐后多屏跟随生效
 

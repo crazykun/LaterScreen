@@ -146,14 +146,14 @@ pub fn copy_to_clipboard(rgba: &[u8], w: u32, h: u32) -> Result<(), String> {
 /// 主进程写完数据立即返回，不必等剪贴板被接管。
 #[cfg(target_os = "linux")]
 fn clipd_spawn(payload: &[u8]) -> Result<(), String> {
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::process::{Command, Stdio};
 
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut child = Command::new(exe)
         .arg(CLIPD_ARG)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("启动剪贴板守护进程失败: {e}"))?;
@@ -163,12 +163,33 @@ fn clipd_spawn(payload: &[u8]) -> Result<(), String> {
         .ok_or_else(|| "无法写入守护进程".to_string())?
         .write_all(payload)
         .map_err(|e| e.to_string())?;
-    // 不 wait()：子进程被 init 收养，持有剪贴板直到被覆盖
+    // stdin 已随上面的 take() 作用域结束关闭（EOF），子进程开始处理。
+    // 等确认字节：子进程拿到剪贴板前若失败会直接退出 → stdout EOF，
+    // 这里读到 0 字节即失败，不再出现「提示已复制但剪贴板是空的」。
+    let mut ack = [0u8; 1];
+    let got = child
+        .stdout
+        .take()
+        .ok_or_else(|| "无法读取守护进程确认".to_string())?
+        .read(&mut ack)
+        .map_err(|e| e.to_string())?;
+    if got == 0 || ack[0] != CLIPD_ACK {
+        let _ = child.wait(); // 已退出，顺手收割
+        return Err("剪贴板守护进程启动失败（X 连接不可用？）".into());
+    }
+    // 守护进程被覆盖退出后需要有人 wait 收割，否则 GUI 长会话中积累僵尸。
+    // 用分离线程等它；若本进程先退出，子进程被 init 收养，同样无僵尸。
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }
 
 /// 隐藏子命令名：`lscreen __clipd`
 pub const CLIPD_ARG: &str = "__clipd";
+/// 守护进程持有剪贴板前回写的确认字节。
+#[cfg(target_os = "linux")]
+const CLIPD_ACK: u8 = b'k';
 
 /// 守护进程入口：stdin 协议为一行头部 + 数据体。
 /// `txt\n<utf8>` 或 `img W H\n<raw rgba>`
@@ -188,10 +209,13 @@ pub fn clipd_main() -> Result<(), String> {
     let header = String::from_utf8_lossy(&input[..nl]).to_string();
     let body = &input[nl + 1..];
 
-    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-    if header == "txt" {
-        let text = String::from_utf8_lossy(body).to_string();
-        cb.set().wait().text(text).map_err(|e| e.to_string())
+    // 先做完所有可失败的校验，再回执、再进入阻塞持有
+    enum Payload<'a> {
+        Text(String),
+        Img { w: usize, h: usize, body: &'a [u8] },
+    }
+    let payload = if header == "txt" {
+        Payload::Text(String::from_utf8_lossy(body).to_string())
     } else if let Some(dims) = header.strip_prefix("img ") {
         let mut it = dims.split_whitespace();
         let (w, h): (usize, usize) = match (
@@ -204,15 +228,32 @@ pub fn clipd_main() -> Result<(), String> {
         if body.len() != w * h * 4 {
             return Err("图像数据长度不符".into());
         }
-        cb.set()
+        Payload::Img { w, h, body }
+    } else {
+        return Err(format!("未知协议头: {header}"));
+    };
+
+    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+
+    // set().wait() 会阻塞到剪贴板被其他应用覆盖，无法在成功后再回写，
+    // 因此确认点放在最后一个可失败步骤（X 连接 + 协议校验）之后、阻塞持有之前。
+    {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        out.write_all(&[CLIPD_ACK]).map_err(|e| e.to_string())?;
+        out.flush().map_err(|e| e.to_string())?;
+    }
+
+    match payload {
+        Payload::Text(text) => cb.set().wait().text(text).map_err(|e| e.to_string()),
+        Payload::Img { w, h, body } => cb
+            .set()
             .wait()
             .image(arboard::ImageData {
                 width: w,
                 height: h,
                 bytes: Cow::Borrowed(body),
             })
-            .map_err(|e| e.to_string())
-    } else {
-        Err(format!("未知协议头: {header}"))
+            .map_err(|e| e.to_string()),
     }
 }
