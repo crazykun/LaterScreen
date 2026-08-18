@@ -295,21 +295,20 @@ fn draw_tool_icon(tool: Tool, p: &egui::Painter, r: Rect, c: Color32) {
             }
         }
         Tool::Eraser => {
-            // 斜置的橡皮：平行四边形 + 中缝
+            // 刷子：斜握刷柄 + 实心刷头（比平行四边形橡皮更易辨认）
             let w = r.width();
-            let pts = vec![
-                Pos2::new(r.min.x, r.max.y - w * 0.3),
-                Pos2::new(r.min.x + w * 0.55, r.min.y),
-                r.right_top() + Vec2::new(0.0, w * 0.3),
-                Pos2::new(r.min.x + w * 0.45, r.max.y),
-            ];
-            p.add(Shape::closed_line(pts, Stroke::new(1.3, c)));
+            let o = r.min;
+            let tip = o + Vec2::new(w * 0.06, w * 0.94);
+            let base_a = o + Vec2::new(w * 0.30, w * 0.48);
+            let base_b = o + Vec2::new(w * 0.52, w * 0.70);
+            p.add(Shape::convex_polygon(
+                vec![tip, base_a, base_b],
+                c,
+                Stroke::NONE,
+            ));
             p.line_segment(
-                [
-                    Pos2::new(r.min.x + w * 0.28, r.max.y - w * 0.15),
-                    Pos2::new(r.min.x + w * 0.83, r.min.y + w * 0.15),
-                ],
-                Stroke::new(1.3, c),
+                [o + Vec2::new(w * 0.92, w * 0.08), o + Vec2::new(w * 0.44, w * 0.56)],
+                Stroke::new(1.8, c),
             );
         }
         Tool::Line => {
