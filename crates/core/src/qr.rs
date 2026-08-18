@@ -6,7 +6,7 @@ pub struct QrResult {
 
 /// 在 RGBA 图像中检测并解码所有二维码。
 pub fn detect(rgba: &[u8], w: u32, h: u32) -> Vec<QrResult> {
-    if rgba.len() < (w * h * 4) as usize || w == 0 || h == 0 {
+    if rgba.len() < (w as usize) * (h as usize) * 4 || w == 0 || h == 0 {
         return Vec::new();
     }
     let (w, h) = (w as usize, h as usize);

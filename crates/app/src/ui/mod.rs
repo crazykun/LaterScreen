@@ -86,7 +86,8 @@ pub struct SnipApp {
     pub drag: Option<DragOp>,
     pub text_edit: Option<TextEditState>,
     /// 马赛克预览缓存：id -> (采样点数, 色块)
-    pub mosaic_cache: HashMap<u64, (usize, Vec<(f32, f32, f32, Rgba)>)>,
+    /// 图元 id → (几何指纹, 网格色块)。指纹见 `canvas::mosaic_key`。
+    pub mosaic_cache: HashMap<u64, (u64, Vec<(f32, f32, f32, Rgba)>)>,
     /// 指针当前所在的图像像素坐标（取色用）
     pub cursor_px: Option<P2>,
     /// 结果面板（二维码/OCR 共用）：(标题, 文本条目)
@@ -105,14 +106,19 @@ impl SnipApp {
         font: Option<Vec<u8>>,
         mode: Mode,
     ) -> Self {
-        if let Some(bytes) = font.clone() {
-            setup_fonts(&cc.egui_ctx, bytes);
+        // 先用 Renderer 解析一遍：epaint 内部同样用 ab_glyph，且解析失败是 panic!
+        // 而非 Err。这里只把已确认可解析的字节交给 egui，坏字体退回内置字体。
+        let renderer = Renderer::new(font.clone());
+        if renderer.has_font() {
+            if let Some(bytes) = font {
+                setup_fonts(&cc.egui_ctx, bytes);
+            }
         }
         Self {
             shot,
             texture: None,
             doc: Document::default(),
-            renderer: Renderer::new(font),
+            renderer,
             mode,
             stage: Stage::Selecting,
             region: RectF::default(),
@@ -161,7 +167,7 @@ impl SnipApp {
         self.region.max.y = self.region.max.y.clamp(0.0, h);
     }
 
-    fn compose(&self) -> (Vec<u8>, u32, u32) {
+    fn compose(&self) -> Option<(Vec<u8>, u32, u32)> {
         export::compose(
             &self.renderer,
             &self.shot.rgba,
@@ -173,7 +179,10 @@ impl SnipApp {
     }
 
     pub fn copy_and_exit(&mut self, ctx: &egui::Context) {
-        let (rgba, w, h) = self.compose();
+        let Some((rgba, w, h)) = self.compose() else {
+            self.toast(ctx, "选区为空");
+            return;
+        };
         match export::copy_to_clipboard(&rgba, w, h) {
             Ok(()) => self.request_close(ctx),
             Err(e) => self.toast(ctx, format!("复制失败: {e}")),
@@ -181,7 +190,10 @@ impl SnipApp {
     }
 
     pub fn save_and_exit(&mut self, ctx: &egui::Context) {
-        let (rgba, w, h) = self.compose();
+        let Some((rgba, w, h)) = self.compose() else {
+            self.toast(ctx, "选区为空");
+            return;
+        };
         let path = export::default_save_path();
         match export::save_png(&rgba, w, h, &path) {
             Ok(()) => {
@@ -295,12 +307,15 @@ impl SnipApp {
             self.toast(ctx, "识别进行中…");
             return;
         }
-        let (rgba, w, h) = export::crop_rgba(
+        let Some((rgba, w, h)) = export::crop_rgba(
             &self.shot.rgba,
             self.shot.width,
             self.shot.height,
             self.region,
-        );
+        ) else {
+            self.toast(ctx, "选区为空");
+            return;
+        };
         self.spawn_scan(ctx, move || {
             let found = lscreen_core::qr::detect(&rgba, w, h);
             if found.is_empty() {
@@ -325,12 +340,15 @@ impl SnipApp {
             self.toast(ctx, engine.describe());
             return;
         }
-        let (rgba, w, h) = export::crop_rgba(
+        let Some((rgba, w, h)) = export::crop_rgba(
             &self.shot.rgba,
             self.shot.width,
             self.shot.height,
             self.region,
-        );
+        ) else {
+            self.toast(ctx, "选区为空");
+            return;
+        };
         self.spawn_scan(ctx, move || match engine.recognize(&rgba, w, h) {
             Ok(out) if !out.is_empty() => {
                 ScanOutcome::Ok("文字识别结果".into(), vec![out.plain_text()])

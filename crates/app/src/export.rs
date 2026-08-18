@@ -6,21 +6,24 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 
 /// 从整幅 RGBA 中裁剪出 region（图像物理像素坐标）。
-pub fn crop_rgba(rgba: &[u8], w: u32, h: u32, region: RectF) -> (Vec<u8>, u32, u32) {
+///
+/// 空选区返回 `None` 而不是整幅图：退化选区静默变成全屏截图会把选区外的
+/// 内容泄漏到剪贴板/文件里，必须让调用方显式提示。
+pub fn crop_rgba(rgba: &[u8], w: u32, h: u32, region: RectF) -> Option<(Vec<u8>, u32, u32)> {
     let x0 = (region.min.x.round().max(0.0) as u32).min(w);
     let y0 = (region.min.y.round().max(0.0) as u32).min(h);
-    let x1 = (region.max.x.round().max(0.0) as u32).clamp(x0, w);
-    let y1 = (region.max.y.round().max(0.0) as u32).clamp(y0, h);
+    let x1 = (region.max.x.round().max(0.0) as u32).max(x0).min(w);
+    let y1 = (region.max.y.round().max(0.0) as u32).max(y0).min(h);
     let (cw, ch) = (x1 - x0, y1 - y0);
     if cw == 0 || ch == 0 {
-        return (rgba.to_vec(), w, h);
+        return None;
     }
-    let mut out = Vec::with_capacity((cw * ch * 4) as usize);
+    let mut out = Vec::with_capacity((cw as usize) * (ch as usize) * 4);
     for y in y0..y1 {
-        let start = ((y * w + x0) * 4) as usize;
-        out.extend_from_slice(&rgba[start..start + (cw * 4) as usize]);
+        let start = ((y as usize) * (w as usize) + x0 as usize) * 4;
+        out.extend_from_slice(&rgba[start..start + (cw as usize) * 4]);
     }
-    (out, cw, ch)
+    Some((out, cw, ch))
 }
 
 /// 合成并裁剪出选区的 RGBA。region 为图像物理像素坐标。
@@ -31,7 +34,7 @@ pub fn compose(
     h: u32,
     elements: &[Element],
     region: RectF,
-) -> (Vec<u8>, u32, u32) {
+) -> Option<(Vec<u8>, u32, u32)> {
     let full = renderer.render(rgba, w, h, elements);
     crop_rgba(&full, w, h, region)
 }
@@ -140,7 +143,7 @@ pub fn copy_to_clipboard(rgba: &[u8], w: u32, h: u32) -> Result<(), String> {
 
 /// X11 剪贴板数据随所有者进程退出而消失。方案：用自身可执行文件拉起一个
 /// 分离的守护子进程持有剪贴板（arboard wait()），内容被其他应用覆盖后自动退出。
-/// 主进程写完数据立即返回，保持「用完即走」。
+/// 主进程写完数据立即返回，不必等剪贴板被接管。
 #[cfg(target_os = "linux")]
 fn clipd_spawn(payload: &[u8]) -> Result<(), String> {
     use std::io::Write;

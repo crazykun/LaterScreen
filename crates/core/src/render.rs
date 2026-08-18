@@ -152,7 +152,8 @@ impl Renderer {
         if len < 1.0 {
             return;
         }
-        let head = (width * 4.5).clamp(10.0, len * 0.5);
+        // 期望 10px 起步、不超过线长一半；短箭头时 len*0.5 < 10，用 max/min 而非 clamp 避免 min>max panic
+        let head = (width * 4.5).max(10.0).min(len * 0.5);
         let (ux, uy) = ((to.x - from.x) / len, (to.y - from.y) / len);
         // 线段止于箭头底部，避免线帽穿出三角
         let base = P2::new(to.x - ux * head, to.y - uy * head);
@@ -316,10 +317,11 @@ fn average_color(rgba: &[u8], w: u32, h: u32, x0: u32, y0: u32, cell: u32) -> Rg
     let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
     for y in y0..(y0 + cell).min(h) {
         for x in x0..(x0 + cell).min(w) {
-            let i = ((y * w + x) * 4) as usize;
-            r += rgba[i] as u64;
-            g += rgba[i + 1] as u64;
-            b += rgba[i + 2] as u64;
+            let i = (y as usize * w as usize + x as usize) * 4;
+            let Some(px) = rgba.get(i..i + 4) else { continue };
+            r += px[0] as u64;
+            g += px[1] as u64;
+            b += px[2] as u64;
             n += 1;
         }
     }
@@ -330,7 +332,7 @@ fn average_color(rgba: &[u8], w: u32, h: u32, x0: u32, y0: u32, cell: u32) -> Rg
 }
 
 fn pixmap_from_rgba(source: &[u8], w: u32, h: u32) -> Option<Pixmap> {
-    if source.len() != (w * h * 4) as usize || w == 0 || h == 0 {
+    if source.len() != (w as usize) * (h as usize) * 4 || w == 0 || h == 0 {
         return None;
     }
     // 截图不透明，直通 alpha 与预乘等价；强制 alpha=255 规避个别平台返回 0 alpha
@@ -377,6 +379,22 @@ mod tests {
 
     fn blank(w: u32, h: u32) -> Vec<u8> {
         vec![255u8; (w * h * 4) as usize]
+    }
+
+    #[test]
+    fn render_short_arrow_no_panic() {
+        // 回归：len < 20 时 head 上限 len*0.5 < 10，曾因 clamp(10.0, <10) panic
+        let r = Renderer::new(None);
+        let src = blank(64, 64);
+        let elems = vec![Element {
+            id: 1,
+            kind: ElementKind::Arrow {
+                from: P2::new(10.0, 10.0),
+                to: P2::new(20.0, 20.0),
+            },
+            style: Style::default(),
+        }];
+        let _ = r.render(&src, 64, 64, &elems);
     }
 
     #[test]

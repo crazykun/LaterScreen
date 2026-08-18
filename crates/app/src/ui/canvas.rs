@@ -13,6 +13,21 @@ use lscreen_core::{Element, ElementKind, P2, RectF, Tool};
 
 use super::{egui_color, DragOp, SnipApp, Stage, TextEditState, View};
 
+/// 马赛克色块缓存的几何指纹：点数 + 全部坐标 + 笔刷/格子尺寸。
+/// f32 按位取整参与哈希，坐标变化（拖动、撤销）必然改变指纹。
+pub fn mosaic_key(points: &[P2], brush: f32, cell: f32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    points.len().hash(&mut h);
+    for p in points {
+        p.x.to_bits().hash(&mut h);
+        p.y.to_bits().hash(&mut h);
+    }
+    brush.to_bits().hash(&mut h);
+    cell.to_bits().hash(&mut h);
+    h.finish()
+}
+
 const DIM: Color32 = Color32::from_black_alpha(120);
 const ACCENT: Color32 = Color32::from_rgb(0x21, 0x96, 0xf3);
 const UV_FULL: Rect = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
@@ -449,8 +464,14 @@ fn on_drag(app: &mut SnipApp, p: P2, shift: bool) {
             }
         }
         DragOp::MoveRegion { last } => {
+            // 先把位移夹到边界内再整体平移：直接 translate + clamp min/max
+            // 会在拖出屏幕时压扁选区，且拖回来尺寸不恢复。
             let (dx, dy) = (p.x - last.x, p.y - last.y);
             *last = p;
+            let (w, h) = (app.shot.width as f32, app.shot.height as f32);
+            // 上界优先，避免 min > max 的 clamp panic（见 render.rs 箭头头长）
+            let dx = dx.max(-app.region.min.x.max(0.0)).min(w - app.region.max.x);
+            let dy = dy.max(-app.region.min.y.max(0.0)).min(h - app.region.max.y);
             app.region = app.region.translate(dx, dy);
             app.clamp_region();
         }
@@ -628,11 +649,14 @@ fn draw_element(
             );
         }
         ElementKind::Mosaic { points } => {
+            // 缓存指纹必须含几何：移动马赛克只改坐标不改点数，
+            // 只比点数会让预览留在原位而导出用新坐标，形成「预览遮住了、导出没遮」。
+            let key = mosaic_key(points, e.mosaic_brush(), e.mosaic_cell());
             let (n_cached, cells) = app
                 .mosaic_cache
                 .entry(e.id)
                 .or_insert_with(|| (0, Vec::new()));
-            if *n_cached != points.len() {
+            if *n_cached != key {
                 *cells = mosaic_cells(
                     &app.shot.rgba,
                     app.shot.width,
@@ -641,7 +665,7 @@ fn draw_element(
                     e.mosaic_brush(),
                     e.mosaic_cell(),
                 );
-                *n_cached = points.len();
+                *n_cached = key;
             }
             for (x, y, size, c) in cells.iter() {
                 let min = view.to_pt(P2::new(*x, *y));
@@ -700,7 +724,8 @@ fn draw_arrow(
     if len < 1.0 {
         return;
     }
-    let head = (width_px * 4.5).clamp(10.0, len * 0.5);
+    // 与 core render.rs 保持一致：max/min 而非 clamp，短箭头时避免 min>max panic
+    let head = (width_px * 4.5).max(10.0).min(len * 0.5);
     let (ux, uy) = ((to.x - from.x) / len, (to.y - from.y) / len);
     let base = P2::new(to.x - ux * head, to.y - uy * head);
     let (px, py) = (-uy, ux);

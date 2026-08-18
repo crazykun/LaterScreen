@@ -2,7 +2,7 @@
 
 use eframe::egui;
 use egui::{Align2, Color32, Pos2, Stroke, StrokeKind, Vec2};
-use lscreen_core::{Rgba, Tool};
+use lscreen_core::{ElementKind, P2, Rgba, Tool};
 
 use super::{egui_color, SnipApp, View};
 
@@ -97,7 +97,7 @@ fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
         }
         if resp.clicked() {
             app.style.color = *c;
-            apply_style_to_selected(app);
+            apply_style_to_selected(app, true);
         }
     }
     ui.separator();
@@ -105,13 +105,14 @@ fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     // 线宽 / 字号
     let mut width = app.style.width;
     ui.label("粗细");
-    if ui
-        .add(egui::Slider::new(&mut width, 1.0..=12.0).show_value(false))
-        .changed()
-    {
+    let slider = ui.add(egui::Slider::new(&mut width, 1.0..=12.0).show_value(false));
+    if slider.changed() {
         app.style.width = width;
         app.style.font_size = 12.0 + width * 4.0;
-        apply_style_to_selected(app);
+        // 拖拽期间每帧都会 changed()，只在手势起点压一次快照，
+        // 否则一次拖动几十个快照会把真实历史挤出撤销栈（上限 100）。
+        let snapshot = !slider.dragged() || slider.drag_started();
+        apply_style_to_selected(app, snapshot);
     }
     ui.separator();
 
@@ -158,11 +159,28 @@ fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
 }
 
 /// 修改样式时同步应用到当前选中的图元。
-fn apply_style_to_selected(app: &mut SnipApp) {
+///
+/// `snapshot=false` 用于连续手势（滑杆拖动）的中间帧：只改数据不压撤销快照。
+fn apply_style_to_selected(app: &mut SnipApp, snapshot: bool) {
     let Some(id) = app.selected else { return };
-    app.doc.begin_change();
+    if snapshot {
+        app.doc.begin_change();
+    }
+    let style = app.style;
+    // font_size 随粗细变化，文本的包围盒必须跟着重测，
+    // 否则命中检测与选中框停留在旧字号上。
+    let resized = match app.doc.get(id).map(|e| &e.kind) {
+        Some(ElementKind::Text { content, .. }) if !content.is_empty() => {
+            let (w, h) = app.renderer.measure_text(content, style.font_size);
+            Some(P2::new(w.max(10.0), h.max(style.font_size)))
+        }
+        _ => None,
+    };
     if let Some(e) = app.doc.get_mut(id) {
-        e.style = app.style;
+        e.style = style;
+        if let (ElementKind::Text { size, .. }, Some(new_size)) = (&mut e.kind, resized) {
+            *size = new_size;
+        }
     }
     app.mosaic_cache.remove(&id);
 }

@@ -1,7 +1,7 @@
 //! lscreen: 跨平台截图标注工具。
 //!
-//! 用完即走：进程只在截图/标注期间存活。全局唤起快捷键请在系统/桌面环境中
-//! 绑定到 `lscreen` 命令。
+//! 当前形态：单次调用，进程只在截图/标注期间存活。全局唤起快捷键请在系统/桌面
+//! 环境中绑定到 `lscreen` 命令；托盘常驻模式见 `doc/PLAN.md` M8。
 
 mod export;
 mod font;
@@ -179,7 +179,8 @@ fn acquire_image(
             match region {
                 Some(s) => {
                     let r = parse_region(&s)?;
-                    Ok(export::crop_rgba(&shot.rgba, shot.width, shot.height, r))
+                    export::crop_rgba(&shot.rgba, shot.width, shot.height, r)
+                        .ok_or_else(|| "选区为空（region 与屏幕无交集）".to_string())
                 }
                 None => Ok((shot.rgba, shot.width, shot.height)),
             }
@@ -231,7 +232,8 @@ fn run_shot(
         ),
     };
     let renderer = lscreen_core::render::Renderer::new(None);
-    let (rgba, w, h) = export::compose(&renderer, &shot.rgba, shot.width, shot.height, &[], region);
+    let (rgba, w, h) = export::compose(&renderer, &shot.rgba, shot.width, shot.height, &[], region)
+        .ok_or_else(|| "选区为空（region 与屏幕无交集）".to_string())?;
 
     if clipboard {
         export::copy_to_clipboard(&rgba, w, h)?;
@@ -271,6 +273,12 @@ fn run_record(
         }
     };
 
+    // NaN 会穿过 clamp，而 from_secs_f32 对 NaN/超范围值 panic
+    if !duration.is_finite() {
+        return Err("无效的 --duration（应为有限秒数）".into());
+    }
+    let secs = duration.clamp(0.1, 86_400.0);
+
     let path = output.unwrap_or_else(|| export::default_save_path().with_extension("gif"));
     let stop = Arc::new(AtomicBool::new(false));
     {
@@ -287,7 +295,7 @@ fn run_record(
                 .map_err(|e| lscreen_record::RecordError(e.to_string()))
         },
         &lscreen_record::GifOptions { fps, quality },
-        std::time::Duration::from_secs_f32(duration.max(0.1)),
+        std::time::Duration::from_secs_f32(secs),
         &stop,
         &path,
     )
@@ -303,7 +311,12 @@ fn parse_region(s: &str) -> Result<lscreen_core::RectF, String> {
         .map(|v| v.trim().parse::<f32>())
         .collect::<Result<_, _>>()
         .map_err(|_| format!("无效的区域参数: {s}（应为 X,Y,W,H）"))?;
-    if parts.len() != 4 || parts[2] <= 0.0 || parts[3] <= 0.0 {
+    // NaN 能通过 `<= 0.0` 判定（任何比较都为假），必须显式挡掉
+    if parts.len() != 4
+        || !parts.iter().all(|v| v.is_finite())
+        || parts[2] <= 0.0
+        || parts[3] <= 0.0
+    {
         return Err(format!("无效的区域参数: {s}（应为 X,Y,W,H）"));
     }
     Ok(lscreen_core::RectF::from_points(

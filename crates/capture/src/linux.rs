@@ -173,8 +173,9 @@ pub fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<Screenshot> {
         );
         let x0 = x.clamp(0, sw);
         let y0 = y.clamp(0, sh);
-        let x1 = (x + w as i32).clamp(x0, sw);
-        let y1 = (y + h as i32).clamp(y0, sh);
+        // w/h 来自 u32，转 i32 可能为负；saturating_add 避免 debug 下溢出 panic
+        let x1 = x.saturating_add(w.min(i32::MAX as u32) as i32).clamp(x0, sw);
+        let y1 = y.saturating_add(h.min(i32::MAX as u32) as i32).clamp(y0, sh);
         if x1 - x0 < 1 || y1 - y0 < 1 {
             return Err(CaptureError("区域超出屏幕范围".into()));
         }

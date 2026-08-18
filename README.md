@@ -1,6 +1,6 @@
 # LaterScreen
 
-跨平台截图标注工具（Windows / macOS / Linux）。单文件、体积小、启动快、用完即走。
+跨平台截图标注工具（Windows / macOS / Linux）。单文件、体积小、启动快、小而美常驻。
 命令名 `lscreen`，官网 [ailater.com](https://ailater.com)。
 
 ## 当前状态（M1–M3 已完成）
@@ -65,7 +65,8 @@ lscreen shot --region 100,100,800,600 --clipboard   # 截区域进剪贴板
 | Delete | 删除选中元素 |
 | Esc | 关闭弹窗 / 取消选中 / 退出 |
 
-全局唤起快捷键请在系统/桌面环境的快捷键设置中绑定 `lscreen` 命令（进程不驻留）。
+全局唤起快捷键请在系统/桌面环境的快捷键设置中绑定 `lscreen` 命令。
+托盘常驻模式（含内置热键与配置面板）规划中，见 `doc/PLAN.md` M8。
 
 注意：所有 `--region X,Y,W,H` 参数使用**物理像素**坐标（截图/录屏的实际像素），
 HiDPI 缩放下与桌面环境显示的"逻辑分辨率"不同。多显示器时坐标基于虚拟桌面原点。

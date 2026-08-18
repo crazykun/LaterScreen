@@ -97,6 +97,39 @@ impl TextRecognizer for Tesseract {
     }
 }
 
+/// 拼接行内词：tesseract 把中文按字/词切成独立 word，直接 join(" ") 会得到
+/// "中 文 识 别"。规则是只在两侧都不是 CJK 时补空格（西文才需要词间空格）。
+fn join_words(words: &[String]) -> String {
+    let mut text = String::new();
+    let mut prev_cjk_or_empty = true;
+    for w in words {
+        let starts_cjk = w.chars().next().is_some_and(is_cjk);
+        if !text.is_empty() && !prev_cjk_or_empty && !starts_cjk {
+            text.push(' ');
+        }
+        text.push_str(w);
+        prev_cjk_or_empty = w.chars().last().is_some_and(is_cjk);
+    }
+    text
+}
+
+/// CJK 及全角标点：这些字符前后不需要空格。
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x1100..=0x11FF     // 韩文字母
+        | 0x2E80..=0x2FFF   // 部首、康熙部首
+        | 0x3000..=0x303F   // CJK 标点（。、「」等）
+        | 0x3040..=0x30FF   // 平假名、片假名
+        | 0x3130..=0x318F   // 韩文兼容字母
+        | 0x3400..=0x4DBF   // 扩展 A
+        | 0x4E00..=0x9FFF   // 基本区
+        | 0xAC00..=0xD7AF   // 韩文音节
+        | 0xF900..=0xFAFF   // 兼容表意
+        | 0xFF00..=0xFFEF   // 全角形式
+        | 0x20000..=0x2FA1F // 扩展 B–F、兼容补充
+    )
+}
+
 /// 解析 tesseract TSV：level=5 为词，按 (block, par, line) 聚合成行文本块。
 /// 词置信度取行内均值。
 fn parse_tsv(tsv: &str) -> OcrOutput {
@@ -109,7 +142,7 @@ fn parse_tsv(tsv: &str) -> OcrOutput {
         if words.is_empty() {
             return;
         }
-        let text = words.join(" ");
+        let text = join_words(&words[..]);
         let confidence = if confs.is_empty() {
             None
         } else {
@@ -153,6 +186,22 @@ fn parse_tsv(tsv: &str) -> OcrOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cjk_words_join_without_spaces() {
+        // tesseract 把中文切成 中/文/识别/测试 四个 word
+        let words: Vec<String> = ["中", "文", "识别", "测试", "hello", "world"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(join_words(&words), "中文识别测试hello world");
+    }
+
+    #[test]
+    fn latin_only_keeps_spaces() {
+        let words: Vec<String> = ["hello", "world"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(join_words(&words), "hello world");
+    }
 
     #[test]
     fn tsv_parsing_groups_lines() {
