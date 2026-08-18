@@ -35,6 +35,10 @@ const UV_FULL: Rect = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0
 const HIT_TOL_PT: f32 = 4.0;
 /// 选区角点手柄半径（逻辑点）
 const HANDLE_PT: f32 = 5.0;
+/// 选区角点抓取半径（逻辑点）：比手柄可视尺寸大，框内外一圈都可命中
+const CORNER_GRAB_PT: f32 = 12.0;
+/// 选区边抓取容差（逻辑点）
+const EDGE_GRAB_PT: f32 = 8.0;
 
 pub fn show(app: &mut SnipApp, ui: &mut egui::Ui, texture: &TextureHandle) {
     let rect = ui.max_rect();
@@ -204,7 +208,10 @@ fn selecting(
     ui.ctx().output_mut(|o| o.cursor_icon = CursorIcon::Crosshair);
 
     if response.drag_started() {
-        if let Some(pos) = response.interact_pointer_pos() {
+        // 用按下原点而非当前位置：drag_started 触发时指针已越过拖动阈值
+        // （约 6px），偏移后的框选起点会和实际按下的位置差一截
+        let origin = ui.input(|i| i.pointer.press_origin());
+        if let Some(pos) = origin.or_else(|| response.interact_pointer_pos()) {
             app.drag = Some(DragOp::SelectRegion {
                 start: view.to_px(pos),
             });
@@ -276,7 +283,11 @@ fn editing(
 
     // ---- 输入 ----
     if response.drag_started() {
-        if let Some(pos) = response.interact_pointer_pos() {
+        // 命中测试用按下原点：drag_started 触发时指针已越过拖动阈值（约 6px），
+        // 在角点/边上按下后快速拖动，指针可能已滑出容差圈，
+        // 用当前位置测会出现「光标显示可拖、实际拖不动」
+        let origin = ui.input(|i| i.pointer.press_origin());
+        if let Some(pos) = origin.or_else(|| response.interact_pointer_pos()) {
             on_press(app, view, view.to_px(pos), pos, shift);
         }
     } else if response.dragged() {
@@ -341,14 +352,13 @@ fn editing(
             StrokeKind::Outside,
         );
     }
-    size_editor(app, ui.ctx(), region_pt);
 }
 
 /// 命中选区角点：返回 (角点下标, 对角点)。
 fn hit_corner(app: &SnipApp, view: View, pos_pt: Pos2) -> Option<(usize, P2)> {
     let corners = app.region.corners();
     for (i, c) in corners.iter().enumerate() {
-        if view.to_pt(*c).distance(pos_pt) <= HANDLE_PT * 1.8 {
+        if view.to_pt(*c).distance(pos_pt) <= CORNER_GRAB_PT {
             return Some((i, corners[(i + 2) % 4]));
         }
     }
@@ -359,7 +369,7 @@ fn hit_corner(app: &SnipApp, view: View, pos_pt: Pos2) -> Option<(usize, P2)> {
 /// 角点优先级更高，调用方需先测角点。
 fn hit_edge(app: &SnipApp, view: View, pos_pt: Pos2) -> Option<usize> {
     let r = view.rect_pt(app.region);
-    let tol = HANDLE_PT * 1.4;
+    let tol = EDGE_GRAB_PT;
     let in_x = pos_pt.x >= r.min.x - tol && pos_pt.x <= r.max.x + tol;
     let in_y = pos_pt.y >= r.min.y - tol && pos_pt.y <= r.max.y + tol;
     if in_y && (pos_pt.x - r.min.x).abs() <= tol {
@@ -595,8 +605,13 @@ fn constrain_square(start: P2, p: P2) -> P2 {
 fn update_cursor(app: &SnipApp, ui: &egui::Ui, view: View, pointer_px: Option<P2>) {
     let Some(p) = pointer_px else { return };
     let pos_pt = view.to_pt(p);
-    let icon = if hit_corner(app, view, pos_pt).is_some() {
-        CursorIcon::Grab
+    let icon = if let Some((i, _)) = hit_corner(app, view, pos_pt) {
+        // 0=左上 1=右上 2=右下 3=左下：主对角线用 NwSe，副对角线用 NeSw
+        if i % 2 == 0 {
+            CursorIcon::ResizeNwSe
+        } else {
+            CursorIcon::ResizeNeSw
+        }
     } else if let Some(edge) = hit_edge(app, view, pos_pt) {
         if edge % 2 == 0 {
             CursorIcon::ResizeHorizontal
@@ -633,50 +648,6 @@ fn dim_outside(painter: &egui::Painter, view: View, screen: Rect, region: RectF)
         if part.width() > 0.0 && part.height() > 0.0 {
             painter.rect_filled(part, 0.0, DIM);
         }
-    }
-}
-
-/// 选区尺寸编辑器：宽 × 高 可拖可双击输入，回车/失焦生效。
-/// 放在选区左上角外侧，与原来的只读标签同位置。
-fn size_editor(app: &mut SnipApp, ctx: &egui::Context, region_pt: Rect) {
-    let pos = Pos2::new(region_pt.min.x, (region_pt.min.y - 26.0).max(2.0));
-    let mut w = app.region.width().round();
-    let mut h = app.region.height().round();
-    let (sw, sh) = (app.shot.width as f32, app.shot.height as f32);
-    let mut changed = false;
-
-    egui::Area::new(egui::Id::new("size_editor"))
-        .fixed_pos(pos)
-        .show(ctx, |ui| {
-            egui::Frame::popup(ui.style())
-                .fill(Color32::from_black_alpha(200))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 3.0;
-                        ui.style_mut().drag_value_text_style = egui::TextStyle::Small;
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut w)
-                                    .speed(1.0)
-                                    .range(1.0..=sw as f64),
-                            )
-                            .on_hover_text("宽（像素）：拖动或双击输入")
-                            .changed();
-                        ui.label("×");
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut h)
-                                    .speed(1.0)
-                                    .range(1.0..=sh as f64),
-                            )
-                            .on_hover_text("高（像素）：拖动或双击输入")
-                            .changed();
-                    });
-                });
-        });
-
-    if changed {
-        app.set_region_size(w, h);
     }
 }
 

@@ -13,7 +13,7 @@ use super::{egui_color, SnipApp, View};
 /// 图标按钮边长（逻辑点）
 const BTN: f32 = 24.0;
 /// 工具栏最大宽度估计，用于位置夹取
-const BAR_W: f32 = 500.0;
+const BAR_W: f32 = 620.0;
 
 const TOOLS: &[(Tool, &str)] = &[
     (Tool::Select, "选择：移动/编辑已绘制元素"),
@@ -74,6 +74,9 @@ pub fn show(app: &mut SnipApp, ctx: &egui::Context) {
 }
 
 fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
+    size_edit(app, ui);
+    ui.separator();
+
     for (tool, tip) in TOOLS {
         let active = app.tool == *tool;
         let resp = icon_button(ui, active, tip, |p, r, c| draw_tool_icon(*tool, p, r, c));
@@ -135,6 +138,31 @@ fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     }
 }
 
+/// 选区尺寸编辑：宽 × 高，可拖可双击输入。
+/// 原先悬浮在选区左上角，会盖住选区内容，故并入工具栏最左侧。
+fn size_edit(app: &mut SnipApp, ui: &mut egui::Ui) {
+    let mut w = app.region.width().round();
+    let mut h = app.region.height().round();
+    let (sw, sh) = (app.shot.width as f32, app.shot.height as f32);
+    let mut changed = false;
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        ui.style_mut().drag_value_text_style = egui::TextStyle::Small;
+        changed |= ui
+            .add(egui::DragValue::new(&mut w).speed(1.0).range(1.0..=sw as f64))
+            .on_hover_text("宽（像素）：拖动或双击输入")
+            .changed();
+        ui.label("×");
+        changed |= ui
+            .add(egui::DragValue::new(&mut h).speed(1.0).range(1.0..=sh as f64))
+            .on_hover_text("高（像素）：拖动或双击输入")
+            .changed();
+    });
+    if changed {
+        app.set_region_size(w, h);
+    }
+}
+
 /// 当前色按钮 + 弹出调色板：取代常驻 8 个色块。
 fn color_picker(app: &mut SnipApp, ui: &mut egui::Ui) {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(BTN), Sense::click());
@@ -155,6 +183,9 @@ fn color_picker(app: &mut SnipApp, ui: &mut egui::Ui) {
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             ui.set_max_width(220.0);
+            // 取色器的色域方块/滑条宽度取自 slider_width（默认 100），
+            // 不加宽会缩在弹层左半边，右侧留一大片空白
+            ui.spacing_mut().slider_width = 205.0;
             ui.horizontal_wrapped(|ui| {
                 for c in PALETTE {
                     let (rect, resp) =
