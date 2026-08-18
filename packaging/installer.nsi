@@ -1,9 +1,12 @@
 ; LaterScreen Windows 安装器（NSIS）。
-; 由 scripts/package.sh 调用：
-;   makensis -DVERSION=x.y.z -DBINDIR=<exe 所在目录> -DOUTFILE=<输出路径> packaging/installer.nsi
+; 由 scripts/package.sh 调用：把本脚本与 lscreen.exe 复制到同一临时目录后
+; 在该目录内执行 makensis -DVERSION=x.y.z installer.nsi，
+; 产物 lscreen-setup.exe 再由脚本移到 dist/ 并改名。
+; （File/OutFile 一律用相对文件名：NSIS 在 Windows/POSIX 上对
+;   绝对路径分隔符的解析规则不同，相对同目录是唯一双平台稳妥解）
 Unicode true
 Name "LaterScreen ${VERSION}"
-OutFile "${OUTFILE}"
+OutFile "lscreen-setup.exe"
 InstallDir "$PROGRAMFILES64\LaterScreen"
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
@@ -15,7 +18,7 @@ UninstPage instfiles
 
 Section "Install"
   SetOutPath "$INSTDIR"
-  File "${BINDIR}/lscreen.exe"
+  File "lscreen.exe"
   CreateShortcut "$SMPROGRAMS\LaterScreen.lnk" "$INSTDIR\lscreen.exe"
   WriteUninstaller "$INSTDIR\uninstall.exe"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\LaterScreen" \

@@ -160,13 +160,16 @@ make_nsis() { # $1=target $2=bin
         echo "    跳过 exe 安装器：无 makensis（sudo apt install nsis / choco install nsis）"
         return
     }
+    # exe 与 .nsi 复制进同一临时目录、目录内编译、全用相对文件名：
+    # NSIS 对绝对路径的分隔符解析在 Windows/POSIX 上规则不同，
+    # 传绝对路径两边总有一边找不到文件（CI 已踩过）
+    local stage="$DIST/.stage/nsis-$1"
+    rm -rf "$stage" && mkdir -p "$stage"
+    cp "$2" "$stage/lscreen.exe"
+    cp packaging/installer.nsi "$stage/"
+    (cd "$stage" && makensis -V2 -DVERSION="$VERSION" installer.nsi >/dev/null)
     local out="$DIST/lscreen-v$VERSION-$1-setup.exe"
-    # NSIS 的 File/OutFile 相对路径是相对 .nsi 脚本目录解析的，必须传绝对路径；
-    # git-bash 下 makensis.exe 不认 /d/... 风格路径，用 pwd -W 转 Windows 风格
-    local wd="$PWD"
-    case "$(uname -s)" in MINGW* | MSYS*) wd="$(pwd -W)" ;; esac
-    makensis -V2 -DVERSION="$VERSION" -DBINDIR="$wd/$(dirname "$2")" \
-        -DOUTFILE="$wd/$out" packaging/installer.nsi >/dev/null
+    mv "$stage/lscreen-setup.exe" "$out"
     echo "    $out ($(du -h "$out" | cut -f1))"
 }
 
