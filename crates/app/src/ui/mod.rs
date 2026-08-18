@@ -88,6 +88,8 @@ pub struct SnipApp {
     /// 马赛克预览缓存：id -> (采样点数, 色块)
     /// 图元 id → (几何指纹, 网格色块)。指纹见 `canvas::mosaic_key`。
     pub mosaic_cache: HashMap<u64, (u64, Vec<(f32, f32, f32, Rgba)>)>,
+    /// 自定义取色器上次变更时刻：拖动取色时节流撤销快照（同滑杆）
+    pub color_drag_at: f64,
     /// 指针当前所在的图像像素坐标（取色用）
     pub cursor_px: Option<P2>,
     /// 结果面板（二维码/OCR 共用）：(标题, 文本条目)
@@ -129,6 +131,7 @@ impl SnipApp {
             drag: None,
             text_edit: None,
             mosaic_cache: HashMap::new(),
+            color_drag_at: f64::NEG_INFINITY,
             cursor_px: None,
             results_panel: None,
             scan_job: None,

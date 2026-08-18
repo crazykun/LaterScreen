@@ -120,9 +120,6 @@ fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     if action_button(ui, true, "保存为 PNG (Ctrl+S)", draw_save) {
         app.save_and_exit(ctx);
     }
-    if action_button(ui, true, "复制到剪贴板并退出 (Ctrl+C / 双击)", draw_copy) {
-        app.copy_and_exit(ctx);
-    }
     if action_button(ui, true, "识别选区内的二维码", draw_qr) {
         app.scan_qr(ctx);
     }
@@ -131,6 +128,10 @@ fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     }
     if action_button(ui, true, "退出 (Esc)", draw_close) {
         app.request_close(ctx);
+    }
+    // 最常用动作放最右：绿色对号，复制并退出
+    if action_button(ui, true, "复制到剪贴板并退出 (Ctrl+C / Enter / 双击)", draw_check) {
+        app.copy_and_exit(ctx);
     }
 }
 
@@ -148,36 +149,55 @@ fn color_picker(app: &mut SnipApp, ui: &mut egui::Ui) {
     );
     let resp = resp.on_hover_text("颜色");
 
-    egui::Popup::menu(&resp).show(|ui| {
-        ui.set_max_width(4.0 * (BTN + 4.0));
-        ui.horizontal_wrapped(|ui| {
-            for c in PALETTE {
-                let (rect, resp) =
-                    ui.allocate_exact_size(Vec2::splat(BTN - 4.0), Sense::click());
-                let painter = ui.painter();
-                painter.rect_filled(rect.shrink(1.0), 3.0, egui_color(*c));
-                if app.style.color == *c {
-                    painter.rect_stroke(
-                        rect,
-                        3.0,
-                        Stroke::new(2.0, Color32::from_rgb(0x21, 0x96, 0xf3)),
-                        StrokeKind::Outside,
-                    );
-                } else {
-                    painter.rect_stroke(
-                        rect.shrink(1.0),
-                        3.0,
-                        Stroke::new(1.0, Color32::from_gray(120)),
-                        StrokeKind::Inside,
-                    );
+    // CloseOnClickOutside：内嵌的自定义取色器要能连续交互，
+    // 预设色块点击后用 ui.close() 显式收起
+    egui::Popup::menu(&resp)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_max_width(4.0 * (BTN + 4.0));
+            ui.horizontal_wrapped(|ui| {
+                for c in PALETTE {
+                    let (rect, resp) =
+                        ui.allocate_exact_size(Vec2::splat(BTN - 4.0), Sense::click());
+                    let painter = ui.painter();
+                    painter.rect_filled(rect.shrink(1.0), 3.0, egui_color(*c));
+                    if app.style.color == *c {
+                        painter.rect_stroke(
+                            rect,
+                            3.0,
+                            Stroke::new(2.0, Color32::from_rgb(0x21, 0x96, 0xf3)),
+                            StrokeKind::Outside,
+                        );
+                    } else {
+                        painter.rect_stroke(
+                            rect.shrink(1.0),
+                            3.0,
+                            Stroke::new(1.0, Color32::from_gray(120)),
+                            StrokeKind::Inside,
+                        );
+                    }
+                    if resp.clicked() {
+                        app.style.color = *c;
+                        apply_style_to_selected(app, true);
+                        ui.close();
+                    }
                 }
-                if resp.clicked() {
-                    app.style.color = *c;
-                    apply_style_to_selected(app, true);
+            });
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("自定义");
+                let mut c32 = egui_color(app.style.color);
+                if ui.color_edit_button_srgba(&mut c32).changed() {
+                    app.style.color = Rgba([c32.r(), c32.g(), c32.b(), c32.a()]);
+                    // 取色器拖动每帧触发 changed()，按时间窗节流快照：
+                    // 间隔 >0.6s 视为新一次调整，压一次撤销快照
+                    let now = ui.input(|i| i.time);
+                    let snapshot = now - app.color_drag_at > 0.6;
+                    app.color_drag_at = now;
+                    apply_style_to_selected(app, snapshot);
                 }
-            }
+            });
         });
-    });
 }
 
 /// 可选中的图标按钮（工具）。
@@ -384,13 +404,18 @@ fn draw_save(p: &egui::Painter, r: Rect, c: Color32) {
     );
 }
 
-fn draw_copy(p: &egui::Painter, r: Rect, c: Color32) {
-    let s = Stroke::new(1.3, c);
+/// 绿色对号：复制并退出（最常用动作，固定绿色突出）。
+fn draw_check(p: &egui::Painter, r: Rect, _c: Color32) {
+    let s = Stroke::new(2.0, Color32::from_rgb(0x4c, 0xaf, 0x50));
     let w = r.width();
-    let back = Rect::from_min_size(r.min, Vec2::splat(w * 0.7));
-    let front = Rect::from_min_size(r.min + Vec2::splat(w * 0.3), Vec2::splat(w * 0.7));
-    p.rect_stroke(back, 1.0, s, StrokeKind::Inside);
-    p.rect_stroke(front, 1.0, s, StrokeKind::Inside);
+    p.add(Shape::line(
+        vec![
+            Pos2::new(r.min.x, r.min.y + w * 0.55),
+            Pos2::new(r.min.x + w * 0.38, r.max.y),
+            Pos2::new(r.max.x, r.min.y + w * 0.08),
+        ],
+        s,
+    ));
 }
 
 fn draw_qr(p: &egui::Painter, r: Rect, c: Color32) {

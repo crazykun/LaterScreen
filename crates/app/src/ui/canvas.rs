@@ -809,7 +809,12 @@ pub fn show_text_editor(app: &mut SnipApp, ctx: &egui::Context) {
                     .desired_width(320.0)
                     .hint_text("输入文本…");
                 let r = ui.add(te);
-                r.request_focus();
+                // 只在未持有焦点时请求：egui 的 request_focus 会无条件
+                // interrupt_ime，每帧调用等于每帧销毁 IME 上下文，
+                // 中文输入法（fcitx5 等）的组合窗口刚弹出就被杀，无法输入中文
+                if !r.has_focus() {
+                    r.request_focus();
+                }
                 ui.horizontal(|ui| {
                     if ui.button("确定 (Ctrl+Enter)").clicked()
                         || ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter))
