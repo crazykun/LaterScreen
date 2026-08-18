@@ -161,8 +161,12 @@ make_nsis() { # $1=target $2=bin
         return
     }
     local out="$DIST/lscreen-v$VERSION-$1-setup.exe"
-    makensis -V2 -DVERSION="$VERSION" -DBINDIR="$(dirname "$2")" -DOUTFILE="$out" \
-        packaging/installer.nsi >/dev/null
+    # NSIS 的 File/OutFile 相对路径是相对 .nsi 脚本目录解析的，必须传绝对路径；
+    # git-bash 下 makensis.exe 不认 /d/... 风格路径，用 pwd -W 转 Windows 风格
+    local wd="$PWD"
+    case "$(uname -s)" in MINGW* | MSYS*) wd="$(pwd -W)" ;; esac
+    makensis -V2 -DVERSION="$VERSION" -DBINDIR="$wd/$(dirname "$2")" \
+        -DOUTFILE="$wd/$out" packaging/installer.nsi >/dev/null
     echo "    $out ($(du -h "$out" | cut -f1))"
 }
 
