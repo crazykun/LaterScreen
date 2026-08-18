@@ -166,6 +166,35 @@ make_nsis() { # $1=target $2=bin
     echo "    $out ($(du -h "$out" | cut -f1))"
 }
 
+make_dmg() { # $1=target $2=bin
+    [[ $HOST == *apple-darwin* ]] && command -v hdiutil >/dev/null || {
+        echo "    跳过 dmg：仅能在 macOS 上制作（hdiutil），CI 的 macOS 矩阵会出"
+        return
+    }
+    local stage="$DIST/.stage/dmg-$1" app out
+    app="$stage/LaterScreen.app"
+    rm -rf "$stage"
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+    install -m755 "$2" "$app/Contents/MacOS/lscreen"
+    sed "s/__VERSION__/$VERSION/g" packaging/Info.plist > "$app/Contents/Info.plist"
+    # png -> icns（sips/iconutil 为 macOS 自带；256 源图放大到 512 可接受）
+    local iconset="$DIST/.stage/icon.iconset"
+    rm -rf "$iconset" && mkdir -p "$iconset"
+    local s
+    for s in 16 32 64 128 256; do
+        sips -z "$s" "$s" packaging/icon.png --out "$iconset/icon_${s}x${s}.png" >/dev/null
+        sips -z "$((s * 2))" "$((s * 2))" packaging/icon.png \
+            --out "$iconset/icon_${s}x${s}@2x.png" >/dev/null
+    done
+    iconutil -c icns "$iconset" -o "$app/Contents/Resources/icon.icns"
+    # 拖拽安装：卷内放 /Applications 快捷方式
+    ln -s /Applications "$stage/Applications"
+    out="$DIST/lscreen-v$VERSION-$1.dmg"
+    rm -f "$out"
+    hdiutil create -quiet -volname "LaterScreen" -srcfolder "$stage" -format UDZO "$out"
+    echo "    $out ($(du -h "$out" | cut -f1))"
+}
+
 build_and_pack() {
     local t=$1 linker bin name stage out
     echo "==> 构建 $t"
@@ -210,6 +239,8 @@ build_and_pack() {
         make_appimage "$t" "$bin"
     elif [[ $t == *windows* ]]; then
         make_nsis "$t" "$bin"
+    elif [[ $t == *apple-darwin* ]]; then
+        make_dmg "$t" "$bin"
     fi
 }
 
@@ -250,7 +281,7 @@ rm -rf "$DIST/.stage"
 # 汇总校验和（覆盖式重建，包含 dist 下全部既有包）
 (
     cd "$DIST"
-    archives=$(ls *.tar.gz *.zip *.deb *.rpm *.AppImage *.exe 2>/dev/null || true)
+    archives=$(ls *.tar.gz *.zip *.deb *.rpm *.AppImage *.exe *.dmg 2>/dev/null || true)
     # shellcheck disable=SC2086
     [[ -n $archives ]] && sha256 $archives > SHA256SUMS
 )

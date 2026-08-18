@@ -6,7 +6,7 @@
 #           项目链接期仅 libc，见 scripts/package.sh 头部说明）
 #           每个架构出 tar.gz + deb + rpm + AppImage
 #   Windows x64（MSVC）：zip + NSIS 安装器 exe
-#   macOS   arm64 / x64：tar.gz
+#   macOS   arm64 / x64：tar.gz + dmg（拖拽安装式 .app）
 name: Release
 
 on:
@@ -72,6 +72,7 @@ jobs:
             dist/*.rpm
             dist/*.AppImage
             dist/*.exe
+            dist/*.dmg
           if-no-files-found: error
 
   release:

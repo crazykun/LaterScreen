@@ -105,7 +105,7 @@ cp target/release/lscreen ~/.local/bin/
 
 - **Linux**（x64 / arm64 / armv7 / x86）：tar.gz + **deb + rpm + AppImage**
 - **Windows**（x64）：zip + **NSIS 安装器 exe**
-- **macOS**（arm64 / x64）：tar.gz（仅 CI 出包）
+- **macOS**（arm64 / x64）：tar.gz + **dmg**（拖拽安装式 .app，仅 CI 出包）
 
 ```bash
 scripts/package.sh              # 打包本机具备工具链的全部默认目标
