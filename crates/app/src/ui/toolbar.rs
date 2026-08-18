@@ -1,21 +1,30 @@
 //! 工具栏：悬浮在选区下方（放不下则上方）。
+//!
+//! 按钮全部为 Painter 手绘矢量图标（12px 线稿）+ hover 文案：
+//! 不依赖任何字体图标/emoji 覆盖，任何系统上渲染一致；文字仅用于
+//! 标号「1」与 OCR「A」两个拉丁字形（egui 内置字体必有）。
 
 use eframe::egui;
-use egui::{Align2, Color32, Pos2, Stroke, StrokeKind, Vec2};
+use egui::{Color32, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Vec2};
 use lscreen_core::{ElementKind, P2, Rgba, Tool};
 
 use super::{egui_color, SnipApp, View};
 
-const TOOLS: &[(Tool, &str, &str)] = &[
-    (Tool::Select, "选择", "选择/移动/编辑已绘制元素"),
-    (Tool::Rect, "矩形", "拖拽绘制矩形，Shift 正方形"),
-    (Tool::Ellipse, "椭圆", "拖拽绘制椭圆，Shift 正圆"),
-    (Tool::Arrow, "箭头", "拖拽绘制箭头"),
-    (Tool::Curve, "画笔", "自由曲线，Shift 直线"),
-    (Tool::Marker, "标号", "单击放置自增序号"),
-    (Tool::Text, "文本", "单击输入文字"),
-    (Tool::Mosaic, "马赛克", "涂抹打码"),
-    (Tool::Eraser, "橡皮", "擦除标注恢复原图"),
+/// 图标按钮边长（逻辑点）
+const BTN: f32 = 24.0;
+/// 工具栏最大宽度估计，用于位置夹取
+const BAR_W: f32 = 500.0;
+
+const TOOLS: &[(Tool, &str)] = &[
+    (Tool::Select, "选择：移动/编辑已绘制元素"),
+    (Tool::Rect, "矩形：拖拽绘制，Shift 正方形"),
+    (Tool::Ellipse, "椭圆：拖拽绘制，Shift 正圆"),
+    (Tool::Arrow, "箭头：拖拽绘制"),
+    (Tool::Curve, "画笔：自由曲线，Shift 直线"),
+    (Tool::Marker, "标号：单击放置自增序号"),
+    (Tool::Text, "文本：单击输入文字"),
+    (Tool::Mosaic, "马赛克：涂抹打码"),
+    (Tool::Eraser, "橡皮：擦除标注恢复原图"),
 ];
 
 const PALETTE: &[Rgba] = &[
@@ -38,7 +47,7 @@ pub fn show(app: &mut SnipApp, ctx: &egui::Context) {
     let region_pt = view.rect_pt(app.region);
 
     // 默认放选区下方；空间不足放上方；再不足贴屏幕底部
-    const BAR_H: f32 = 40.0;
+    const BAR_H: f32 = 36.0;
     let y = if region_pt.max.y + BAR_H + 12.0 < screen.max.y {
         region_pt.max.y + 8.0
     } else if region_pt.min.y - BAR_H - 12.0 > screen.min.y {
@@ -49,13 +58,15 @@ pub fn show(app: &mut SnipApp, ctx: &egui::Context) {
     let x = region_pt
         .min
         .x
-        .clamp(screen.min.x + 4.0, (screen.max.x - 620.0).max(screen.min.x + 4.0));
+        .max(screen.min.x + 4.0)
+        .min((screen.max.x - BAR_W).max(screen.min.x + 4.0));
 
     egui::Area::new(egui::Id::new("toolbar"))
         .fixed_pos(Pos2::new(x, y))
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
                     bar_contents(app, ui, ctx);
                 });
             });
@@ -63,9 +74,10 @@ pub fn show(app: &mut SnipApp, ctx: &egui::Context) {
 }
 
 fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
-    for (tool, label, tip) in TOOLS {
+    for (tool, tip) in TOOLS {
         let active = app.tool == *tool;
-        if ui.selectable_label(active, *label).on_hover_text(*tip).clicked() {
+        let resp = icon_button(ui, active, tip, |p, r, c| draw_tool_icon(*tool, p, r, c));
+        if resp.clicked() {
             app.tool = *tool;
             if *tool != Tool::Select {
                 app.selected = None;
@@ -74,38 +86,15 @@ fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     }
     ui.separator();
 
-    // 颜色
-    for c in PALETTE {
-        let (rect, resp) =
-            ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::click());
-        let painter = ui.painter();
-        painter.rect_filled(rect.shrink(1.0), 3.0, egui_color(*c));
-        if app.style.color == *c {
-            painter.rect_stroke(
-                rect,
-                3.0,
-                Stroke::new(2.0, Color32::from_rgb(0x21, 0x96, 0xf3)),
-                StrokeKind::Outside,
-            );
-        } else {
-            painter.rect_stroke(
-                rect.shrink(1.0),
-                3.0,
-                Stroke::new(1.0, Color32::from_gray(120)),
-                StrokeKind::Inside,
-            );
-        }
-        if resp.clicked() {
-            app.style.color = *c;
-            apply_style_to_selected(app, true);
-        }
-    }
+    color_picker(app, ui);
     ui.separator();
 
     // 线宽 / 字号
+    ui.spacing_mut().slider_width = 56.0;
     let mut width = app.style.width;
-    ui.label("粗细");
-    let slider = ui.add(egui::Slider::new(&mut width, 1.0..=12.0).show_value(false));
+    let slider = ui
+        .add(egui::Slider::new(&mut width, 1.0..=12.0).show_value(false))
+        .on_hover_text("粗细：线宽与字号");
     if slider.changed() {
         app.style.width = width;
         app.style.font_size = 12.0 + width * 4.0;
@@ -118,44 +107,335 @@ fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
 
     let can_undo = app.doc.can_undo();
     let can_redo = app.doc.can_redo();
-    if ui
-        .add_enabled(can_undo, egui::Button::new("撤销"))
-        .on_hover_text("Ctrl+Z")
-        .clicked()
-    {
+    if action_button(ui, can_undo, "撤销 (Ctrl+Z)", draw_undo) {
         app.selected = None;
         app.doc.undo();
     }
-    if ui
-        .add_enabled(can_redo, egui::Button::new("重做"))
-        .on_hover_text("Ctrl+Y")
-        .clicked()
-    {
+    if action_button(ui, can_redo, "重做 (Ctrl+Y)", draw_redo) {
         app.selected = None;
         app.doc.redo();
     }
     ui.separator();
 
-    if ui.button("保存").on_hover_text("Ctrl+S 保存为 PNG").clicked() {
+    if action_button(ui, true, "保存为 PNG (Ctrl+S)", draw_save) {
         app.save_and_exit(ctx);
     }
-    if ui
-        .button("复制")
-        .on_hover_text("Ctrl+C / 双击 复制到剪贴板并退出")
-        .clicked()
-    {
+    if action_button(ui, true, "复制到剪贴板并退出 (Ctrl+C / 双击)", draw_copy) {
         app.copy_and_exit(ctx);
     }
-    if ui.button("二维码").on_hover_text("识别选区内的二维码").clicked() {
+    if action_button(ui, true, "识别选区内的二维码", draw_qr) {
         app.scan_qr(ctx);
     }
-    if ui.button("OCR").on_hover_text("识别选区内的文字").clicked() {
+    if action_button(ui, true, "识别选区内的文字 (OCR)", draw_ocr) {
         app.scan_ocr(ctx);
     }
-    if ui.button("✕").on_hover_text("Esc 退出").clicked() {
+    if action_button(ui, true, "退出 (Esc)", draw_close) {
         app.request_close(ctx);
     }
-    let _ = Align2::CENTER_CENTER; // 保留引用避免未使用告警（后续版本使用）
+}
+
+/// 当前色按钮 + 弹出调色板：取代常驻 8 个色块。
+fn color_picker(app: &mut SnipApp, ui: &mut egui::Ui) {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(BTN), Sense::click());
+    let painter = ui.painter();
+    let swatch = rect.shrink(5.0);
+    painter.rect_filled(swatch, 3.0, egui_color(app.style.color));
+    painter.rect_stroke(
+        swatch,
+        3.0,
+        Stroke::new(1.0, ui.visuals().widgets.inactive.fg_stroke.color),
+        StrokeKind::Outside,
+    );
+    let resp = resp.on_hover_text("颜色");
+
+    egui::Popup::menu(&resp).show(|ui| {
+        ui.set_max_width(4.0 * (BTN + 4.0));
+        ui.horizontal_wrapped(|ui| {
+            for c in PALETTE {
+                let (rect, resp) =
+                    ui.allocate_exact_size(Vec2::splat(BTN - 4.0), Sense::click());
+                let painter = ui.painter();
+                painter.rect_filled(rect.shrink(1.0), 3.0, egui_color(*c));
+                if app.style.color == *c {
+                    painter.rect_stroke(
+                        rect,
+                        3.0,
+                        Stroke::new(2.0, Color32::from_rgb(0x21, 0x96, 0xf3)),
+                        StrokeKind::Outside,
+                    );
+                } else {
+                    painter.rect_stroke(
+                        rect.shrink(1.0),
+                        3.0,
+                        Stroke::new(1.0, Color32::from_gray(120)),
+                        StrokeKind::Inside,
+                    );
+                }
+                if resp.clicked() {
+                    app.style.color = *c;
+                    apply_style_to_selected(app, true);
+                }
+            }
+        });
+    });
+}
+
+/// 可选中的图标按钮（工具）。
+fn icon_button(
+    ui: &mut egui::Ui,
+    active: bool,
+    tip: &str,
+    draw: impl FnOnce(&egui::Painter, Rect, Color32),
+) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(BTN), Sense::click());
+    let vis = ui.style().interact_selectable(&resp, active);
+    if active || resp.hovered() {
+        ui.painter().rect_filled(rect, 4.0, vis.bg_fill);
+    }
+    draw(ui.painter(), rect.shrink(6.0), vis.fg_stroke.color);
+    resp.on_hover_text(tip)
+}
+
+/// 动作图标按钮（可禁用），返回是否被点击。
+fn action_button(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    tip: &str,
+    draw: impl FnOnce(&egui::Painter, Rect, Color32),
+) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(BTN), Sense::click());
+    let vis = if enabled {
+        ui.style().interact(&resp)
+    } else {
+        &ui.style().visuals.widgets.noninteractive
+    };
+    if enabled && resp.hovered() {
+        ui.painter().rect_filled(rect, 4.0, vis.bg_fill);
+    }
+    let color = if enabled {
+        vis.fg_stroke.color
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    draw(ui.painter(), rect.shrink(6.0), color);
+    let resp = resp.on_hover_text(tip);
+    enabled && resp.clicked()
+}
+
+fn draw_tool_icon(tool: Tool, p: &egui::Painter, r: Rect, c: Color32) {
+    match tool {
+        Tool::Select => draw_cursor(p, r, c),
+        Tool::Rect => {
+            p.rect_stroke(r.shrink(0.5), 1.0, Stroke::new(1.4, c), StrokeKind::Inside);
+        }
+        Tool::Ellipse => {
+            p.circle_stroke(r.center(), r.width() * 0.48, Stroke::new(1.4, c));
+        }
+        Tool::Arrow => {
+            p.arrow(
+                r.left_bottom(),
+                r.right_top() - r.left_bottom(),
+                Stroke::new(1.4, c),
+            );
+        }
+        Tool::Curve => {
+            let w = r.width();
+            let pts = vec![
+                r.left_bottom(),
+                Pos2::new(r.min.x + w * 0.35, r.min.y + w * 0.25),
+                Pos2::new(r.min.x + w * 0.65, r.min.y + w * 0.75),
+                r.right_top(),
+            ];
+            p.add(Shape::line(pts, Stroke::new(1.4, c)));
+        }
+        Tool::Marker => {
+            p.circle_stroke(r.center(), r.width() * 0.48, Stroke::new(1.2, c));
+            p.text(
+                r.center(),
+                egui::Align2::CENTER_CENTER,
+                "1",
+                egui::FontId::proportional(r.height() * 0.75),
+                c,
+            );
+        }
+        Tool::Text => {
+            let s = Stroke::new(1.4, c);
+            p.line_segment([r.left_top(), r.right_top()], s);
+            p.line_segment([r.center_top(), r.center_bottom()], s);
+        }
+        Tool::Mosaic => {
+            let cell = r.width() / 3.0;
+            for gy in 0..3 {
+                for gx in 0..3 {
+                    if (gx + gy) % 2 == 0 {
+                        let min = Pos2::new(r.min.x + gx as f32 * cell, r.min.y + gy as f32 * cell);
+                        p.rect_filled(Rect::from_min_size(min, Vec2::splat(cell)), 0.0, c);
+                    }
+                }
+            }
+        }
+        Tool::Eraser => {
+            // 斜置的橡皮：平行四边形 + 中缝
+            let w = r.width();
+            let pts = vec![
+                Pos2::new(r.min.x, r.max.y - w * 0.3),
+                Pos2::new(r.min.x + w * 0.55, r.min.y),
+                r.right_top() + Vec2::new(0.0, w * 0.3),
+                Pos2::new(r.min.x + w * 0.45, r.max.y),
+            ];
+            p.add(Shape::closed_line(pts, Stroke::new(1.3, c)));
+            p.line_segment(
+                [
+                    Pos2::new(r.min.x + w * 0.28, r.max.y - w * 0.15),
+                    Pos2::new(r.min.x + w * 0.83, r.min.y + w * 0.15),
+                ],
+                Stroke::new(1.3, c),
+            );
+        }
+        Tool::Line => {
+            p.line_segment([r.left_bottom(), r.right_top()], Stroke::new(1.4, c));
+        }
+    }
+}
+
+/// 鼠标指针箭头（选择工具）。
+fn draw_cursor(p: &egui::Painter, r: Rect, c: Color32) {
+    let w = r.width();
+    let o = r.min;
+    let pts = vec![
+        o + Vec2::new(w * 0.15, 0.0),
+        o + Vec2::new(w * 0.15, w * 0.85),
+        o + Vec2::new(w * 0.38, w * 0.63),
+        o + Vec2::new(w * 0.55, w * 1.0),
+        o + Vec2::new(w * 0.70, w * 0.92),
+        o + Vec2::new(w * 0.53, w * 0.56),
+        o + Vec2::new(w * 0.85, w * 0.53),
+    ];
+    p.add(Shape::closed_line(pts, Stroke::new(1.2, c)));
+}
+
+fn draw_undo(p: &egui::Painter, r: Rect, c: Color32) {
+    let s = Stroke::new(1.4, c);
+    let w = r.width();
+    // 底部弧线简化为折线 + 左向箭头
+    p.line_segment(
+        [
+            Pos2::new(r.min.x, r.min.y + w * 0.35),
+            Pos2::new(r.max.x - w * 0.2, r.min.y + w * 0.35),
+        ],
+        s,
+    );
+    p.line_segment(
+        [
+            Pos2::new(r.max.x - w * 0.2, r.min.y + w * 0.35),
+            Pos2::new(r.max.x - w * 0.2, r.max.y - w * 0.1),
+        ],
+        s,
+    );
+    // 箭头头部（指向左）
+    let tip = Pos2::new(r.min.x, r.min.y + w * 0.35);
+    p.line_segment([tip, tip + Vec2::new(w * 0.28, -w * 0.25)], s);
+    p.line_segment([tip, tip + Vec2::new(w * 0.28, w * 0.25)], s);
+}
+
+fn draw_redo(p: &egui::Painter, r: Rect, c: Color32) {
+    let s = Stroke::new(1.4, c);
+    let w = r.width();
+    p.line_segment(
+        [
+            Pos2::new(r.max.x, r.min.y + w * 0.35),
+            Pos2::new(r.min.x + w * 0.2, r.min.y + w * 0.35),
+        ],
+        s,
+    );
+    p.line_segment(
+        [
+            Pos2::new(r.min.x + w * 0.2, r.min.y + w * 0.35),
+            Pos2::new(r.min.x + w * 0.2, r.max.y - w * 0.1),
+        ],
+        s,
+    );
+    let tip = Pos2::new(r.max.x, r.min.y + w * 0.35);
+    p.line_segment([tip, tip + Vec2::new(-w * 0.28, -w * 0.25)], s);
+    p.line_segment([tip, tip + Vec2::new(-w * 0.28, w * 0.25)], s);
+}
+
+fn draw_save(p: &egui::Painter, r: Rect, c: Color32) {
+    let s = Stroke::new(1.3, c);
+    let w = r.width();
+    // 软盘：外框 + 顶部标签 + 底部滑块
+    p.rect_stroke(r.shrink(0.5), 1.5, s, StrokeKind::Inside);
+    p.rect_filled(
+        Rect::from_min_size(
+            Pos2::new(r.min.x + w * 0.3, r.min.y + 1.0),
+            Vec2::new(w * 0.4, w * 0.25),
+        ),
+        0.0,
+        c,
+    );
+    p.rect_stroke(
+        Rect::from_min_size(
+            Pos2::new(r.min.x + w * 0.22, r.max.y - w * 0.4),
+            Vec2::new(w * 0.56, w * 0.35),
+        ),
+        0.0,
+        Stroke::new(1.0, c),
+        StrokeKind::Inside,
+    );
+}
+
+fn draw_copy(p: &egui::Painter, r: Rect, c: Color32) {
+    let s = Stroke::new(1.3, c);
+    let w = r.width();
+    let back = Rect::from_min_size(r.min, Vec2::splat(w * 0.7));
+    let front = Rect::from_min_size(r.min + Vec2::splat(w * 0.3), Vec2::splat(w * 0.7));
+    p.rect_stroke(back, 1.0, s, StrokeKind::Inside);
+    p.rect_stroke(front, 1.0, s, StrokeKind::Inside);
+}
+
+fn draw_qr(p: &egui::Painter, r: Rect, c: Color32) {
+    let w = r.width();
+    let sq = w * 0.4;
+    let corner = |min: Pos2| {
+        p.rect_stroke(
+            Rect::from_min_size(min, Vec2::splat(sq)),
+            0.0,
+            Stroke::new(1.2, c),
+            StrokeKind::Inside,
+        );
+    };
+    corner(r.min);
+    corner(Pos2::new(r.max.x - sq, r.min.y));
+    corner(Pos2::new(r.min.x, r.max.y - sq));
+    p.rect_filled(
+        Rect::from_min_size(r.max - Vec2::splat(sq * 0.9), Vec2::splat(sq * 0.6)),
+        0.0,
+        c,
+    );
+}
+
+fn draw_ocr(p: &egui::Painter, r: Rect, c: Color32) {
+    p.text(
+        Pos2::new(r.center().x, r.min.y + r.height() * 0.38),
+        egui::Align2::CENTER_CENTER,
+        "A",
+        egui::FontId::proportional(r.height() * 0.9),
+        c,
+    );
+    p.line_segment(
+        [
+            Pos2::new(r.min.x, r.max.y - 1.0),
+            Pos2::new(r.max.x, r.max.y - 1.0),
+        ],
+        Stroke::new(1.3, c),
+    );
+}
+
+fn draw_close(p: &egui::Painter, r: Rect, c: Color32) {
+    let s = Stroke::new(1.5, c);
+    let r = r.shrink(1.0);
+    p.line_segment([r.left_top(), r.right_bottom()], s);
+    p.line_segment([r.right_top(), r.left_bottom()], s);
 }
 
 /// 修改样式时同步应用到当前选中的图元。
