@@ -94,6 +94,8 @@ pub struct SnipApp {
     pub color_drag_at: f64,
     /// 指针当前所在的图像像素坐标（取色用）
     pub cursor_px: Option<P2>,
+    /// 工具栏尺寸输入的未提交值：编辑中（聚焦/拖拽）暂存，结束时一次性应用
+    pub size_edit_buf: Option<(f32, f32)>,
     /// 结果面板（二维码/OCR 共用）：(标题, 文本条目)
     pub results_panel: Option<(String, Vec<String>)>,
     /// 后台识别任务（OCR/QR 在线程中跑，避免 UI 假死）
@@ -135,6 +137,7 @@ impl SnipApp {
             mosaic_cache: HashMap::new(),
             color_drag_at: f64::NEG_INFINITY,
             cursor_px: None,
+            size_edit_buf: None,
             results_panel: None,
             scan_job: None,
             toast: None,

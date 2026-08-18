@@ -140,25 +140,36 @@ fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
 
 /// 选区尺寸编辑：宽 × 高，可拖可双击输入。
 /// 原先悬浮在选区左上角，会盖住选区内容，故并入工具栏最左侧。
+///
+/// 编辑期间（输入框聚焦或拖拽中）数值只进暂存 `size_edit_buf`，
+/// 失焦/松手才一次性应用——键入 "1920" 逐字符生效会让选区先跳到
+/// 1、19、192 各闪一帧。
 fn size_edit(app: &mut SnipApp, ui: &mut egui::Ui) {
-    let mut w = app.region.width().round();
-    let mut h = app.region.height().round();
     let (sw, sh) = (app.shot.width as f32, app.shot.height as f32);
-    let mut changed = false;
+    let (mut w, mut h) = app
+        .size_edit_buf
+        .unwrap_or_else(|| (app.region.width().round(), app.region.height().round()));
+
+    let mut editing = false;
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.x = 3.0;
-        ui.style_mut().drag_value_text_style = egui::TextStyle::Small;
-        changed |= ui
+        // 与图标按钮（BTN）同高：压小内边距，抬高交互高度，字号用正文而非 Small
+        ui.spacing_mut().interact_size.y = BTN;
+        ui.spacing_mut().button_padding = Vec2::new(5.0, 2.0);
+        ui.style_mut().drag_value_text_style = egui::TextStyle::Body;
+        let rw = ui
             .add(egui::DragValue::new(&mut w).speed(1.0).range(1.0..=sw as f64))
-            .on_hover_text("宽（像素）：拖动或双击输入")
-            .changed();
+            .on_hover_text("宽（像素）：拖动或双击输入，离开生效");
         ui.label("×");
-        changed |= ui
+        let rh = ui
             .add(egui::DragValue::new(&mut h).speed(1.0).range(1.0..=sh as f64))
-            .on_hover_text("高（像素）：拖动或双击输入")
-            .changed();
+            .on_hover_text("高（像素）：拖动或双击输入，离开生效");
+        editing = rw.has_focus() || rh.has_focus() || rw.dragged() || rh.dragged();
     });
-    if changed {
+
+    if editing {
+        app.size_edit_buf = Some((w, h));
+    } else if let Some((w, h)) = app.size_edit_buf.take() {
         app.set_region_size(w, h);
     }
 }
