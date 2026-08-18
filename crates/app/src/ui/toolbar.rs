@@ -299,23 +299,23 @@ fn draw_tool_icon(tool: Tool, p: &egui::Painter, r: Rect, c: Color32) {
             let w = r.width();
             let o = r.min;
             p.rect_filled(
-                Rect::from_min_max(o + Vec2::new(w * 0.40, 0.0), o + Vec2::new(w * 0.60, w * 0.30)),
+                Rect::from_min_max(o + Vec2::new(w * 0.38, 0.0), o + Vec2::new(w * 0.62, w * 0.28)),
                 0.5,
                 c,
             );
             p.rect_filled(
                 Rect::from_min_max(
-                    o + Vec2::new(w * 0.20, w * 0.32),
-                    o + Vec2::new(w * 0.80, w * 0.54),
+                    o + Vec2::new(w * 0.10, w * 0.30),
+                    o + Vec2::new(w * 0.90, w * 0.56),
                 ),
                 0.5,
                 c,
             );
-            let s = Stroke::new(1.2, c);
+            let s = Stroke::new(1.3, c);
             for i in 0..4 {
-                let x = o.x + w * (0.26 + i as f32 * 0.16);
+                let x = o.x + w * (0.18 + i as f32 * 0.213);
                 p.line_segment(
-                    [Pos2::new(x, o.y + w * 0.60), Pos2::new(x, o.y + w * 0.95)],
+                    [Pos2::new(x, o.y + w * 0.62), Pos2::new(x, o.y + w * 1.0)],
                     s,
                 );
             }
