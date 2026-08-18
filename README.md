@@ -1,7 +1,7 @@
 # LaterScreen
 
-跨平台截图标注工具（Windows / macOS / Linux）。单文件、体积小、启动快、小而美常驻。
-命令名 `lscreen`，官网 [ailater.com](https://ailater.com)。
+跨平台截图标注工具（Windows / macOS / Linux）。单文件、体积小、启动快、小而美。
+命令名 `lscreen`。
 
 ## 当前状态（M1–M3 已完成）
 
