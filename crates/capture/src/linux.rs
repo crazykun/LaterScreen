@@ -20,11 +20,13 @@ fn err<E: std::fmt::Display>(e: E) -> CaptureError {
 }
 
 fn ensure_x11() -> Result<()> {
-    if std::env::var("WAYLAND_DISPLAY").is_ok()
-        && std::env::var("XDG_SESSION_TYPE").map_or(false, |t| t == "wayland")
-    {
+    // 会话类型为 wayland，或无 DISPLAY 的纯 Wayland 会话（XDG_SESSION_TYPE
+    // 并不总是被设置）都直接给明确报错，而不是让 x11rb 报底层连接错误
+    let session_wayland = std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland");
+    let no_x11 = std::env::var_os("DISPLAY").is_none();
+    if session_wayland || (no_x11 && std::env::var_os("WAYLAND_DISPLAY").is_some()) {
         return Err(CaptureError(
-            "Wayland 会话暂不支持，敬请期待（当前仅支持 X11 / XWayland）".into(),
+            "Wayland 会话暂不支持（X11 抓屏抓不到原生 Wayland 窗口），敬请期待".into(),
         ));
     }
     Ok(())
@@ -110,7 +112,9 @@ fn grab(conn: &impl Connection, screen: &Screen, m: &MonitorInfo) -> Result<Scre
     })
 }
 
-fn with_conn<T>(f: impl FnOnce(&x11rb::rust_connection::RustConnection, &Screen) -> Result<T>) -> Result<T> {
+fn with_conn<T>(
+    f: impl FnOnce(&x11rb::rust_connection::RustConnection, &Screen) -> Result<T>,
+) -> Result<T> {
     ensure_x11()?;
     let (conn, screen_num) = x11rb::connect(None).map_err(err)?;
     let screen = conn.setup().roots[screen_num].clone();
@@ -134,9 +138,7 @@ pub fn capture_at(x: i32, y: i32) -> Result<Screenshot> {
         let mons = monitors(conn, screen)?;
         let m = mons
             .iter()
-            .find(|m| {
-                x >= m.x && x < m.x + m.width as i32 && y >= m.y && y < m.y + m.height as i32
-            })
+            .find(|m| x >= m.x && x < m.x + m.width as i32 && y >= m.y && y < m.y + m.height as i32)
             .or_else(|| mons.first())
             .ok_or_else(|| CaptureError("no monitor found".into()))?;
         grab(conn, screen, m)
@@ -166,16 +168,30 @@ pub fn cursor_position() -> Option<(i32, i32)> {
 
 pub fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<Screenshot> {
     with_conn(|conn, screen| {
-        // 裁剪到根窗口范围，避免 GetImage 越界报 BadMatch
-        let (sw, sh) = (
-            screen.width_in_pixels as i32,
-            screen.height_in_pixels as i32,
-        );
-        let x0 = x.clamp(0, sw);
-        let y0 = y.clamp(0, sh);
+        // 可截区域 = 全部显示器的并集。显示器原点可为负（位于主屏左侧/上方），
+        // 钳到根窗口 [0, sw] 会把负坐标区域错误地折进主屏。
+        let mons = monitors(conn, screen)?;
+        let (mut min_x, mut min_y, mut max_x, mut max_y) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for m in &mons {
+            min_x = min_x.min(m.x);
+            min_y = min_y.min(m.y);
+            max_x = max_x.max(m.x + m.width as i32);
+            max_y = max_y.max(m.y + m.height as i32);
+        }
+        if max_x <= min_x || max_y <= min_y {
+            return Err(CaptureError("no monitor found".into()));
+        }
+        let x0 = x.max(min_x).min(max_x);
+        let y0 = y.max(min_y).min(max_y);
         // w/h 来自 u32，转 i32 可能为负；saturating_add 避免 debug 下溢出 panic
-        let x1 = x.saturating_add(w.min(i32::MAX as u32) as i32).clamp(x0, sw);
-        let y1 = y.saturating_add(h.min(i32::MAX as u32) as i32).clamp(y0, sh);
+        let x1 = x
+            .saturating_add(w.min(i32::MAX as u32) as i32)
+            .max(x0)
+            .min(max_x);
+        let y1 = y
+            .saturating_add(h.min(i32::MAX as u32) as i32)
+            .max(y0)
+            .min(max_y);
         if x1 - x0 < 1 || y1 - y0 < 1 {
             return Err(CaptureError("区域超出屏幕范围".into()));
         }

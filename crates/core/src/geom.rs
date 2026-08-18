@@ -45,7 +45,10 @@ impl RectF {
     }
 
     pub fn center(&self) -> P2 {
-        P2::new((self.min.x + self.max.x) / 2.0, (self.min.y + self.max.y) / 2.0)
+        P2::new(
+            (self.min.x + self.max.x) / 2.0,
+            (self.min.y + self.max.y) / 2.0,
+        )
     }
 
     pub fn contains(&self, p: P2) -> bool {

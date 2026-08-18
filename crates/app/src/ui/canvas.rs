@@ -9,9 +9,9 @@ use egui::{
     TextureHandle, Vec2,
 };
 use lscreen_core::render::mosaic_cells;
-use lscreen_core::{Element, ElementKind, P2, RectF, Tool};
+use lscreen_core::{Element, ElementKind, RectF, Tool, P2};
 
-use super::{egui_color, DragOp, SnipApp, Stage, TextEditState, View};
+use super::{egui_color, DragOp, MosaicCache, SnipApp, Stage, TextEditState, View};
 
 /// 马赛克色块缓存的几何指纹：点数 + 全部坐标 + 笔刷/格子尺寸。
 /// f32 按位取整参与哈希，坐标变化（拖动、撤销）必然改变指纹。
@@ -85,7 +85,8 @@ fn picking(
     screen: Rect,
     texture: &TextureHandle,
 ) {
-    ui.ctx().output_mut(|o| o.cursor_icon = CursorIcon::Crosshair);
+    ui.ctx()
+        .output_mut(|o| o.cursor_icon = CursorIcon::Crosshair);
     if let Some(p) = app.cursor_px {
         draw_magnifier(app, painter, view, screen, p, texture);
     }
@@ -144,11 +145,17 @@ fn draw_magnifier(
     let c = zoom_rect.center();
     let cross = Stroke::new(1.0, Color32::from_rgba_unmultiplied(0x21, 0x96, 0xf3, 180));
     painter.line_segment(
-        [Pos2::new(zoom_rect.min.x, c.y), Pos2::new(zoom_rect.max.x, c.y)],
+        [
+            Pos2::new(zoom_rect.min.x, c.y),
+            Pos2::new(zoom_rect.max.x, c.y),
+        ],
         cross,
     );
     painter.line_segment(
-        [Pos2::new(c.x, zoom_rect.min.y), Pos2::new(c.x, zoom_rect.max.y)],
+        [
+            Pos2::new(c.x, zoom_rect.min.y),
+            Pos2::new(c.x, zoom_rect.max.y),
+        ],
         cross,
     );
     painter.rect_stroke(
@@ -205,7 +212,8 @@ fn selecting(
     view: View,
     screen: Rect,
 ) {
-    ui.ctx().output_mut(|o| o.cursor_icon = CursorIcon::Crosshair);
+    ui.ctx()
+        .output_mut(|o| o.cursor_icon = CursorIcon::Crosshair);
 
     if response.drag_started() {
         // 用按下原点而非当前位置：drag_started 触发时指针已越过拖动阈值
@@ -266,6 +274,12 @@ fn selecting(
 
 // ------------------------------------------------------------------ Editing
 
+/// 点击型工具（单击即完成一次完整操作）：Marker 连点、Text 开编辑器。
+/// 这类工具的双击是「快速连续两次操作」，不能被「双击=复制」吞掉。
+fn is_click_tool(t: Tool) -> bool {
+    matches!(t, Tool::Marker | Tool::Text)
+}
+
 fn editing(
     app: &mut SnipApp,
     ui: &egui::Ui,
@@ -282,39 +296,49 @@ fn editing(
         .map(|p| view.to_px(p));
 
     // ---- 输入 ----
-    if response.drag_started() {
-        // 命中测试用按下原点：drag_started 触发时指针已越过拖动阈值（约 6px），
-        // 在角点/边上按下后快速拖动，指针可能已滑出容差圈，
-        // 用当前位置测会出现「光标显示可拖、实际拖不动」
-        let origin = ui.input(|i| i.pointer.press_origin());
-        if let Some(pos) = origin.or_else(|| response.interact_pointer_pos()) {
-            on_press(app, view, view.to_px(pos), pos, shift);
+    // 文本编辑是模态的：点击画布任意处=提交当前输入，其余指针交互让位
+    // （否则再点一次 Text 会在编辑器底下遗留一个空文本图元）
+    if app.text_edit.is_some() {
+        if response.clicked() {
+            app.commit_text_edit();
         }
-    } else if response.dragged() {
-        if let Some(pos) = response.interact_pointer_pos() {
-            on_drag(app, view.to_px(pos), shift);
+    } else {
+        if response.drag_started() {
+            // 命中测试用按下原点：drag_started 触发时指针已越过拖动阈值（约 6px），
+            // 在角点/边上按下后快速拖动，指针可能已滑出容差圈，
+            // 用当前位置测会出现「光标显示可拖、实际拖不动」
+            let origin = ui.input(|i| i.pointer.press_origin());
+            if let Some(pos) = origin.or_else(|| response.interact_pointer_pos()) {
+                on_press(app, view, view.to_px(pos), pos, shift);
+            }
+        } else if response.dragged() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                on_drag(app, view.to_px(pos), shift);
+            }
         }
-    }
-    if response.drag_stopped() {
-        on_release(app);
-    }
-    // 原地单击：egui 的 drag_started 需要越过拖动阈值（约 6px），静止点击不会触发。
-    // 点击型工具（文本/标号）和 Select 的点选必须单独走一遍 press/release
-    if response.clicked() {
-        if let Some(pos) = response.interact_pointer_pos() {
-            on_press(app, view, view.to_px(pos), pos, shift);
+        if response.drag_stopped() {
             on_release(app);
         }
-    }
-    if response.double_clicked() {
-        on_double_click(app, ui.ctx(), pointer_px);
-    }
+        // 原地单击：egui 的 drag_started 需要越过拖动阈值（约 6px），静止点击不会触发。
+        // 点击型工具（文本/标号）和 Select 的点选必须单独走一遍 press/release。
+        // 双击的第二击让给 on_double_click（复制/编辑文本），避免先误放一个图元。
+        let swallow_second_click = response.double_clicked() && !is_click_tool(app.tool);
+        if response.clicked() && !swallow_second_click {
+            if let Some(pos) = response.interact_pointer_pos() {
+                on_press(app, view, view.to_px(pos), pos, shift);
+                on_release(app);
+            }
+        }
+        if response.double_clicked() {
+            on_double_click(app, ui.ctx(), pointer_px);
+        }
 
-    // ---- 悬停状态（仅 Select 工具） ----
-    app.hover = None;
-    if app.tool == Tool::Select && app.drag.is_none() {
-        if let Some(p) = pointer_px {
-            app.hover = app.doc.hit_top(p, HIT_TOL_PT * view.scale);
+        // ---- 悬停状态（仅 Select 工具） ----
+        app.hover = None;
+        if app.tool == Tool::Select && app.drag.is_none() {
+            if let Some(p) = pointer_px {
+                app.hover = app.doc.hit_top(p, HIT_TOL_PT * view.scale);
+            }
         }
     }
     update_cursor(app, ui, view, pointer_px);
@@ -323,12 +347,33 @@ fn editing(
     dim_outside(painter, view, screen, app.region);
     let region_pt = view.rect_pt(app.region);
     let clipped = painter.with_clip_rect(region_pt.expand(1.0));
-    for e in &app.doc.elements.clone() {
-        draw_element(app, &clipped, view, e, texture);
+    // 拆字段借用：遍历 elements（不可变）同时更新 mosaic_cache（可变），
+    // 免去每帧整体 clone
+    let editing_text_id = app.text_edit.as_ref().map(|t| t.id);
+    for e in &app.doc.elements {
+        draw_element(
+            &mut app.mosaic_cache,
+            &app.shot,
+            editing_text_id,
+            &clipped,
+            view,
+            e,
+            texture,
+        );
+    }
+    // 回收已删除/已撤销图元的马赛克缓存，长会话不泄漏
+    if !app.mosaic_cache.is_empty() {
+        app.mosaic_cache
+            .retain(|id, _| app.doc.elements.iter().any(|e| e.id == *id));
     }
     draw_highlights(app, painter, view);
 
-    painter.rect_stroke(region_pt, 0.0, Stroke::new(1.5, ACCENT), StrokeKind::Outside);
+    painter.rect_stroke(
+        region_pt,
+        0.0,
+        Stroke::new(1.5, ACCENT),
+        StrokeKind::Outside,
+    );
     // 8 个手柄：4 角 + 4 边中点（边中点提示整条边可拖）
     let r = app.region;
     let (cx, cy) = ((r.min.x + r.max.x) * 0.5, (r.min.y + r.max.y) * 0.5);
@@ -405,18 +450,26 @@ fn on_press(app: &mut SnipApp, view: View, p: P2, pos_pt: Pos2, shift: bool) {
             if let Some(e) = app.doc.get(id) {
                 for (idx, cp) in e.control_points().iter().enumerate() {
                     if view.to_pt(*cp).distance(pos_pt) <= HANDLE_PT * 1.8 {
-                        app.doc.begin_change();
-                        app.drag = Some(DragOp::ControlPoint { id, idx });
+                        // 快照推迟到首次真实位移（on_drag）：按下即松手的
+                        // 点选不应触发 begin_change 清空重做栈
+                        app.drag = Some(DragOp::ControlPoint {
+                            id,
+                            idx,
+                            began: false,
+                        });
                         return;
                     }
                 }
             }
         }
-        // 3. 命中图元 → 选中并准备移动
+        // 3. 命中图元 → 选中并准备移动（快照同样推迟到首次位移）
         if let Some(id) = app.doc.hit_top(p, HIT_TOL_PT * view.scale) {
             app.selected = Some(id);
-            app.doc.begin_change();
-            app.drag = Some(DragOp::MoveElem { id, last: p });
+            app.drag = Some(DragOp::MoveElem {
+                id,
+                last: p,
+                began: false,
+            });
             return;
         }
         app.selected = None;
@@ -494,7 +547,7 @@ fn on_drag(app: &mut SnipApp, p: P2, shift: bool) {
                 ElementKind::Curve { points }
                 | ElementKind::Mosaic { points }
                 | ElementKind::Eraser { points } => {
-                    if points.last().map_or(true, |l| l.dist(p) > 1.5) {
+                    if points.last().is_none_or(|l| l.dist(p) > 1.5) {
                         points.push(p);
                     }
                 }
@@ -502,15 +555,27 @@ fn on_drag(app: &mut SnipApp, p: P2, shift: bool) {
                 ElementKind::Text { .. } => {}
             }
         }
-        DragOp::MoveElem { id, last } => {
+        DragOp::MoveElem { id, last, began } => {
             let (dx, dy) = (p.x - last.x, p.y - last.y);
             *last = p;
+            if dx == 0.0 && dy == 0.0 {
+                return;
+            }
+            // 首次真实位移才压快照（begin_change 会清空重做栈）
+            if !*began {
+                *began = true;
+                app.doc.begin_change();
+            }
             let id = *id;
             if let Some(e) = app.doc.get_mut(id) {
                 e.translate(dx, dy);
             }
         }
-        DragOp::ControlPoint { id, idx } => {
+        DragOp::ControlPoint { id, idx, began } => {
+            if !*began {
+                *began = true;
+                app.doc.begin_change();
+            }
             let (id, idx) = (*id, *idx);
             if let Some(e) = app.doc.get_mut(id) {
                 e.set_control_point(idx, p);
@@ -547,27 +612,43 @@ fn on_drag(app: &mut SnipApp, p: P2, shift: bool) {
 }
 
 fn on_release(app: &mut SnipApp) {
-    if let Some(DragOp::Draw { id, .. }) = app.drag {
-        // 拖拽出的退化图形（没有实际尺寸）直接回滚
-        let degenerate = app.doc.get(id).is_some_and(|e| {
-            let b = e.bounds();
-            match e.kind {
-                ElementKind::Rect { .. }
-                | ElementKind::Ellipse { .. }
-                | ElementKind::Arrow { .. }
-                | ElementKind::Line { .. } => b.width() + b.height() < 3.0,
-                _ => false,
+    if let Some(op) = app.drag.take() {
+        match op {
+            DragOp::Draw { id, .. } => {
+                // 拖拽出的退化图形（没有实际尺寸）直接回滚
+                let degenerate = app.doc.get(id).is_some_and(|e| {
+                    let b = e.bounds();
+                    match e.kind {
+                        ElementKind::Rect { .. }
+                        | ElementKind::Ellipse { .. }
+                        | ElementKind::Arrow { .. }
+                        | ElementKind::Line { .. } => b.width() + b.height() < 3.0,
+                        _ => false,
+                    }
+                });
+                if degenerate {
+                    app.doc.cancel_change();
+                }
             }
-        });
-        if degenerate {
-            app.doc.cancel_change();
+            // 快照在首次位移才压（见 on_drag），点选不再产生空撤销步；
+            // 这里兜底「拖出去又拖回原位」的净零修改，弹出等同现状的快照
+            DragOp::MoveElem { .. } | DragOp::ControlPoint { .. } => {
+                app.doc.end_change_if_noop();
+            }
+            _ => {}
         }
     }
-    app.drag = None;
 }
 
 fn on_double_click(app: &mut SnipApp, ctx: &egui::Context, pointer_px: Option<P2>) {
     let Some(p) = pointer_px else { return };
+    if app.text_edit.is_some() {
+        return;
+    }
+    // 点击型工具的双击是连续放置（标号 1、2、3…），不触发复制退出
+    if is_click_tool(app.tool) {
+        return;
+    }
     // Select 工具双击文本 → 进入编辑
     if app.tool == Tool::Select {
         if let Some(id) = app.hover.or(app.selected) {
@@ -596,10 +677,7 @@ fn on_double_click(app: &mut SnipApp, ctx: &egui::Context, pointer_px: Option<P2
 fn constrain_square(start: P2, p: P2) -> P2 {
     let (dx, dy) = (p.x - start.x, p.y - start.y);
     let side = dx.abs().max(dy.abs());
-    P2::new(
-        start.x + side * dx.signum(),
-        start.y + side * dy.signum(),
-    )
+    P2::new(start.x + side * dx.signum(), start.y + side * dy.signum())
 }
 
 fn update_cursor(app: &SnipApp, ui: &egui::Ui, view: View, pointer_px: Option<P2>) {
@@ -642,8 +720,14 @@ fn dim_outside(painter: &egui::Painter, view: View, screen: Rect, region: RectF)
     let r = view.rect_pt(region);
     let top = Rect::from_min_max(screen.min, Pos2::new(screen.max.x, r.min.y));
     let bottom = Rect::from_min_max(Pos2::new(screen.min.x, r.max.y), screen.max);
-    let left = Rect::from_min_max(Pos2::new(screen.min.x, r.min.y), Pos2::new(r.min.x, r.max.y));
-    let right = Rect::from_min_max(Pos2::new(r.max.x, r.min.y), Pos2::new(screen.max.x, r.max.y));
+    let left = Rect::from_min_max(
+        Pos2::new(screen.min.x, r.min.y),
+        Pos2::new(r.min.x, r.max.y),
+    );
+    let right = Rect::from_min_max(
+        Pos2::new(r.max.x, r.min.y),
+        Pos2::new(screen.max.x, r.max.y),
+    );
     for part in [top, bottom, left, right] {
         if part.width() > 0.0 && part.height() > 0.0 {
             painter.rect_filled(part, 0.0, DIM);
@@ -661,8 +745,13 @@ fn size_label(painter: &egui::Painter, region_pt: Rect, region: RectF) {
     painter.galley(pos + Vec2::new(5.0, 3.0), galley, Color32::WHITE);
 }
 
+/// 交互层图元绘制。参数为 SnipApp 的字段拆借：遍历 elements（不可变）
+/// 的同时可更新 mosaic_cache（可变），见 editing() 调用点。
+#[allow(clippy::too_many_arguments)]
 fn draw_element(
-    app: &mut SnipApp,
+    mosaic_cache: &mut MosaicCache,
+    shot: &lscreen_capture::Screenshot,
+    editing_text_id: Option<u64>,
     painter: &egui::Painter,
     view: View,
     e: &Element,
@@ -712,7 +801,7 @@ fn draw_element(
         }
         ElementKind::Text { pos, content, .. } => {
             // 编辑中的文本由编辑窗口呈现，避免重影
-            if app.text_edit.as_ref().is_some_and(|t| t.id == e.id) {
+            if editing_text_id == Some(e.id) {
                 return;
             }
             painter.text(
@@ -727,15 +816,12 @@ fn draw_element(
             // 缓存指纹必须含几何：移动马赛克只改坐标不改点数，
             // 只比点数会让预览留在原位而导出用新坐标，形成「预览遮住了、导出没遮」。
             let key = mosaic_key(points, e.mosaic_brush(), e.mosaic_cell());
-            let (n_cached, cells) = app
-                .mosaic_cache
-                .entry(e.id)
-                .or_insert_with(|| (0, Vec::new()));
+            let (n_cached, cells) = mosaic_cache.entry(e.id).or_insert_with(|| (0, Vec::new()));
             if *n_cached != key {
                 *cells = mosaic_cells(
-                    &app.shot.rgba,
-                    app.shot.width,
-                    app.shot.height,
+                    &shot.rgba,
+                    shot.width,
+                    shot.height,
                     points,
                     e.mosaic_brush(),
                     e.mosaic_cell(),
@@ -751,19 +837,13 @@ fn draw_element(
         ElementKind::Eraser { points } => {
             // 用原图纹理沿笔迹盖章，近似导出层的「原图回贴」
             let brush_pt = view.len_pt(e.eraser_brush());
-            let (w, h) = (app.shot.width as f32, app.shot.height as f32);
+            let (w, h) = (shot.width as f32, shot.height as f32);
             let stamp = |p: P2| {
                 let center = view.to_pt(p);
                 let rect = Rect::from_center_size(center, Vec2::splat(brush_pt * 2.0));
                 let uv = Rect::from_min_max(
-                    Pos2::new(
-                        (p.x - e.eraser_brush()) / w,
-                        (p.y - e.eraser_brush()) / h,
-                    ),
-                    Pos2::new(
-                        (p.x + e.eraser_brush()) / w,
-                        (p.y + e.eraser_brush()) / h,
-                    ),
+                    Pos2::new((p.x - e.eraser_brush()) / w, (p.y - e.eraser_brush()) / h),
+                    Pos2::new((p.x + e.eraser_brush()) / w, (p.y + e.eraser_brush()) / h),
                 );
                 painter.image(texture.id(), rect, uv, Color32::WHITE);
             };
@@ -896,8 +976,7 @@ pub fn show_text_editor(app: &mut SnipApp, ctx: &egui::Context) {
                     {
                         commit = true;
                     }
-                    if ui.button("取消").clicked()
-                        || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                    if ui.button("取消").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape))
                     {
                         cancel = true;
                     }
@@ -906,27 +985,9 @@ pub fn show_text_editor(app: &mut SnipApp, ctx: &egui::Context) {
         });
 
     if commit {
-        let edit = app.text_edit.take().unwrap();
-        let content = edit.buffer.trim_end().to_string();
-        if content.is_empty() {
-            if edit.is_new {
-                app.doc.cancel_change();
-            } else {
-                // 既有文本清空 = 删除
-                app.doc.remove(edit.id);
-            }
-        } else {
-            let (w, h) = app.renderer.measure_text(&content, style.font_size);
-            if let Some(e) = app.doc.get_mut(edit.id) {
-                if let ElementKind::Text { content: c, size, .. } = &mut e.kind {
-                    *c = content;
-                    *size = P2::new(w.max(10.0), h.max(style.font_size));
-                }
-            }
-        }
+        app.commit_text_edit();
     } else if cancel {
-        let edit = app.text_edit.take().unwrap();
-        let _ = edit;
+        app.text_edit = None;
         app.doc.cancel_change();
     }
 }

@@ -13,8 +13,7 @@ pub fn detect(rgba: &[u8], w: u32, h: u32) -> Vec<QrResult> {
     let mut img = rqrr::PreparedImage::prepare_from_greyscale(w, h, |x, y| {
         let i = (y * w + x) * 4;
         // ITU-R BT.601 亮度
-        ((rgba[i] as u32 * 299 + rgba[i + 1] as u32 * 587 + rgba[i + 2] as u32 * 114) / 1000)
-            as u8
+        ((rgba[i] as u32 * 299 + rgba[i + 1] as u32 * 587 + rgba[i + 2] as u32 * 114) / 1000) as u8
     });
     img.detect_grids()
         .iter()

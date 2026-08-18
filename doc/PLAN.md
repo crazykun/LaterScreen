@@ -187,6 +187,33 @@ Snipaste 的招牌能力：截完把图钉在屏幕上置顶悬浮，方便对�
 - [ ] Win/mac 指针查询（capture/src/other.rs cursor_position 返回 None）：
       windows-rs GetCursorPos / objc2 NSEvent.mouseLocation，补齐后多屏跟随生效
 
+### 已修缺陷（review 2026-08-18）
+
+- [x] 多屏负坐标区域截屏错位：capture_region 原先钳到根窗口 [0,w]×[0,h]，
+      显示器位于主屏左侧/上方（原点为负）时区域被折进主屏；改为钳到
+      全部显示器并集。`--region` 参数加 allow_hyphen_values，
+      负坐标无需 `--region=-x,…` 等号写法
+- [x] 双击与点击型工具冲突：Marker 连点第二击被「双击=复制退出」吞掉并误退出、
+      Text 连点在编辑器下遗留空文本图元。现在点击型工具（Marker/Text）的
+      双击是连续放置不触发复制；文本编辑模态化，点击画布任意处=提交
+- [x] record_gif 失败路径：采帧出错提前 return 会丢下分离的编码线程和
+      半成品文件；统一收尾（join 编码线程 + 删除残缺产物）。
+      CLI 对 --fps/--quality 提前校验而非静默 clamp
+- [x] 空撤销步：点选图元未拖动也压快照，Ctrl+Z 出现一次"无反应"；
+      快照推迟到首次真实位移才压（点选不再清空重做栈），松手时
+      若快照与现状一致则弹出（History::drop_noop）
+- [x] 结果面板（QR/OCR）打开时 Ctrl+C/Enter 仍会复制退出，误触关窗；
+      面板期间只保留 Esc 关面板
+- [x] Wayland 检测过严/过松：原先要求 WAYLAND_DISPLAY 与 XDG_SESSION_TYPE
+      同时命中，缺 SESSION_TYPE 的纯 Wayland 会话漏判报底层错误；改为
+      会话类型为 wayland 或（无 DISPLAY 且有 WAYLAND_DISPLAY）即明确报错
+- [x] save_png 按扩展名猜格式：`-o foo.jpg` 报 RGBA→JPEG 的费解错误；
+      现在无扩展名补 .png，非 png 明确报错"仅支持 PNG 输出"
+- [x] 默认保存同秒覆盖：时间戳秒级分辨率，同秒两次保存自动追加序号
+- [x] 每帧 clone 整个 elements 列表（画布绘制）与 mosaic_cache 只增不减：
+      拆字段借用消 clone，帧末按现存图元回收缓存
+- [x] CI 补 fmt/clippy 门槛（原先仅构建/测试/体积）
+
 ## 5. 已知风险与对策
 
 | 风险 | 影响 | 对策 |

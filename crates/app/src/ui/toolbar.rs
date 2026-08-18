@@ -6,7 +6,7 @@
 
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Vec2};
-use lscreen_core::{ElementKind, P2, Rgba, Tool};
+use lscreen_core::{ElementKind, Rgba, Tool, P2};
 
 use super::{egui_color, SnipApp, View};
 
@@ -133,7 +133,12 @@ fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
         app.request_close(ctx);
     }
     // 最常用动作放最右：绿色对号，复制并退出
-    if action_button(ui, true, "复制到剪贴板并退出 (Ctrl+C / Enter / 双击)", draw_check) {
+    if action_button(
+        ui,
+        true,
+        "复制到剪贴板并退出 (Ctrl+C / Enter / 双击)",
+        draw_check,
+    ) {
         app.copy_and_exit(ctx);
     }
 }
@@ -158,11 +163,19 @@ fn size_edit(app: &mut SnipApp, ui: &mut egui::Ui) {
         ui.spacing_mut().button_padding = Vec2::new(5.0, 2.0);
         ui.style_mut().drag_value_text_style = egui::TextStyle::Body;
         let rw = ui
-            .add(egui::DragValue::new(&mut w).speed(1.0).range(1.0..=sw as f64))
+            .add(
+                egui::DragValue::new(&mut w)
+                    .speed(1.0)
+                    .range(1.0..=sw as f64),
+            )
             .on_hover_text("宽（像素）：拖动或双击输入，离开生效");
         ui.label("×");
         let rh = ui
-            .add(egui::DragValue::new(&mut h).speed(1.0).range(1.0..=sh as f64))
+            .add(
+                egui::DragValue::new(&mut h)
+                    .speed(1.0)
+                    .range(1.0..=sh as f64),
+            )
             .on_hover_text("高（像素）：拖动或双击输入，离开生效");
         editing = rw.has_focus() || rh.has_focus() || rw.dragged() || rh.dragged();
     });
@@ -344,7 +357,10 @@ fn draw_tool_icon(tool: Tool, p: &egui::Painter, r: Rect, c: Color32) {
             let w = r.width();
             let o = r.min;
             p.rect_filled(
-                Rect::from_min_max(o + Vec2::new(w * 0.38, 0.0), o + Vec2::new(w * 0.62, w * 0.28)),
+                Rect::from_min_max(
+                    o + Vec2::new(w * 0.38, 0.0),
+                    o + Vec2::new(w * 0.62, w * 0.28),
+                ),
                 0.5,
                 c,
             );

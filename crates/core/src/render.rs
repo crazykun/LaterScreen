@@ -14,7 +14,7 @@ use tiny_skia::{
     Stroke, Transform,
 };
 
-use crate::geom::{P2, RectF};
+use crate::geom::{RectF, P2};
 use crate::model::{Element, ElementKind, Rgba};
 
 pub struct Renderer {
@@ -51,9 +51,11 @@ impl Renderer {
     }
 
     fn draw_element(&self, canvas: &mut Pixmap, original: &Pixmap, e: &Element) {
-        let mut paint = Paint::default();
-        paint.anti_alias = true;
         let c = e.style.color;
+        let mut paint = Paint {
+            anti_alias: true,
+            ..Paint::default()
+        };
         paint.set_color_rgba8(c.r(), c.g(), c.b(), c.a());
 
         let stroke = Stroke {
@@ -118,14 +120,16 @@ impl Renderer {
             }
             ElementKind::Eraser { points } => {
                 // 用原图作为 Pattern 沿笔迹描边，把原始像素贴回
-                let mut pat = Paint::default();
-                pat.shader = Pattern::new(
-                    original.as_ref(),
-                    SpreadMode::Pad,
-                    FilterQuality::Nearest,
-                    1.0,
-                    id,
-                );
+                let pat = Paint {
+                    shader: Pattern::new(
+                        original.as_ref(),
+                        SpreadMode::Pad,
+                        FilterQuality::Nearest,
+                        1.0,
+                        id,
+                    ),
+                    ..Paint::default()
+                };
                 let brush = Stroke {
                     width: e.eraser_brush() * 2.0,
                     line_cap: tiny_skia::LineCap::Round,
@@ -303,8 +307,11 @@ pub fn mosaic_cells(
 fn draw_mosaic(canvas: &mut Pixmap, original: &Pixmap, points: &[P2], brush: f32, cell: f32) {
     let (w, h) = (original.width(), original.height());
     let cells = mosaic_cells(original.data(), w, h, points, brush, cell);
-    let mut paint = Paint::default();
-    paint.anti_alias = false;
+    // 色块必须硬边（无 AA）：半格过渡会让交互层与导出层出现可辨差异
+    let mut paint = Paint {
+        anti_alias: false,
+        ..Paint::default()
+    };
     for (x, y, size, color) in cells {
         paint.set_color_rgba8(color.r(), color.g(), color.b(), 255);
         if let Some(r) = SkRect::from_xywh(x, y, size, size) {
@@ -318,7 +325,9 @@ fn average_color(rgba: &[u8], w: u32, h: u32, x0: u32, y0: u32, cell: u32) -> Rg
     for y in y0..(y0 + cell).min(h) {
         for x in x0..(x0 + cell).min(w) {
             let i = (y as usize * w as usize + x as usize) * 4;
-            let Some(px) = rgba.get(i..i + 4) else { continue };
+            let Some(px) = rgba.get(i..i + 4) else {
+                continue;
+            };
             r += px[0] as u64;
             g += px[1] as u64;
             b += px[2] as u64;

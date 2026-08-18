@@ -9,7 +9,7 @@ use eframe::egui;
 use egui::{Color32, Pos2, TextureHandle, Vec2};
 use lscreen_capture::Screenshot;
 use lscreen_core::render::Renderer;
-use lscreen_core::{Document, P2, RectF, Rgba, Style, Tool};
+use lscreen_core::{Document, ElementKind, RectF, Rgba, Style, Tool, P2};
 
 use crate::export;
 
@@ -22,12 +22,18 @@ pub struct View {
 }
 
 impl View {
-    pub fn to_px(&self, p: Pos2) -> P2 {
-        P2::new((p.x - self.origin.x) * self.scale, (p.y - self.origin.y) * self.scale)
+    pub fn to_px(self, p: Pos2) -> P2 {
+        P2::new(
+            (p.x - self.origin.x) * self.scale,
+            (p.y - self.origin.y) * self.scale,
+        )
     }
 
-    pub fn to_pt(&self, p: P2) -> Pos2 {
-        Pos2::new(self.origin.x + p.x / self.scale, self.origin.y + p.y / self.scale)
+    pub fn to_pt(self, p: P2) -> Pos2 {
+        Pos2::new(
+            self.origin.x + p.x / self.scale,
+            self.origin.y + p.y / self.scale,
+        )
     }
 
     pub fn len_pt(&self, px: f32) -> f32 {
@@ -54,16 +60,38 @@ pub enum Mode {
 /// 一次按下-拖拽-释放手势正在进行的操作。
 pub enum DragOp {
     /// 框选选区（Selecting 阶段）
-    SelectRegion { start: P2 },
+    SelectRegion {
+        start: P2,
+    },
     /// 正在绘制的新图元
-    Draw { id: u64, start: P2 },
-    MoveElem { id: u64, last: P2 },
-    ControlPoint { id: u64, idx: usize },
-    MoveRegion { last: P2 },
+    Draw {
+        id: u64,
+        start: P2,
+    },
+    MoveElem {
+        id: u64,
+        last: P2,
+        /// 是否已压撤销快照。首次真实位移才 begin_change：
+        /// 点选（press 即 release）不应清空重做栈
+        began: bool,
+    },
+    ControlPoint {
+        id: u64,
+        idx: usize,
+        /// 同 MoveElem::began
+        began: bool,
+    },
+    MoveRegion {
+        last: P2,
+    },
     /// 拖拽选区角点，anchor 为固定的对角
-    ResizeRegion { anchor: P2 },
+    ResizeRegion {
+        anchor: P2,
+    },
     /// 拖拽选区单条边（0=左 1=上 2=右 3=下）
-    ResizeEdge { edge: usize },
+    ResizeEdge {
+        edge: usize,
+    },
 }
 
 pub struct TextEditState {
@@ -87,9 +115,8 @@ pub struct SnipApp {
     pub selected: Option<u64>,
     pub drag: Option<DragOp>,
     pub text_edit: Option<TextEditState>,
-    /// 马赛克预览缓存：id -> (采样点数, 色块)
-    /// 图元 id → (几何指纹, 网格色块)。指纹见 `canvas::mosaic_key`。
-    pub mosaic_cache: HashMap<u64, (u64, Vec<(f32, f32, f32, Rgba)>)>,
+    /// 马赛克预览缓存：图元 id → (几何指纹, 色块列表)。指纹见 `canvas::mosaic_key`。
+    pub mosaic_cache: MosaicCache,
     /// 自定义取色器上次变更时刻：拖动取色时节流撤销快照（同滑杆）
     pub color_drag_at: f64,
     /// 指针当前所在的图像像素坐标（取色用）
@@ -216,8 +243,8 @@ impl SnipApp {
         };
         let path = export::default_save_path();
         match export::save_png(&rgba, w, h, &path) {
-            Ok(()) => {
-                println!("{}", path.display());
+            Ok(saved) => {
+                println!("{}", saved.display());
                 self.request_close(ctx);
             }
             Err(e) => self.toast(ctx, format!("保存失败: {e}")),
@@ -227,6 +254,36 @@ impl SnipApp {
     pub fn request_close(&mut self, ctx: &egui::Context) {
         self.close_requested = true;
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// 提交文本编辑：写回内容与包围盒；空内容按新建/既有分别撤销或删除。
+    /// 编辑器内「确定」与画布点击外部共用此出口。
+    pub fn commit_text_edit(&mut self) {
+        let Some(edit) = self.text_edit.take() else {
+            return;
+        };
+        let content = edit.buffer.trim_end().to_string();
+        let font_size = self.doc.get(edit.id).map(|e| e.style.font_size);
+        if content.is_empty() {
+            if edit.is_new {
+                self.doc.cancel_change();
+            } else {
+                // 既有文本清空 = 删除
+                self.doc.remove(edit.id);
+            }
+            return;
+        }
+        let Some(font_size) = font_size else { return };
+        let (w, h) = self.renderer.measure_text(&content, font_size);
+        if let Some(e) = self.doc.get_mut(edit.id) {
+            if let ElementKind::Text {
+                content: c, size, ..
+            } = &mut e.kind
+            {
+                *c = content;
+                *size = P2::new(w.max(10.0), h.max(font_size));
+            }
+        }
     }
 
     /// 取色：把指针处颜色以指定格式写入剪贴板。
@@ -255,9 +312,18 @@ impl SnipApp {
     }
 
     /// 全局快捷键。文本编辑中不响应（把键留给输入框）。
+    /// 结果面板打开时只保留 Esc（关闭面板），防止阅读识别结果时
+    /// 误触 Ctrl+C/Enter 把整个截图窗口关掉。
     fn handle_keys(&mut self, ctx: &egui::Context) {
         use egui::{Key, Modifiers};
         if self.text_edit.is_some() {
+            return;
+        }
+        if self.results_panel.is_some() {
+            let esc = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+            if esc {
+                self.results_panel = None;
+            }
             return;
         }
         let (undo, redo_y, redo_sz, save, copy, del, enter, esc, rgb, hex, cmyk) =
@@ -426,20 +492,22 @@ impl SnipApp {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.set_max_width(460.0);
-                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                    for (i, content) in items.iter().enumerate() {
-                        if i > 0 {
-                            ui.separator();
-                        }
-                        ui.label(egui::RichText::new(truncate(content, 600)).monospace());
-                        if ui.button("复制内容").clicked() {
-                            match export::copy_text_to_clipboard(content) {
-                                Ok(()) => self.toast(ctx, "已复制"),
-                                Err(e) => self.toast(ctx, format!("复制失败: {e}")),
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        for (i, content) in items.iter().enumerate() {
+                            if i > 0 {
+                                ui.separator();
+                            }
+                            ui.label(egui::RichText::new(truncate(content, 600)).monospace());
+                            if ui.button("复制内容").clicked() {
+                                match export::copy_text_to_clipboard(content) {
+                                    Ok(()) => self.toast(ctx, "已复制"),
+                                    Err(e) => self.toast(ctx, format!("复制失败: {e}")),
+                                }
                             }
                         }
-                    }
-                });
+                    });
             });
         if !open {
             self.results_panel = None;
@@ -504,6 +572,11 @@ pub enum ColorFormat {
     Hex,
     Cmyk,
 }
+
+/// 一个马赛克预览色块：(x, y, 边长, 均值色)。
+pub type MosaicCell = (f32, f32, f32, Rgba);
+/// 马赛克预览缓存：图元 id → (几何指纹, 色块列表)。指纹见 `canvas::mosaic_key`。
+pub type MosaicCache = HashMap<u64, (u64, Vec<MosaicCell>)>;
 
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {

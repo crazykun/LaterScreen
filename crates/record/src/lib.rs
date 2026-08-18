@@ -40,7 +40,10 @@ pub struct GifOptions {
 
 impl Default for GifOptions {
     fn default() -> Self {
-        Self { fps: 10, quality: 90 }
+        Self {
+            fps: 10,
+            quality: 90,
+        }
     }
 }
 
@@ -77,29 +80,44 @@ pub fn record_gif(
     let start = Instant::now();
     let mut frame_size: Option<(u32, u32)> = None;
     let mut count = 0usize;
+    // 采帧中途失败（截屏报错/帧尺寸漂移）不直接 return：直接 return 会把编码
+    // 线程句柄丢在半路（线程分离、产物文件不确定），先记下错误走统一收尾
+    let mut abort: Option<RecordError> = None;
 
-    while !stop.load(Ordering::Relaxed) && start.elapsed() < max_duration {
+    while abort.is_none() && !stop.load(Ordering::Relaxed) && start.elapsed() < max_duration {
         let tick = Instant::now();
-        let (rgba, w, h) = grab_frame()?;
-        match frame_size {
-            None => frame_size = Some((w, h)),
-            Some(size) if size != (w, h) => {
-                return Err(RecordError(format!(
-                    "帧尺寸不一致: {size:?} -> {:?}",
-                    (w, h)
-                )));
+        match grab_frame() {
+            Ok((rgba, w, h)) => {
+                match frame_size {
+                    None => frame_size = Some((w, h)),
+                    Some(size) if size != (w, h) => {
+                        abort = Some(RecordError(format!(
+                            "帧尺寸不一致: {size:?} -> {:?}",
+                            (w, h)
+                        )));
+                        break;
+                    }
+                    _ => {}
+                }
+                let pixels: Vec<RGBA8> = rgba
+                    .chunks_exact(4)
+                    .map(|p| RGBA8::new(p[0], p[1], p[2], 255))
+                    .collect();
+                let pts = start.elapsed().as_secs_f64();
+                if let Err(e) = collector.add_frame_rgba(
+                    count,
+                    ImgVec::new(pixels, w as usize, h as usize),
+                    pts,
+                ) {
+                    abort = Some(err(e));
+                    break;
+                }
+                count += 1;
             }
-            _ => {}
+            Err(e) => {
+                abort = Some(e);
+            }
         }
-        let pixels: Vec<RGBA8> = rgba
-            .chunks_exact(4)
-            .map(|p| RGBA8::new(p[0], p[1], p[2], 255))
-            .collect();
-        let pts = start.elapsed().as_secs_f64();
-        collector
-            .add_frame_rgba(count, ImgVec::new(pixels, w as usize, h as usize), pts)
-            .map_err(err)?;
-        count += 1;
 
         if let Some(rest) = interval.checked_sub(tick.elapsed()) {
             std::thread::sleep(rest);
@@ -107,11 +125,18 @@ pub fn record_gif(
     }
 
     drop(collector); // 关闭帧队列，编码线程随之收尾
-    encode_thread
+    let encode = encode_thread
         .join()
-        .map_err(|_| RecordError("编码线程崩溃".into()))??;
+        .map_err(|_| RecordError("编码线程崩溃".into()))
+        .and_then(|r| r);
 
-    if count == 0 {
+    // 失败不留半成品文件（哪怕编码本身成功，内容也是残缺的）
+    if abort.is_some() || encode.is_err() || count == 0 {
+        let _ = std::fs::remove_file(out_path);
+        if let Some(e) = abort {
+            return Err(e);
+        }
+        encode?;
         return Err(RecordError("未采集到任何帧".into()));
     }
     Ok(count)
@@ -134,17 +159,15 @@ mod tests {
                 let mut rgba = Vec::with_capacity((w * h * 4) as usize);
                 for y in 0..h {
                     for x in 0..w {
-                        rgba.extend_from_slice(&[
-                            (x * 4) as u8,
-                            (y * 5) as u8,
-                            tick,
-                            255,
-                        ]);
+                        rgba.extend_from_slice(&[(x * 4) as u8, (y * 5) as u8, tick, 255]);
                     }
                 }
                 Ok((rgba, w, h))
             },
-            &GifOptions { fps: 30, quality: 60 },
+            &GifOptions {
+                fps: 30,
+                quality: 60,
+            },
             Duration::from_millis(200),
             &stop,
             &dir,
@@ -154,5 +177,59 @@ mod tests {
         let data = std::fs::read(&dir).unwrap();
         assert_eq!(&data[..6], b"GIF89a");
         std::fs::remove_file(&dir).ok();
+    }
+
+    /// 采帧中途失败：报错且不留半成品文件（回归：曾直接 return，
+    /// 丢下分离的编码线程和残缺产物）
+    #[test]
+    fn grab_failure_cleans_up_partial_file() {
+        let dir = std::env::temp_dir().join("lscreen-record-fail-test.gif");
+        let stop = AtomicBool::new(false);
+        let mut calls = 0;
+        let err = record_gif(
+            move || {
+                calls += 1;
+                if calls == 1 {
+                    Ok((vec![255u8; 64 * 48 * 4], 64, 48))
+                } else {
+                    Err(RecordError("采帧失败".into()))
+                }
+            },
+            &GifOptions {
+                fps: 30,
+                quality: 60,
+            },
+            Duration::from_secs(10),
+            &stop,
+            &dir,
+        )
+        .unwrap_err();
+        assert_eq!(err.0, "采帧失败");
+        assert!(!dir.exists(), "失败后不应残留半成品文件");
+    }
+
+    /// 帧尺寸漂移：同样要清理半成品并报错
+    #[test]
+    fn frame_size_mismatch_cleans_up() {
+        let dir = std::env::temp_dir().join("lscreen-record-size-test.gif");
+        let stop = AtomicBool::new(false);
+        let mut calls = 0;
+        let err = record_gif(
+            move || {
+                calls += 1;
+                let (w, h) = if calls == 1 { (64, 48) } else { (32, 48) };
+                Ok((vec![0u8; (w * h * 4) as usize], w, h))
+            },
+            &GifOptions {
+                fps: 30,
+                quality: 60,
+            },
+            Duration::from_secs(10),
+            &stop,
+            &dir,
+        )
+        .unwrap_err();
+        assert!(err.0.contains("帧尺寸不一致"), "{}", err.0);
+        assert!(!dir.exists());
     }
 }

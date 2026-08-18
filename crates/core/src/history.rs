@@ -37,6 +37,15 @@ impl History {
         }
     }
 
+    /// 结束一次未发生实际修改的手势：若撤销栈顶与当前状态完全一致
+    /// （如「点选图元但没拖动」也 push 过快照），把这条空快照弹出，
+    /// 避免 Ctrl+Z 出现一次「看似无反应」。
+    pub fn drop_noop(&mut self, current: &[Element]) {
+        if self.undo.last().is_some_and(|top| *top == current) {
+            self.undo.pop();
+        }
+    }
+
     pub fn redo(&mut self, current: &mut Vec<Element>) {
         if let Some(next) = self.redo.pop() {
             self.undo.push(std::mem::replace(current, next));

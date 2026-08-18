@@ -3,7 +3,7 @@
 use lscreen_core::render::Renderer;
 use lscreen_core::{Element, RectF};
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// 从整幅 RGBA 中裁剪出 region（图像物理像素坐标）。
 ///
@@ -40,20 +40,25 @@ pub fn compose(
 }
 
 /// 默认保存路径：~/Pictures（存在时）或当前目录，文件名带时间戳。
+/// 同秒内多次保存自动追加序号，不覆盖既有文件。
 pub fn default_save_path() -> PathBuf {
     let stamp = timestamp();
     let name = format!("lscreen_{stamp}.png");
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from);
-    if let Some(home) = home {
-        let pictures = home.join("Pictures");
-        if pictures.is_dir() {
-            return pictures.join(name);
-        }
-        return home.join(name);
+    let dir = match &home {
+        Some(home) if home.join("Pictures").is_dir() => home.join("Pictures"),
+        Some(home) => home.clone(),
+        None => PathBuf::from("."),
+    };
+    let mut path = dir.join(name);
+    let mut n = 1;
+    while path.exists() {
+        path = dir.join(format!("lscreen_{stamp}_{n}.png"));
+        n += 1;
     }
-    PathBuf::from(name)
+    path
 }
 
 fn timestamp() -> String {
@@ -104,10 +109,25 @@ fn utc_civil(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
     (y, m as u32, d as u32, h as u32, mi as u32, s as u32)
 }
 
-pub fn save_png(rgba: &[u8], w: u32, h: u32, path: &PathBuf) -> Result<(), String> {
+/// 保存 PNG。无扩展名时补 `.png`；其他扩展名直接报错——
+/// `image::save` 按扩展名猜格式，RGBA→JPEG 之类的失败信息非常费解。
+/// 返回实际写入的路径（可能补过扩展名）。
+pub fn save_png(rgba: &[u8], w: u32, h: u32, path: &Path) -> Result<PathBuf, String> {
     let img = image::RgbaImage::from_raw(w, h, rgba.to_vec())
         .ok_or_else(|| "invalid image buffer".to_string())?;
-    img.save(path).map_err(|e| e.to_string())
+    let mut out = path.to_path_buf();
+    if out.extension().is_none() {
+        out.set_extension("png");
+    }
+    if !out
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("png"))
+    {
+        return Err(format!("仅支持 PNG 输出: {}", out.display()));
+    }
+    img.save_with_format(&out, image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(out)
 }
 
 pub fn copy_text_to_clipboard(text: &str) -> Result<(), String> {

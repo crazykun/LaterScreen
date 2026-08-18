@@ -5,7 +5,7 @@
 //!   两边共享这里的几何描述，保证所见即所得。
 //! - 文本尺寸依赖字体测量，由 UI 层测量后写回 `Text::size`，命中检测直接用。
 
-use crate::geom::{dist_to_polyline, P2, RectF};
+use crate::geom::{dist_to_polyline, RectF, P2};
 use crate::history::History;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -63,18 +63,41 @@ pub enum Tool {
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum ElementKind {
-    Rect { rect: RectF },
-    Ellipse { rect: RectF },
-    Arrow { from: P2, to: P2 },
-    Line { from: P2, to: P2 },
-    Curve { points: Vec<P2> },
+    Rect {
+        rect: RectF,
+    },
+    Ellipse {
+        rect: RectF,
+    },
+    Arrow {
+        from: P2,
+        to: P2,
+    },
+    Line {
+        from: P2,
+        to: P2,
+    },
+    Curve {
+        points: Vec<P2>,
+    },
     /// 自增序号标注（圆形背景 + 数字）。
-    Marker { center: P2, number: u32 },
+    Marker {
+        center: P2,
+        number: u32,
+    },
     /// size 为 UI 层测量后的包围盒尺寸，用于命中检测与导出布局。
-    Text { pos: P2, content: String, size: P2 },
-    Mosaic { points: Vec<P2> },
+    Text {
+        pos: P2,
+        content: String,
+        size: P2,
+    },
+    Mosaic {
+        points: Vec<P2>,
+    },
     /// 橡皮擦：渲染时将原图对应区域贴回，擦掉此前绘制的标注。
-    Eraser { points: Vec<P2> },
+    Eraser {
+        points: Vec<P2>,
+    },
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -281,6 +304,12 @@ impl Document {
         self.history.cancel(&mut self.elements);
     }
 
+    /// 结束一次「可能落空」的编辑手势（点选/控制点拖拽）：没有任何实际
+    /// 修改时弹出该手势压入的空快照，避免产生无效撤销步。
+    pub fn end_change_if_noop(&mut self) {
+        self.history.drop_noop(&self.elements);
+    }
+
     pub fn redo(&mut self) {
         self.history.redo(&mut self.elements);
     }
@@ -350,5 +379,24 @@ mod tests {
         let e = doc.get_mut(id).unwrap();
         e.set_control_point(0, P2::new(0.0, 0.0)); // 拖左上角
         assert_eq!(e.bounds().max, P2::new(100.0, 60.0)); // 右下角不动
+    }
+
+    #[test]
+    fn noop_gesture_leaves_no_undo_step() {
+        let (mut doc, id) = rect_elem(); // undo 栈：[空文档]
+                                         // 点选手势：push 快照但从未移动 → 松手弹出空快照
+        doc.begin_change();
+        doc.end_change_if_noop();
+        doc.undo(); // 应直接回到空文档，中间没有「无反应」的一步
+        assert_eq!(doc.elements.len(), 0);
+
+        // 拖动手势：有实际修改，快照保留
+        doc.redo();
+        doc.begin_change();
+        doc.get_mut(id).unwrap().translate(5.0, 0.0);
+        doc.end_change_if_noop();
+        assert!(doc.can_undo());
+        doc.undo();
+        assert_eq!(doc.elements[0].bounds().min.x, 10.0);
     }
 }

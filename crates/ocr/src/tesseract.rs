@@ -25,14 +25,18 @@ impl Tesseract {
 
     fn binary() -> Option<String> {
         // PATH 探测 + 常见安装位置兜底
-        let candidates = ["tesseract", "/usr/bin/tesseract", "/usr/local/bin/tesseract"];
+        let candidates = [
+            "tesseract",
+            "/usr/bin/tesseract",
+            "/usr/local/bin/tesseract",
+        ];
         for c in candidates {
             if Command::new(c)
                 .arg("--version")
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status()
-                .map_or(false, |s| s.success())
+                .is_ok_and(|s| s.success())
             {
                 return Some(c.to_string());
             }
@@ -61,11 +65,8 @@ impl TextRecognizer for Tesseract {
         let img = image::RgbaImage::from_raw(width, height, rgba.to_vec())
             .ok_or_else(|| OcrError("无效的图像缓冲".into()))?;
         let mut png = Vec::new();
-        img.write_to(
-            &mut std::io::Cursor::new(&mut png),
-            image::ImageFormat::Png,
-        )
-        .map_err(|e| OcrError(format!("PNG 编码失败: {e}")))?;
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .map_err(|e| OcrError(format!("PNG 编码失败: {e}")))?;
 
         let mut child = Command::new(&bin)
             .args(["stdin", "stdout", "-l", &self.langs, "tsv"])

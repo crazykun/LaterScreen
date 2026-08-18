@@ -8,5 +8,5 @@ pub mod model;
 pub mod qr;
 pub mod render;
 
-pub use geom::{P2, RectF};
+pub use geom::{RectF, P2};
 pub use model::{Document, Element, ElementKind, Rgba, Style, Tool};

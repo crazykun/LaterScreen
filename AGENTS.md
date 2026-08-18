@@ -10,9 +10,11 @@ cargo test --workspace         # 纯单元测试，无需显示器/外部服务
 cargo test -p lscreen-core     # 单 crate 测试
 cargo test -p lscreen-core qr  # 按名过滤单个测试
 cargo check -p lscreen-app     # 快速单 crate 校验
+cargo fmt --all                # 格式化（CI 强制 --check）
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-仓库无 rustfmt.toml / clippy.toml，遵循 rustfmt 默认风格。CI 见 `.github/workflows/ci.yml`（构建/测试/体积回归）；发布打包见 `.github/workflows/release.yml` 与 `scripts/package.sh`（推 v* tag 出全平台包）。
+仓库无 rustfmt.toml / clippy.toml，遵循 rustfmt 默认风格；CI（`.github/workflows/ci.yml`）包含 fmt/clippy 门槛 + 构建/测试/体积回归；发布打包见 `.github/workflows/release.yml` 与 `scripts/package.sh`（推 v* tag 出全平台包）。
 
 ## Crate 边界（硬约束）
 
@@ -20,6 +22,7 @@ cargo check -p lscreen-app     # 快速单 crate 校验
 - `crates/capture`（lscreen-capture）：Linux 走自研 x11rb（X11，纯 Rust）；Win/mac 走 xcap。平台差异必须收敛在此 crate，不得泄漏到 app/core。
 - `crates/app`（lscreen）：clap CLI 入口 + egui 覆盖层（`src/ui/`）。
 - `crates/ocr`（lscreen-ocr）：Linux 通过子进程调用系统 tesseract（stdin/stdout 管道，TSV 解析）；未装时明确引导。**OCR 是「无动态库依赖」目标的唯一豁免项**，不得引入链接型依赖。
+- `crates/record`（lscreen-record）：录屏编码（GIF 走 gifski）。帧源以闭包注入，不依赖截屏实现；任何失败路径都要收尾编码线程并清理半成品文件。
 
 ## 关键设计决策（改动前必读）
 

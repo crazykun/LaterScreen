@@ -9,8 +9,23 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # 格式与 lint 门槛（快，先失败）
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
   # Linux：完整 build + test + release 体积回归
   linux:
+    needs: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -35,6 +50,7 @@ jobs:
 
   # Windows / macOS：编译验证（xcap 系统 API 路径此前从未被验证过）
   windows:
+    needs: lint
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -44,6 +60,7 @@ jobs:
       - run: cargo test --workspace
 
   macos:
+    needs: lint
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7

@@ -30,7 +30,7 @@ enum Cmd {
     /// 识别二维码：从屏幕区域或图片文件
     Qr {
         /// 识别区域，格式 X,Y,W,H（物理像素）；缺省为整个主屏
-        #[arg(long, value_name = "X,Y,W,H")]
+        #[arg(long, value_name = "X,Y,W,H", allow_hyphen_values = true)]
         region: Option<String>,
         /// 从图片文件识别（PNG/JPEG），指定时忽略 --region
         #[arg(short, long)]
@@ -39,7 +39,7 @@ enum Cmd {
     /// 文字识别（OCR）：从屏幕区域或图片文件，结果输出到 stdout
     Ocr {
         /// 识别区域，格式 X,Y,W,H（物理像素）；缺省为整个主屏
-        #[arg(long, value_name = "X,Y,W,H")]
+        #[arg(long, value_name = "X,Y,W,H", allow_hyphen_values = true)]
         region: Option<String>,
         /// 从图片文件识别（PNG/JPEG），指定时忽略 --region
         #[arg(short, long)]
@@ -51,7 +51,7 @@ enum Cmd {
     /// 录制屏幕为 GIF（Ctrl+C 或时长到达后停止）
     Record {
         /// 录制区域，格式 X,Y,W,H（物理像素）；缺省为整个主屏
-        #[arg(long, value_name = "X,Y,W,H")]
+        #[arg(long, value_name = "X,Y,W,H", allow_hyphen_values = true)]
         region: Option<String>,
         /// 最长录制时长（秒）
         #[arg(long, default_value_t = 30.0)]
@@ -69,7 +69,7 @@ enum Cmd {
     /// 无界面截屏：立即截取并保存/复制
     Shot {
         /// 截取区域，格式 X,Y,W,H（物理像素）；缺省为整个主屏
-        #[arg(long, value_name = "X,Y,W,H")]
+        #[arg(long, value_name = "X,Y,W,H", allow_hyphen_values = true)]
         region: Option<String>,
         /// 输出文件路径（PNG）；缺省输出到 ~/Pictures
         #[arg(short, long)]
@@ -125,8 +125,9 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
     // 先截屏再开窗口，避免把自己截进去。
     // 多显示器：截鼠标所在屏，并把覆盖层窗口钉到同一块屏（指针查询不可用时回退主屏）。
     let shot = match lscreen_capture::cursor_position() {
-        Some((x, y)) => lscreen_capture::capture_at(x, y)
-            .or_else(|_| lscreen_capture::capture_primary()),
+        Some((x, y)) => {
+            lscreen_capture::capture_at(x, y).or_else(|_| lscreen_capture::capture_primary())
+        }
         None => lscreen_capture::capture_primary(),
     }
     .map_err(|e| e.to_string())?;
@@ -135,14 +136,8 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
     // origin 为物理像素；X11 下 winit 逻辑坐标与物理一致（scale=1），
     // 其余平台按截屏缩放比换算
     let scale = if shot.scale > 0.0 { shot.scale } else { 1.0 };
-    let pos = eframe::egui::Pos2::new(
-        shot.origin.0 as f32 / scale,
-        shot.origin.1 as f32 / scale,
-    );
-    let size = eframe::egui::Vec2::new(
-        shot.width as f32 / scale,
-        shot.height as f32 / scale,
-    );
+    let pos = eframe::egui::Pos2::new(shot.origin.0 as f32 / scale, shot.origin.1 as f32 / scale);
+    let size = eframe::egui::Vec2::new(shot.width as f32 / scale, shot.height as f32 / scale);
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_position(pos)
         .with_inner_size(size)
@@ -240,8 +235,8 @@ fn run_shot(
     }
     if output.is_some() || !clipboard {
         let path = output.unwrap_or_else(export::default_save_path);
-        export::save_png(&rgba, w, h, &path)?;
-        println!("{}", path.display());
+        let saved = export::save_png(&rgba, w, h, &path)?;
+        println!("{}", saved.display());
     }
     Ok(())
 }
@@ -255,6 +250,20 @@ fn run_record(
 ) -> Result<(), String> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+
+    // 参数校验放在截屏之前：无头环境也能快速报错
+    // NaN 会穿过 clamp，而 from_secs_f32 对 NaN/超范围值 panic
+    if !duration.is_finite() {
+        return Err("无效的 --duration（应为有限秒数）".into());
+    }
+    let secs = duration.clamp(0.1, 86_400.0);
+    // 提前校验而不是静默 clamp：用户给 60fps 却录出 30fps 会非常困惑
+    if !(1..=30).contains(&fps) {
+        return Err("无效的 --fps（应为 1-30）".into());
+    }
+    if !(1..=100).contains(&quality) {
+        return Err("无效的 --quality（应为 1-100）".into());
+    }
 
     // 录制区域：指定值或整个主屏
     let (x, y, w, h) = match region {
@@ -273,12 +282,6 @@ fn run_record(
         }
     };
 
-    // NaN 会穿过 clamp，而 from_secs_f32 对 NaN/超范围值 panic
-    if !duration.is_finite() {
-        return Err("无效的 --duration（应为有限秒数）".into());
-    }
-    let secs = duration.clamp(0.1, 86_400.0);
-
     let path = output.unwrap_or_else(|| export::default_save_path().with_extension("gif"));
     let stop = Arc::new(AtomicBool::new(false));
     {
@@ -287,7 +290,7 @@ fn run_record(
             .map_err(|e| e.to_string())?;
     }
 
-    eprintln!("录制中 {w}x{h}@{fps}fps，Ctrl+C 停止（最长 {duration}s）…");
+    eprintln!("录制中 {w}x{h}@{fps}fps，Ctrl+C 停止（最长 {secs} 秒）…");
     let frames = lscreen_record::record_gif(
         || {
             lscreen_capture::capture_region(x, y, w, h)
