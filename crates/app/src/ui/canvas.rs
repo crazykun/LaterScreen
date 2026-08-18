@@ -318,8 +318,17 @@ fn editing(
     draw_highlights(app, painter, view);
 
     painter.rect_stroke(region_pt, 0.0, Stroke::new(1.5, ACCENT), StrokeKind::Outside);
-    for c in app.region.corners() {
-        let p = view.to_pt(c);
+    // 8 个手柄：4 角 + 4 边中点（边中点提示整条边可拖）
+    let r = app.region;
+    let (cx, cy) = ((r.min.x + r.max.x) * 0.5, (r.min.y + r.max.y) * 0.5);
+    let mids = [
+        P2::new(r.min.x, cy),
+        P2::new(cx, r.min.y),
+        P2::new(r.max.x, cy),
+        P2::new(cx, r.max.y),
+    ];
+    for c in app.region.corners().iter().chain(mids.iter()) {
+        let p = view.to_pt(*c);
         painter.rect_filled(
             Rect::from_center_size(p, Vec2::splat(HANDLE_PT * 2.0)),
             1.0,
@@ -332,7 +341,7 @@ fn editing(
             StrokeKind::Outside,
         );
     }
-    size_label(painter, region_pt, app.region);
+    size_editor(app, ui.ctx(), region_pt);
 }
 
 /// 命中选区角点：返回 (角点下标, 对角点)。
@@ -346,10 +355,36 @@ fn hit_corner(app: &SnipApp, view: View, pos_pt: Pos2) -> Option<(usize, P2)> {
     None
 }
 
+/// 命中选区边（整条边可拖）：返回边下标（0=左 1=上 2=右 3=下）。
+/// 角点优先级更高，调用方需先测角点。
+fn hit_edge(app: &SnipApp, view: View, pos_pt: Pos2) -> Option<usize> {
+    let r = view.rect_pt(app.region);
+    let tol = HANDLE_PT * 1.4;
+    let in_x = pos_pt.x >= r.min.x - tol && pos_pt.x <= r.max.x + tol;
+    let in_y = pos_pt.y >= r.min.y - tol && pos_pt.y <= r.max.y + tol;
+    if in_y && (pos_pt.x - r.min.x).abs() <= tol {
+        return Some(0);
+    }
+    if in_x && (pos_pt.y - r.min.y).abs() <= tol {
+        return Some(1);
+    }
+    if in_y && (pos_pt.x - r.max.x).abs() <= tol {
+        return Some(2);
+    }
+    if in_x && (pos_pt.y - r.max.y).abs() <= tol {
+        return Some(3);
+    }
+    None
+}
+
 fn on_press(app: &mut SnipApp, view: View, p: P2, pos_pt: Pos2, shift: bool) {
-    // 1. 选区角点优先
+    // 1. 选区角点优先，其次选区边
     if let Some((_, anchor)) = hit_corner(app, view, pos_pt) {
         app.drag = Some(DragOp::ResizeRegion { anchor });
+        return;
+    }
+    if let Some(edge) = hit_edge(app, view, pos_pt) {
+        app.drag = Some(DragOp::ResizeEdge { edge });
         return;
     }
     let inside = app.region.contains(p);
@@ -487,6 +522,16 @@ fn on_drag(app: &mut SnipApp, p: P2, shift: bool) {
             app.region = RectF::from_points(*anchor, p);
             app.clamp_region();
         }
+        DragOp::ResizeEdge { edge } => {
+            let r = &mut app.region;
+            match edge {
+                0 => r.min.x = p.x.min(r.max.x - 1.0),
+                1 => r.min.y = p.y.min(r.max.y - 1.0),
+                2 => r.max.x = p.x.max(r.min.x + 1.0),
+                _ => r.max.y = p.y.max(r.min.y + 1.0),
+            }
+            app.clamp_region();
+        }
         DragOp::SelectRegion { .. } => {}
     }
 }
@@ -552,6 +597,12 @@ fn update_cursor(app: &SnipApp, ui: &egui::Ui, view: View, pointer_px: Option<P2
     let pos_pt = view.to_pt(p);
     let icon = if hit_corner(app, view, pos_pt).is_some() {
         CursorIcon::Grab
+    } else if let Some(edge) = hit_edge(app, view, pos_pt) {
+        if edge % 2 == 0 {
+            CursorIcon::ResizeHorizontal
+        } else {
+            CursorIcon::ResizeVertical
+        }
     } else if app.tool == Tool::Select {
         if app.hover.is_some() {
             CursorIcon::Move
@@ -585,6 +636,51 @@ fn dim_outside(painter: &egui::Painter, view: View, screen: Rect, region: RectF)
     }
 }
 
+/// 选区尺寸编辑器：宽 × 高 可拖可双击输入，回车/失焦生效。
+/// 放在选区左上角外侧，与原来的只读标签同位置。
+fn size_editor(app: &mut SnipApp, ctx: &egui::Context, region_pt: Rect) {
+    let pos = Pos2::new(region_pt.min.x, (region_pt.min.y - 26.0).max(2.0));
+    let mut w = app.region.width().round();
+    let mut h = app.region.height().round();
+    let (sw, sh) = (app.shot.width as f32, app.shot.height as f32);
+    let mut changed = false;
+
+    egui::Area::new(egui::Id::new("size_editor"))
+        .fixed_pos(pos)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style())
+                .fill(Color32::from_black_alpha(200))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 3.0;
+                        ui.style_mut().drag_value_text_style = egui::TextStyle::Small;
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut w)
+                                    .speed(1.0)
+                                    .range(1.0..=sw as f64),
+                            )
+                            .on_hover_text("宽（像素）：拖动或双击输入")
+                            .changed();
+                        ui.label("×");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut h)
+                                    .speed(1.0)
+                                    .range(1.0..=sh as f64),
+                            )
+                            .on_hover_text("高（像素）：拖动或双击输入")
+                            .changed();
+                    });
+                });
+        });
+
+    if changed {
+        app.set_region_size(w, h);
+    }
+}
+
+/// 首次框选拖拽期间的只读尺寸提示（此时还没有稳定选区可编辑）。
 fn size_label(painter: &egui::Painter, region_pt: Rect, region: RectF) {
     let text = format!("{} × {}", region.width().round(), region.height().round());
     let pos = Pos2::new(region_pt.min.x, (region_pt.min.y - 22.0).max(4.0));

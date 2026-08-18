@@ -62,6 +62,8 @@ pub enum DragOp {
     MoveRegion { last: P2 },
     /// 拖拽选区角点，anchor 为固定的对角
     ResizeRegion { anchor: P2 },
+    /// 拖拽选区单条边（0=左 1=上 2=右 3=下）
+    ResizeEdge { edge: usize },
 }
 
 pub struct TextEditState {
@@ -168,6 +170,18 @@ impl SnipApp {
         self.region.min.y = self.region.min.y.clamp(0.0, h);
         self.region.max.x = self.region.max.x.clamp(0.0, w);
         self.region.max.y = self.region.max.y.clamp(0.0, h);
+    }
+
+    /// 设定选区尺寸（物理像素），左上角保持不动；右/下越界时整体回挪，
+    /// 保证请求的尺寸不被裁剪——固定尺寸截图的关键语义。
+    pub fn set_region_size(&mut self, w: f32, h: f32) {
+        let (sw, sh) = (self.shot.width as f32, self.shot.height as f32);
+        let w = w.clamp(1.0, sw);
+        let h = h.clamp(1.0, sh);
+        self.region.min.x = self.region.min.x.min(sw - w).max(0.0);
+        self.region.min.y = self.region.min.y.min(sh - h).max(0.0);
+        self.region.max.x = self.region.min.x + w;
+        self.region.max.y = self.region.min.y + h;
     }
 
     fn compose(&self) -> Option<(Vec<u8>, u32, u32)> {
