@@ -12,7 +12,7 @@ cargo test -p lscreen-core qr  # 按名过滤单个测试
 cargo check -p lscreen-app     # 快速单 crate 校验
 ```
 
-仓库无 rustfmt.toml / clippy.toml / CI 配置，遵循 rustfmt 默认风格。
+仓库无 rustfmt.toml / clippy.toml，遵循 rustfmt 默认风格。CI 见 `.github/workflows/ci.yml`（构建/测试/体积回归）；发布打包见 `.github/workflows/release.yml` 与 `scripts/package.sh`（推 v* tag 出全平台包）。
 
 ## Crate 边界（硬约束）
 

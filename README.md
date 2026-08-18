@@ -99,6 +99,28 @@ cp target/release/lscreen ~/.local/bin/
   未安装时会给出明确引导；其余功能零外部依赖
 - Linux 上复制后由分离的守护子进程持有剪贴板，被覆盖后自动退出，无需常驻
 
+## 打包发布
+
+一键打包脚本 `scripts/package.sh`，产物统一进 `dist/`（tar.gz / zip + SHA256SUMS）：
+
+```bash
+scripts/package.sh              # 打包本机具备工具链的全部默认目标
+scripts/package.sh --list       # 查看默认目标集与本机可用性
+scripts/package.sh aarch64-unknown-linux-gnu   # 指定目标
+
+# Linux 交叉目标只需装对应交叉 gcc（项目链接期仅依赖 libc）：
+sudo apt install gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf \
+                 gcc-i686-linux-gnu gcc-mingw-w64-x86-64
+```
+
+全平台出包（含 macOS arm64/x64、Windows MSVC）走 GitHub Actions：
+
+```bash
+git tag v0.1.0 && git push --tags   # 自动构建 7 个平台包并发布 GitHub Release
+```
+
+覆盖平台：Linux x64 / arm64 / armv7 / x86，Windows x64，macOS arm64 / x64。
+
 ## 架构
 
 见 [doc/PLAN.md](doc/PLAN.md)。`crates/core`（图元模型/撤销/导出渲染，无 UI 依赖）、
