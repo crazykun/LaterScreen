@@ -77,10 +77,10 @@ jobs:
           merge-multiple: true
       - name: 生成校验和
         run: cd dist && sha256sum * > SHA256SUMS
-      - name: 准备发布说明（release-notes/<tag>.md）
+      - name: 准备发布说明（doc/release-notes/<tag>.md）
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          NOTES="release-notes/${GITHUB_REF_NAME}.md"
+          NOTES="doc/release-notes/${GITHUB_REF_NAME}.md"
           if [ ! -f "$NOTES" ]; then
             echo "此版本未提供发布说明，详见提交历史。" > "$NOTES"
           fi
