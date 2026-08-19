@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 跨平台截图标注工具（Linux / Windows / macOS），Rust 编写。
-**单文件、≤12MB、无动态库依赖、冷启动即用**，命令名 `lscreen`。
+**单文件、≤20MB、无动态库依赖、冷启动即用**，命令名 `lscreen`。
 目标对齐 Snipaste 级体验：截图、标注、取色、二维码、OCR、GIF 录屏。
 
 ## 特性
