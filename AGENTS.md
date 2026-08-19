@@ -23,6 +23,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 - `crates/app`（lscreen）：clap CLI 入口 + egui 覆盖层（`src/ui/`）。
 - `crates/ocr`（lscreen-ocr）：Linux 通过子进程调用系统 tesseract（stdin/stdout 管道，TSV 解析）；未装时明确引导。**OCR 是「无动态库依赖」目标的唯一豁免项**，不得引入链接型依赖。
 - `crates/record`（lscreen-record）：录屏编码（GIF 走 gifski）。帧源以闭包注入，不依赖截屏实现；任何失败路径都要收尾编码线程并清理半成品文件。
+- `crates/setup`（lscreen-setup）：仅 Windows 的自绘安装器（egui）。主程序经构建期 `LSCREEN_BIN` 环境变量内嵌（build.rs 指纹触发重编译）；未内嵌时为占位可在任意平台编译。per-user 安装（%LOCALAPPDATA% + HKCU），不要引入需要管理员的路径。
 
 ## 关键设计决策（改动前必读）
 

@@ -17,3 +17,8 @@ lscreen-record = { version = "0.1.0", path = "../record" }
 
 [target."cfg(unix)".dependencies]
 libc = "0.2"
+
+# build.rs：packaging/icon.png → 多尺寸 ICO 嵌入 Windows exe
+[build-dependencies]
+winresource = "0.1"
+image = { version = "0.25", default-features = false, features = ["png"] }

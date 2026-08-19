@@ -41,7 +41,7 @@
 | Fedora / RHEL / openSUSE | `lscreen-*.rpm` | `sudo rpm -i lscreen-*.rpm` |
 | 任意 Linux 发行版 | `*.AppImage` | `chmod +x` 后直接运行 |
 | 任意 Linux 发行版 | `*.tar.gz` | 解压后将 `lscreen` 放入 PATH |
-| Windows | `*-setup.exe` | 运行安装器（含开始菜单项与卸载器） |
+| Windows | `*-setup.exe` | 运行自绘安装器（单用户安装免 UAC，含快捷方式与卸载器） |
 | Windows（免安装） | `*.zip` | 解压即用 |
 | macOS | `*.dmg` | 拖入 Applications；未签名，首次需右键 → 打开 |
 
@@ -112,9 +112,10 @@ HiDPI 缩放下与桌面环境显示的"逻辑分辨率"不同。多显示器时
 - **Linux**：交互模式需 X11 桌面（`DISPLAY`）；Wayland 会话暂不支持（规划中）。
   截屏为纯 Rust X11 协议实现，运行时无需任何额外库
 - **Windows / macOS**：走系统 API（xcap），无外部依赖
-- `ocr` 自动选择引擎：优先系统 tesseract（支持中文，`sudo apt install tesseract-ocr
-  tesseract-ocr-chi-sim`）；未安装时回退内置纯 Rust ocrs 引擎（零依赖，仅拉丁字母，
-  首次使用自动下载约 4MB 模型到 `~/.cache/ocrs`）
+- `ocr` 自动选择引擎：Windows 用系统 `Windows.Media.Ocr`、macOS 用系统 Vision
+  （支持中文、零依赖），Linux 优先系统 tesseract（支持中文，`sudo apt install
+  tesseract-ocr tesseract-ocr-chi-sim`）；系统引擎不可用时回退内置纯 Rust ocrs
+  引擎（零依赖，仅拉丁字母，首次使用自动下载约 4MB 模型到 `~/.cache/ocrs`）
 - Linux 上复制后由分离的守护子进程持有剪贴板，被覆盖后自动退出，无需常驻
 
 ## 从源码构建
@@ -134,7 +135,8 @@ Linux 构建仅需 Rust 工具链，无 C 库依赖。开发约定见 [AGENTS.md
 一键打包脚本 `scripts/package.sh`，产物统一进 `dist/`（含 SHA256SUMS）：
 
 - **Linux**（x64 / arm64 / armv7 / x86）：tar.gz + deb + rpm + AppImage
-- **Windows**（x64）：zip + NSIS 安装器 exe
+- **Windows**（x64）：zip + 自绘安装器 exe（egui 单屏向导，per-user 安装，
+  内嵌主程序，`crates/setup`；无需 NSIS/makensis）
 - **macOS**（arm64 / x64）：tar.gz + dmg（仅 CI 出包）
 
 ```bash
@@ -145,8 +147,8 @@ scripts/package.sh aarch64-unknown-linux-gnu   # 指定目标
 # Linux 交叉目标只需装对应交叉 gcc（项目链接期仅依赖 libc）：
 sudo apt install gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf \
                  gcc-i686-linux-gnu gcc-mingw-w64-x86-64
-# 原生包格式的工具（缺哪个就跳过哪种格式，不影响 tar.gz）：
-sudo apt install rpm nsis      # rpm 包 + Windows 安装器
+# 原生包格式的工具（缺哪个就跳过哪种格式，不影响 tar.gz/zip）：
+sudo apt install rpm             # rpm 包（Windows 安装器由 cargo 自行构建）
 # AppImage: github.com/AppImage/appimagetool 下载放入 PATH
 ```
 

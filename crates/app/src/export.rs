@@ -206,6 +206,7 @@ fn clipd_spawn(payload: &[u8]) -> Result<(), String> {
 }
 
 /// 隐藏子命令名：`lscreen __clipd`
+#[cfg(target_os = "linux")]
 pub const CLIPD_ARG: &str = "__clipd";
 /// 守护进程持有剪贴板前回写的确认字节。
 #[cfg(target_os = "linux")]

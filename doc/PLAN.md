@@ -41,9 +41,10 @@ crates/
   core/      lscreen-core     图元模型、撤销栈、命中检测、导出渲染、取色、二维码
   capture/   lscreen-capture  截屏（xcap 封装，屏蔽 X11/Wayland/多显示器差异）
   app/       lscreen          可执行文件：clap CLI + egui 覆盖层
-后续新增：
   ocr/       lscreen-ocr      trait + 三平台实现（M3）
   record/    lscreen-record   录屏编码（M4）
+  setup/     lscreen-setup    Windows 自绘安装器（egui 单屏向导，替代 NSIS；
+                              构建期经 LSCREEN_BIN 内嵌主程序，per-user 安装）
 ```
 
 ### 关键设计决策

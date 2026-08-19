@@ -66,7 +66,7 @@ sha256() {
     if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi
 }
 
-# ---------------- 平台原生包：deb / rpm / AppImage / NSIS exe ----------------
+# ---------------- 平台原生包：deb / rpm / AppImage / 安装器 exe ----------------
 # 对应工具缺失时跳过该格式并提示安装方式，不影响 tar.gz/zip 主产物。
 
 deb_arch() { case "$1" in x86_64-*) echo amd64;; aarch64-*) echo arm64;; armv7-*) echo armhf;; i686-*) echo i386;; esac; }
@@ -155,21 +155,14 @@ make_appimage() { # $1=target $2=bin
     echo "    $out ($(du -h "$out" | cut -f1))"
 }
 
-make_nsis() { # $1=target $2=bin
-    command -v makensis >/dev/null || {
-        echo "    跳过 exe 安装器：无 makensis（sudo apt install nsis / choco install nsis）"
-        return
-    }
-    # exe 与 .nsi 复制进同一临时目录、目录内编译、全用相对文件名：
-    # NSIS 对绝对路径的分隔符解析在 Windows/POSIX 上规则不同，
-    # 传绝对路径两边总有一边找不到文件（CI 已踩过）
-    local stage="$DIST/.stage/nsis-$1"
-    rm -rf "$stage" && mkdir -p "$stage"
-    cp "$2" "$stage/lscreen.exe"
-    cp packaging/installer.nsi "$stage/"
-    (cd "$stage" && makensis -V2 -DVERSION="$VERSION" installer.nsi >/dev/null)
-    local out="$DIST/lscreen-v$VERSION-$1-setup.exe"
-    mv "$stage/lscreen-setup.exe" "$out"
+make_setup() { # $1=target $2=bin(已构建的 lscreen.exe)
+    # 自绘安装器：把 lscreen.exe 内嵌进 lscreen-setup.exe 再构建
+    # （build.rs 经 LSCREEN_EMBED_STAMP 指纹保证内容变化触发重编译）
+    local out setup_bin
+    out="$DIST/lscreen-v$VERSION-$1-setup.exe"
+    setup_bin="target/$1/release/lscreen-setup.exe"
+    LSCREEN_BIN="$PWD/$2" cargo build --release -p lscreen-setup --target "$1" --quiet
+    cp "$setup_bin" "$out"
     echo "    $out ($(du -h "$out" | cut -f1))"
 }
 
@@ -245,7 +238,7 @@ build_and_pack() {
         make_rpm "$t" "$bin"
         make_appimage "$t" "$bin"
     elif [[ $t == *windows* ]]; then
-        make_nsis "$t" "$bin"
+        make_setup "$t" "$bin"
     elif [[ $t == *apple-darwin* ]]; then
         make_dmg "$t" "$bin"
     fi

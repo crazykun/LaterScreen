@@ -5,7 +5,7 @@
 #   Linux   x64 / arm64 / armv7 / x86（ubuntu-22.04，交叉 gcc 链接，
 #           项目链接期仅 libc，见 scripts/package.sh 头部说明）
 #           每个架构出 tar.gz + deb + rpm + AppImage
-#   Windows x64（MSVC）：zip + NSIS 安装器 exe
+#   Windows x64（MSVC）：zip + 自绘安装器 exe（egui，crates/setup 内嵌主程序）
 #   macOS   arm64 / x64：tar.gz + dmg（拖拽安装式 .app）
 name: Release
 
@@ -51,14 +51,6 @@ jobs:
           sudo curl -fsSL -o /usr/local/bin/appimagetool \
             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           sudo chmod +x /usr/local/bin/appimagetool
-      - name: 安装打包工具（Windows：NSIS）
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          if ! command -v makensis >/dev/null; then
-            choco install nsis -y
-            echo 'C:\Program Files (x86)\NSIS' >> "$GITHUB_PATH"
-          fi
       - name: 构建并打包
         shell: bash
         run: bash scripts/package.sh "${{ matrix.target }}"

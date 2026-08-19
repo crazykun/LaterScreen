@@ -3,6 +3,7 @@
 
 use eframe::egui;
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::process::Command;
 
 /// 返回字体文件字节。找不到时返回 None（UI 退化为 egui 默认字体，文本工具受限）。
