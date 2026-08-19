@@ -244,7 +244,7 @@ Snipaste 的招牌能力：截完把图钉在屏幕上置顶悬浮，方便对�
 ## 6. 目录规范
 
 ```
-doc/          设计与计划文档
+doc/          设计与计划文档（迁移后为 docs/）
 crates/       所有库与可执行 crate
   core/src/   model.rs(图元) history.rs(撤销) render.rs(导出) color.rs qr.rs
   capture/    lib.rs

@@ -164,7 +164,7 @@ git tag v0.2.0 && git push --tags   # 自动构建全平台包并发布 GitHub R
 Linux tesseract + 内置 ocrs 兜底）、GIF 录屏、图标化工具栏、CLI 无界面模式、
 贴图（Pin to screen）、Windows 自绘安装器、全平台打包发布。
 
-规划中（详见 [doc/PLAN.md](doc/PLAN.md)）：
+规划中（详见 [docs/PLAN.md](docs/PLAN.md)）：
 
 - MP4 录屏（系统编码器）、滚动长截图
 - Wayland 支持（xdg-desktop-portal）、混合 DPI 多显示器
@@ -182,7 +182,7 @@ crates/
 ```
 
 交互期用 egui Painter 实时绘制，导出用 tiny-skia 软渲染合成，两条路径共享同一份
-图元数据。设计细节与里程碑见 [doc/PLAN.md](doc/PLAN.md)。
+图元数据。设计细节与里程碑见 [docs/PLAN.md](docs/PLAN.md)。
 
 ## License
 

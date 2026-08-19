@@ -75,7 +75,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      # release 说明来自仓库文件，必须 checkout 源码（否则工作区无 doc/ 目录）
+      # release 说明来自仓库文件，必须 checkout 源码（否则工作区无 docs/ 目录）
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
@@ -83,10 +83,10 @@ jobs:
           merge-multiple: true
       - name: 生成校验和
         run: cd dist && sha256sum * > SHA256SUMS
-      - name: 准备发布说明（doc/release-notes/<tag>.md）
+      - name: 准备发布说明（docs/release-notes/<tag>.md）
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          NOTES="doc/release-notes/${GITHUB_REF_NAME}.md"
+          NOTES="docs/release-notes/${GITHUB_REF_NAME}.md"
           if [ -f "$NOTES" ]; then
             cp "$NOTES" release_body.md
           else

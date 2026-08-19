@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Rust workspace：跨平台截图标注工具，产物为单命令 `lscreen`。设计文档与里程碑（M1–M5）见 `doc/PLAN.md`，为架构事实的最终依据。
+Rust workspace：跨平台截图标注工具，产物为单命令 `lscreen`。设计文档与里程碑（M1–M5）见 `docs/PLAN.md`，为架构事实的最终依据。
 
 ## 常用命令
 
@@ -36,5 +36,5 @@ cargo clippy --workspace --all-targets -- -D warnings
 ## 环境注意事项
 
 - 交互模式（`cargo run`）需要真实 X11 桌面（`DISPLAY`）；无头环境只能测 CLI 无界面模式（`lscreen shot` 等）和单元测试。
-- `.gitignore` 忽略所有 `*.png`（`doc/` 除外）：测试图请用代码生成（core 的 dev-dependency `qrcode` 即此用途），勿提交图片文件。
+- `.gitignore` 忽略所有 `*.png`（`docs/` 除外）：测试图请用代码生成（core 的 dev-dependency `qrcode` 即此用途），勿提交图片文件。
 - 本仓库文档与提交信息使用中文，提交格式为中文 Conventional Commits（如 `feat: M2 取色器+二维码识别+CLI 子命令`）。
