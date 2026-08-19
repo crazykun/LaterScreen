@@ -75,6 +75,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      # release 说明来自仓库文件，必须 checkout 源码（否则工作区无 doc/ 目录）
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -85,10 +87,11 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           NOTES="doc/release-notes/${GITHUB_REF_NAME}.md"
-          if [ ! -f "$NOTES" ]; then
-            echo "此版本未提供发布说明，详见提交历史。" > "$NOTES"
+          if [ -f "$NOTES" ]; then
+            cp "$NOTES" release_body.md
+          else
+            echo "此版本未提供发布说明，详见提交历史。" > release_body.md
           fi
-          cp "$NOTES" release_body.md
       - name: 发布 GitHub Release（仅 tag 触发）
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v3
