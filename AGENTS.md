@@ -28,7 +28,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 - **双渲染路径**：交互期 `egui::Painter` 绘制，导出用 core 内 tiny-skia 软渲染，两者共享同一份图元数据且必须像素级一致（马赛克=网格色块、橡皮擦=原图回贴）。改图元几何时两条路径都要同步改。
 - **撤销/重做是全量快照**（`Vec<Vec<Element>>`），非命令模式；图片本体不进快照。
-- **体积硬约束**：发布产物 ≤ 10MB、单文件、无动态库依赖。workspace release profile 已做 `opt-level="z"` + fat LTO + strip + `panic="abort"`（无 unwind，勿依赖 catch_unwind）。新增依赖前先评估体积/链接影响。
+- **体积硬约束**：发布产物 ≤ 12MB、单文件、无动态库依赖。workspace release profile 已做 `opt-level="z"` + fat LTO + strip + `panic="abort"`（无 unwind，勿依赖 catch_unwind）。新增依赖前先评估体积/链接影响。
 - 字体运行时从系统加载（`app/src/font.rs`，fc-match/平台字体目录），不捆绑字体文件。
 - egui/eframe 锁 0.35，勿随意升级（上游 API 变动快）。
 

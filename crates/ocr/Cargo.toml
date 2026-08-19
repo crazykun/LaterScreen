@@ -6,3 +6,5 @@ license.workspace = true
 
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }
+ocrs = "0.12"
+rten = { version = "0.24", default-features = false, features = ["rten_format"] }

@@ -1,9 +1,10 @@
 //! lscreen-ocr: 文字识别抽象层。
 //!
-//! 平台策略（OCR 是「无动态库依赖」目标的唯一豁免项）：
-//! - Linux：探测系统 tesseract 可执行文件，子进程调用（无链接依赖，未安装时明确引导）
-//! - Windows：`Windows.Media.Ocr` 系统 API（计划中，M5 配合 CI 真机验证后启用）
-//! - macOS：Vision framework（计划中，同上）
+//! 引擎策略（按优先级回退）：
+//! - Linux：探测系统 tesseract 可执行文件，子进程调用（无链接依赖，支持中文）
+//! - 内置 ocrs：纯 Rust 引擎，零外部依赖兜底，Windows/macOS 首个可用引擎；
+//!   模型约 4MB 按需下载到 `~/.cache/ocrs`，仅支持拉丁字母文字
+//! - Windows `Windows.Media.Ocr` / macOS Vision 系统 OCR：计划中（M5）
 //!
 //! 识别结果统一为 [`OcrOutput`]，为后续「截图 → LLM 处理」（翻译/总结/问答）
 //! 预留结构化扩展点：调用方拿到的是带置信度的文本块，而非拼接后的字符串。
@@ -64,38 +65,26 @@ pub trait TextRecognizer: Send {
     fn recognize(&self, rgba: &[u8], width: u32, height: u32) -> Result<OcrOutput>;
 }
 
+mod ocrs_engine;
 #[cfg(target_os = "linux")]
 mod tesseract;
 
 /// 返回当前平台的默认识别引擎。
 /// languages 形如 `["chi_sim", "eng"]`，各平台自行映射到引擎的语言标识。
+///
+/// 选择逻辑：tesseract 可用且未被显式排除时优先（唯一支持中文的引擎），
+/// 否则回退到内置 ocrs（零依赖，仅拉丁文字）。
 pub fn default_engine(languages: &[String]) -> Box<dyn TextRecognizer> {
+    let use_tesseract = std::env::var("LSCREEN_OCR_ENGINE")
+        .ok()
+        .map(|v| v == "tesseract")
+        .unwrap_or(true);
     #[cfg(target_os = "linux")]
-    {
-        Box::new(tesseract::Tesseract::new(languages))
+    if use_tesseract {
+        let t = tesseract::Tesseract::new(languages);
+        if t.available() {
+            return Box::new(t);
+        }
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = languages;
-        Box::new(Unimplemented)
-    }
-}
-
-/// Windows / macOS 的系统 OCR 在 M5（CI 真机环境）实现。
-#[cfg(not(target_os = "linux"))]
-struct Unimplemented;
-
-#[cfg(not(target_os = "linux"))]
-impl TextRecognizer for Unimplemented {
-    fn available(&self) -> bool {
-        false
-    }
-
-    fn describe(&self) -> String {
-        "本平台 OCR 尚未实现（计划：Windows.Media.Ocr / macOS Vision）".into()
-    }
-
-    fn recognize(&self, _: &[u8], _: u32, _: u32) -> Result<OcrOutput> {
-        Err(OcrError(self.describe()))
-    }
+    Box::new(ocrs_engine::OcrsEngine::new(languages))
 }

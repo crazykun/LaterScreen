@@ -7,8 +7,8 @@
 
 | 约束 | 目标 | 实现手段 |
 |---|---|---|
-| 体积 | 最终产物 ≤ 10MB | `opt-level="z"` + fat LTO + strip + `panic="abort"`；避免重型依赖 |
-| 单文件 | 无需安装、不依赖动态库（OCR 除外） | 静态链接；OCR/编码优先走**系统自带 API**（零捆绑） |
+| 体积 | 最终产物 ≤ 12MB | `opt-level="z"` + fat LTO + strip + `panic="abort"`；避免重型依赖 |
+| 单文件 | 无需安装、不依赖动态库 | 静态链接；OCR 模型按需下载、不捆绑 |
 | 启动 | 冷启动 < 300ms 出选区 | 无运行时、按需初始化、截屏与窗口创建并行 |
 | 内存 | 常态 < 100MB（全屏图 + 双缓冲） | 单份截图内存 + 图元矢量数据，不做多余拷贝 |
 | 小而美常驻 | 托盘常驻进程空闲 < 30MB | 常驻体只持有托盘图标 + 配置 + 热键监听，**不预载截图缓冲**；截图/贴图/录屏各自独立窗口，用完释放。CLI 单次调用仍是即起即退 |
@@ -60,9 +60,9 @@ crates/
    交互层画色块矩形、导出层同样画色块，两边像素级一致。
 4. **橡皮擦 = 原图回贴**：按绘制顺序渲染，橡皮擦笔迹用原图对应区域贴回，
    天然擦掉此前的所有标注。
-5. **系统 API 优先**：OCR（Win `Windows.Media.Ocr` / mac Vision）、
+5. **系统 API 优先 + 内置兜底**：OCR（Win `Windows.Media.Ocr` / mac Vision）、
    MP4 编码（Win Media Foundation / mac VideoToolbox）都走系统自带能力，
-   零体积零依赖；仅 Linux 需要兜底方案。
+   零体积零依赖；系统能力未落地前由内置 ocrs 引擎兜底（纯 Rust，模型按需下载）。
 
 ## 3. 技术选型
 
@@ -80,7 +80,7 @@ crates/
 | 二维码 | rqrr | 纯 Rust |
 | GIF 编码 | gifski | 纯 Rust，质量最好 |
 | MP4 编码 | 系统编码器 | Win MF / mac VideoToolbox / Linux openh264 静态链接 |
-| OCR | 系统 API | Win `Windows.Media.Ocr` / mac Vision / Linux 外挂 tesseract（约束豁免项） |
+| OCR | 系统 API + 内置 ocrs | Win `Windows.Media.Ocr` / mac Vision（规划）/ Linux tesseract 子进程；内置 ocrs 纯 Rust 兜底 |
 
 ## 4. 里程碑
 
@@ -101,10 +101,12 @@ crates/
 - [ ] CLI：`lscreen`（交互截图）、`lscreen shot --region x,y,w,h -o f.png`、
       `lscreen pick`（取色）、`lscreen qr`、`lscreen ocr`（M3 后可用）
 
-### M3 OCR
-- [ ] `TextRecognizer` trait；Windows（windows-rs）、macOS（objc2 + Vision）实现
-- [ ] Linux：探测系统 tesseract 可执行文件调用（文档明确此为唯一外部依赖）
-- [ ] 识别结果浮层展示 + 一键复制
+### M3 OCR ✅
+- [x] `TextRecognizer` trait；识别结果浮层展示 + 一键复制
+- [x] Linux：探测系统 tesseract 可执行文件调用（中文方案，未安装时明确引导）
+- [x] 内置 ocrs 兜底引擎：纯 Rust 零依赖，Win/mac 首个可用引擎；模型约 4MB
+      按需下载到 `~/.cache/ocrs`，仅拉丁字母文字（CJK 需 tesseract）
+- [ ] Windows（windows-rs）/ macOS（objc2 + Vision）原生 OCR（M5 真机环境验证）
 
 ### M4 录屏 + 滚动截图（技术风险最高，放最后）
 - [ ] 选区连续采帧（xcap）→ gifski 编码 GIF

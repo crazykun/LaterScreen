@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 跨平台截图标注工具（Linux / Windows / macOS），Rust 编写。
-**单文件、≤10MB、无动态库依赖、冷启动即用**，命令名 `lscreen`。
+**单文件、≤12MB、无动态库依赖、冷启动即用**，命令名 `lscreen`。
 目标对齐 Snipaste 级体验：截图、标注、取色、二维码、OCR、GIF 录屏。
 
 ## 特性
@@ -59,7 +59,7 @@ lscreen                                # 交互式截图（框选 → 标注 →
 lscreen pick                           # 屏幕取色器（单击复制 HEX 并退出）
 lscreen qr                             # 识别主屏上的二维码，输出到 stdout
 lscreen qr -i photo.png                # 识别图片文件中的二维码
-lscreen ocr --region 0,0,800,600       # 识别屏幕区域文字（Linux 需 tesseract）
+lscreen ocr --region 0,0,800,600       # 识别屏幕区域文字（自动选择引擎）
 lscreen ocr -i doc.png --lang chi_sim --lang eng          # 识别图片文字
 lscreen record --region 0,0,800,600 --fps 10 -o demo.gif  # 录屏 GIF，Ctrl+C 停止
 lscreen shot -o out.png                # 无界面截全屏
@@ -112,8 +112,9 @@ HiDPI 缩放下与桌面环境显示的"逻辑分辨率"不同。多显示器时
 - **Linux**：交互模式需 X11 桌面（`DISPLAY`）；Wayland 会话暂不支持（规划中）。
   截屏为纯 Rust X11 协议实现，运行时无需任何额外库
 - **Windows / macOS**：走系统 API（xcap），无外部依赖
-- `ocr` 在 Linux 依赖系统 tesseract（`sudo apt install tesseract-ocr tesseract-ocr-chi-sim`），
-  未安装时会给出明确引导；**这是唯一的外部依赖豁免项**，其余功能零依赖
+- `ocr` 自动选择引擎：优先系统 tesseract（支持中文，`sudo apt install tesseract-ocr
+  tesseract-ocr-chi-sim`）；未安装时回退内置纯 Rust ocrs 引擎（零依赖，仅拉丁字母，
+  首次使用自动下载约 4MB 模型到 `~/.cache/ocrs`）
 - Linux 上复制后由分离的守护子进程持有剪贴板，被覆盖后自动退出，无需常驻
 
 ## 从源码构建
@@ -157,8 +158,8 @@ git tag v0.1.0 && git push --tags   # 自动构建全平台包并发布 GitHub R
 
 ## 路线图
 
-已完成：截图标注、取色器、二维码、OCR（Linux）、GIF 录屏、图标化工具栏、
-CLI 无界面模式、贴图（Pin to screen）、全平台打包发布。
+已完成：截图标注、取色器、二维码、OCR（Linux tesseract + 内置 ocrs 兜底）、GIF 录屏、
+图标化工具栏、CLI 无界面模式、贴图（Pin to screen）、全平台打包发布。
 
 规划中（详见 [doc/PLAN.md](doc/PLAN.md)）：
 
@@ -174,7 +175,7 @@ crates/
   core/      图元模型、撤销栈、命中检测、tiny-skia 导出渲染、取色、二维码（无 UI 依赖）
   capture/   截屏平台层（Linux: x11rb 纯 Rust；Win/mac: xcap 系统 API）
   app/       可执行文件：clap CLI + egui 覆盖层
-  ocr/       OCR trait + 平台实现（Linux: tesseract 子进程）
+  ocr/       OCR trait + 引擎实现（tesseract 子进程 / 内置 ocrs）
   record/    GIF 录屏编码（gifski）
 ```
 
