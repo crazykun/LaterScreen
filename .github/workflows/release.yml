@@ -46,7 +46,11 @@ jobs:
       - name: 安装打包工具（Linux：交叉 gcc + rpm + appimagetool）
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update -q
+          # GitHub runner 默认挂了 azure.archive.ubuntu.com 镜像，高峰期反复超时重试（可卡 20+ 分钟）；
+          # 把所有 apt 源里的 azure 主机改回 archive.ubuntu.com，并为 update 失败兜底重试一次
+          sudo grep -rl 'azure\.archive\.ubuntu\.com' /etc/apt/ 2>/dev/null \
+            | sudo xargs -r sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g'
+          sudo apt-get update -q || { sleep 10; sudo apt-get update -q; }
           sudo apt-get install -y -q rpm ${{ matrix.apt }}
           sudo curl -fsSL -o /usr/local/bin/appimagetool \
             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
