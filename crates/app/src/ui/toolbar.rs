@@ -13,7 +13,7 @@ use super::{egui_color, SnipApp, View};
 /// 图标按钮边长（逻辑点）
 const BTN: f32 = 24.0;
 /// 工具栏最大宽度估计，用于位置夹取
-const BAR_W: f32 = 620.0;
+const BAR_W: f32 = 650.0;
 
 const TOOLS: &[(Tool, &str)] = &[
     (Tool::Select, "选择：移动/编辑已绘制元素"),
@@ -122,6 +122,9 @@ fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
 
     if action_button(ui, true, "保存为 PNG (Ctrl+S)", draw_save) {
         app.save_and_exit(ctx);
+    }
+    if action_button(ui, true, "贴图：把选区钉在屏幕上 (Ctrl+P)", draw_pin) {
+        app.pin_and_exit(ctx);
     }
     if action_button(ui, true, "识别选区内的二维码", draw_qr) {
         app.scan_qr(ctx);
@@ -485,6 +488,18 @@ fn draw_check(p: &egui::Painter, r: Rect, _c: Color32) {
         ],
         s,
     ));
+}
+
+/// 图钉（地图钉样式）：圆头 + 两侧汇聚线到针尖。
+fn draw_pin(p: &egui::Painter, r: Rect, c: Color32) {
+    let s = Stroke::new(1.4, c);
+    let w = r.width();
+    let head = Pos2::new(r.center().x, r.min.y + w * 0.36);
+    let rad = w * 0.32;
+    p.circle_stroke(head, rad, s);
+    let tip = Pos2::new(r.center().x, r.max.y);
+    p.line_segment([Pos2::new(head.x - rad, head.y + rad * 0.45), tip], s);
+    p.line_segment([Pos2::new(head.x + rad, head.y + rad * 0.45), tip], s);
 }
 
 fn draw_qr(p: &egui::Painter, r: Rect, c: Color32) {

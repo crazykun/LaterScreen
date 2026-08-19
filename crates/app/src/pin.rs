@@ -1,0 +1,354 @@
+//! 贴图：置顶无边框窗口显示一张图片（Snipaste 招牌能力）。
+//!
+//! 独立进程形态（`lscreen pin`）：由覆盖层 spawn，选区合成 PNG 经 stdin
+//! 传入，本进程读完即建窗。每个贴图一个轻量进程，关闭即释放全部内存。
+//!
+//! 交互：拖拽移动窗口（手动定位，见 PinApp::drag）、滚轮缩放 25%–400%
+//! （光标下的图像点锚定不动）、双击复制、右键菜单、Esc/Delete 关闭。
+
+use eframe::egui;
+use egui::{Color32, Pos2, Vec2, ViewportCommand};
+
+use crate::export;
+
+const MIN_ZOOM: f32 = 0.25;
+const MAX_ZOOM: f32 = 4.0;
+/// 缩放指示条/工具条的显示时长（秒）
+const TOAST_SECS: f64 = 1.6;
+
+pub struct PinApp {
+    rgba: Vec<u8>,
+    w: u32,
+    h: u32,
+    /// zoom=1 时的窗口逻辑尺寸（物理像素 / 屏幕缩放比）
+    base: Vec2,
+    zoom: f32,
+    texture: Option<egui::TextureHandle>,
+    /// 右键菜单锚点（窗口内坐标）；None = 关闭
+    menu: Option<Pos2>,
+    toast: Option<(String, f64)>,
+    /// 手动拖拽状态。不用 ViewportCommand::StartDrag：它走 WM 交互式移动
+    /// （_NET_WM_MOVERESIZE），spawn 后未激活的窗口第一次按下会被 WM 拿去做
+    /// 焦点转移，请求被忽略，表现为「第一次总是拖不住」。
+    ///
+    /// 目标 = 指针屏幕坐标 − 抓取偏移（按下时定格）。指针屏幕坐标必须取
+    /// 绝对来源（X11 QueryPointer）：窗口被程序移动时静止指针不产生
+    /// MotionNotify，egui 的窗口内坐标是陈旧值，而 outer_rect 随
+    /// ConfigureNotify 更新——用「新窗口位置 + 旧局部坐标」拼出的指针
+    /// 位置比真实值多出刚移动的 Δ，会把自己的移动误判为指针移动再移一次，
+    /// 逐帧自激成「窗口乱跑」。
+    drag: Option<DragState>,
+    /// 屏幕缩放比（物理像素/逻辑点），QueryPointer 物理坐标换算逻辑点用
+    scale: f32,
+}
+
+struct DragState {
+    /// 指针按下点相对窗口左上的偏移（窗口内坐标，拖动期间不变）
+    grab_offset: Vec2,
+    /// 上次发送的窗口目标位置（相等则不重发）
+    sent: Pos2,
+}
+
+impl PinApp {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        rgba: Vec<u8>,
+        w: u32,
+        h: u32,
+        scale: f32,
+        font: Option<Vec<u8>>,
+    ) -> Self {
+        // 贴图是独立进程，必须自己挂中文字体，否则按钮/菜单/toast 的中文
+        // 会因 egui 内置字体无 CJK 而显示为方框。先用 core Renderer 验证
+        // 字节可解析（epaint 对坏字体是 panic 而非 Err）。
+        if let Some(bytes) = font {
+            if lscreen_core::render::Renderer::new(Some(bytes.clone())).has_font() {
+                crate::font::setup_egui_fonts(&cc.egui_ctx, bytes);
+            }
+        }
+        let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+        // 放大用最近邻（滚轮放大像素格清晰），缩小用线性
+        let options = egui::TextureOptions {
+            magnification: egui::TextureFilter::Nearest,
+            minification: egui::TextureFilter::Linear,
+            ..Default::default()
+        };
+        let texture = cc.egui_ctx.load_texture("pin", img, options);
+        Self {
+            rgba,
+            w,
+            h,
+            base: Vec2::new(w as f32 / scale, h as f32 / scale),
+            zoom: 1.0,
+            texture: Some(texture),
+            menu: None,
+            toast: None,
+            drag: None,
+            scale,
+        }
+    }
+
+    fn do_copy(&mut self, ctx: &egui::Context) {
+        match export::copy_to_clipboard(&self.rgba, self.w, self.h) {
+            Ok(()) => self.toast(ctx, "已复制"),
+            Err(e) => self.toast(ctx, format!("复制失败: {e}")),
+        }
+    }
+
+    fn do_save(&mut self, ctx: &egui::Context) {
+        let path = export::default_save_path();
+        match export::save_png(&self.rgba, self.w, self.h, &path) {
+            Ok(p) => self.toast(ctx, format!("已保存 {}", p.display())),
+            Err(e) => self.toast(ctx, format!("保存失败: {e}")),
+        }
+    }
+
+    fn do_close(&mut self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(ViewportCommand::Close);
+    }
+
+    fn toast(&mut self, ctx: &egui::Context, msg: impl Into<String>) {
+        self.toast = Some((msg.into(), ctx.input(|i| i.time) + TOAST_SECS));
+    }
+
+    /// 滚轮缩放：光标下的图像点锚定不动（窗口尺寸与位置同步换算）。
+    fn handle_zoom(&mut self, ctx: &egui::Context, cur_size: Vec2) {
+        let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
+        if scroll == 0.0 {
+            return;
+        }
+        // 每 400pt 滚动量 ≈ e 倍缩放；向上滚为正 = 放大
+        let factor = (scroll / 400.0).exp();
+        let new_zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        if new_zoom == self.zoom {
+            return;
+        }
+        let old_zoom = self.zoom;
+        self.zoom = new_zoom;
+        let new_size = self.base * new_zoom;
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(new_size));
+
+        // 锚定光标：cursor_screen = outer.min + cursor_local，
+        // 新窗口位置 = cursor_screen - new_size * (cursor_local / cur_size)
+        let anchor = ctx.input(|i| i.pointer.latest_pos()).map(|c| {
+            Vec2::new(
+                (c.x / cur_size.x.max(1.0)).clamp(0.0, 1.0),
+                (c.y / cur_size.y.max(1.0)).clamp(0.0, 1.0),
+            )
+        });
+        let outer = ctx.input(|i| i.viewport().outer_rect);
+        if let (Some(cursor), Some(outer)) = (ctx.input(|i| i.pointer.latest_pos()), outer) {
+            let screen_cursor = outer.min + cursor.to_vec2();
+            let new_min = screen_cursor - new_size * anchor.unwrap_or(Vec2::splat(0.5));
+            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(new_min));
+        }
+
+        let pct = (new_zoom * 100.0).round() as i32;
+        let dir = if new_zoom > old_zoom { "+" } else { "" };
+        self.toast(ctx, format!("{dir}{pct}%"));
+    }
+
+    fn show_menu(&mut self, ctx: &egui::Context) {
+        let Some(anchor) = self.menu else { return };
+        let mut action: Option<u8> = None; // 1=复制 2=保存 3=关闭
+        let ir = egui::Area::new(egui::Id::new("pin-menu"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(anchor)
+            .interactable(true)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    if ui.button("复制 (Ctrl+C)").clicked() {
+                        action = Some(1);
+                    }
+                    if ui.button("保存为 PNG (Ctrl+S)").clicked() {
+                        action = Some(2);
+                    }
+                    ui.separator();
+                    if ui.button("关闭贴图 (Esc)").clicked() {
+                        action = Some(3);
+                    }
+                })
+            });
+        // 点击菜单外任意处关闭（egui 的 LayerId 命中判断不可靠，用矩形判断）
+        let menu_rect = ir.response.rect;
+        let clicked_outside = ctx.input(|i| {
+            i.pointer.any_click()
+                && i.pointer
+                    .latest_pos()
+                    .is_some_and(|p| !menu_rect.contains(p))
+        });
+        if clicked_outside {
+            self.menu = None;
+        }
+        match action {
+            Some(1) => {
+                self.menu = None;
+                self.do_copy(ctx);
+            }
+            Some(2) => {
+                self.menu = None;
+                self.do_save(ctx);
+            }
+            Some(3) => {
+                self.menu = None;
+                self.do_close(ctx);
+            }
+            _ => {}
+        }
+    }
+
+    /// 悬浮工具条：指针在窗口内时显示于底部中央，离开即隐。
+    fn show_hover_bar(&mut self, ctx: &egui::Context, window: egui::Rect) {
+        let Some(cursor) = ctx.input(|i| i.pointer.latest_pos()) else {
+            return;
+        };
+        if !window.contains(cursor) || self.menu.is_some() {
+            return;
+        }
+        let mut action: Option<u8> = None;
+        egui::Area::new(egui::Id::new("pin-bar"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -8.0))
+            .interactable(true)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        if ui.small_button("复制").clicked() {
+                            action = Some(1);
+                        }
+                        if ui.small_button("保存").clicked() {
+                            action = Some(2);
+                        }
+                        if ui.small_button("关闭").clicked() {
+                            action = Some(3);
+                        }
+                    })
+                })
+            });
+        match action {
+            Some(1) => self.do_copy(ctx),
+            Some(2) => self.do_save(ctx),
+            Some(3) => self.do_close(ctx),
+            _ => {}
+        }
+    }
+
+    fn show_toast(&mut self, ctx: &egui::Context) {
+        let Some((msg, until)) = self.toast.clone() else {
+            return;
+        };
+        if ctx.input(|i| i.time) > until {
+            self.toast = None;
+            return;
+        }
+        egui::Area::new(egui::Id::new("pin-toast"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -40.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style())
+                    .fill(Color32::from_black_alpha(200))
+                    .show(ui, |ui| {
+                        ui.colored_label(Color32::WHITE, msg);
+                    });
+            });
+        ctx.request_repaint();
+    }
+}
+
+impl eframe::App for PinApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let rect = ui.max_rect();
+
+        // 滚轮缩放（先于绘制：InnerSize 下一帧生效）
+        self.handle_zoom(&ctx, rect.size());
+
+        // 键盘
+        use egui::{Key, Modifiers};
+        let (esc, del, copy_k, save_k) = ctx.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::NONE, Key::Escape),
+                i.consume_key(Modifiers::NONE, Key::Delete),
+                i.consume_key(Modifiers::COMMAND, Key::C),
+                i.consume_key(Modifiers::COMMAND, Key::S),
+            )
+        });
+        if esc || del {
+            self.do_close(&ctx);
+            return;
+        }
+
+        let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+        if let Some(tex) = &self.texture {
+            ui.painter().image(
+                tex.id(),
+                rect,
+                egui::Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+
+        if self.menu.is_none() {
+            if response.drag_started() {
+                // 抓取偏移用按下原点（越过拖动阈值前窗口静止，局部坐标可信）
+                if let (Some(outer), Some(origin)) = (
+                    ctx.input(|i| i.viewport().outer_rect),
+                    ctx.input(|i| i.pointer.press_origin()),
+                ) {
+                    self.drag = Some(DragState {
+                        grab_offset: origin.to_vec2(),
+                        sent: outer.min,
+                    });
+                }
+            }
+            let scale = self.scale;
+            if let Some(d) = &mut self.drag {
+                if response.dragged() {
+                    // 优先 X11 QueryPointer：绝对屏幕坐标，与窗口移动解耦，
+                    // 无自激回路（见 drag 字段注释）。Win/mac 拿不到时退回
+                    // egui 局部坐标换算，且仅在指针真实移动的帧重算，
+                    // 静止指针的陈旧局部坐标不参与计算
+                    let pointer_screen = lscreen_capture::cursor_position()
+                        .map(|(x, y)| Pos2::new(x as f32 / scale, y as f32 / scale))
+                        .or_else(|| {
+                            ctx.input(|i| {
+                                let fresh = i.pointer.delta() != Vec2::ZERO;
+                                match (fresh, i.viewport().outer_rect, i.pointer.latest_pos()) {
+                                    (true, Some(o), Some(c)) => Some(o.min + c.to_vec2()),
+                                    _ => None,
+                                }
+                            })
+                        });
+                    if let Some(p) = pointer_screen {
+                        let target = p - d.grab_offset;
+                        if target != d.sent {
+                            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(target));
+                            d.sent = target;
+                        }
+                    }
+                }
+                if response.drag_stopped() {
+                    self.drag = None;
+                }
+            }
+        }
+        if response.secondary_clicked() {
+            self.menu = ctx.input(|i| i.pointer.latest_pos());
+        }
+        if response.double_clicked() {
+            self.do_copy(&ctx);
+        }
+
+        self.show_menu(&ctx);
+        self.show_hover_bar(&ctx, rect);
+        self.show_toast(&ctx);
+
+        if copy_k {
+            self.do_copy(&ctx);
+        }
+        if save_k {
+            self.do_save(&ctx);
+        }
+    }
+}

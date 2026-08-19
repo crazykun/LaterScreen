@@ -144,7 +144,7 @@ impl SnipApp {
         let renderer = Renderer::new(font.clone());
         if renderer.has_font() {
             if let Some(bytes) = font {
-                setup_fonts(&cc.egui_ctx, bytes);
+                crate::font::setup_egui_fonts(&cc.egui_ctx, bytes);
             }
         }
         Self {
@@ -251,6 +251,42 @@ impl SnipApp {
         }
     }
 
+    /// 贴图：把当前选区钉在屏幕上（独立进程），本窗口随即退出。
+    /// 图片经 stdin 以 PNG 传入子进程，免临时文件与清理问题；
+    /// 写完再退出，保证子进程读到完整数据。
+    pub fn pin_and_exit(&mut self, ctx: &egui::Context) {
+        let Some((rgba, w, h)) = self.compose() else {
+            self.toast(ctx, "选区为空");
+            return;
+        };
+        let img = image::RgbaImage::from_raw(w, h, rgba)
+            .ok_or_else(|| "invalid image buffer".to_string());
+        let mut png = Vec::new();
+        let enc = img.and_then(|img| {
+            img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                .map_err(|e| e.to_string())
+        });
+        if let Err(e) = enc {
+            self.toast(ctx, format!("编码失败: {e}"));
+            return;
+        }
+        let scale = if self.shot.scale > 0.0 {
+            self.shot.scale
+        } else {
+            1.0
+        };
+        // 屏幕坐标 = 显示器原点 + 选区内偏移（region 是图像像素坐标）
+        let (ox, oy) = self.shot.origin;
+        let (x, y) = (
+            (ox as f32 + self.region.min.x) / scale,
+            (oy as f32 + self.region.min.y) / scale,
+        );
+        match spawn_pin(&png, x, y, scale) {
+            Ok(()) => self.request_close(ctx),
+            Err(e) => self.toast(ctx, format!("贴图失败: {e}")),
+        }
+    }
+
     pub fn request_close(&mut self, ctx: &egui::Context) {
         self.close_requested = true;
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -326,14 +362,15 @@ impl SnipApp {
             }
             return;
         }
-        let (undo, redo_y, redo_sz, save, copy, del, enter, esc, rgb, hex, cmyk) =
-            ctx.input_mut(|i| {
+        let (undo, redo_y, redo_sz, save, copy, pin, del, enter, esc, rgb, hex, cmyk) = ctx
+            .input_mut(|i| {
                 (
                     i.consume_key(Modifiers::COMMAND, Key::Z),
                     i.consume_key(Modifiers::COMMAND, Key::Y),
                     i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z),
                     i.consume_key(Modifiers::COMMAND, Key::S),
                     i.consume_key(Modifiers::COMMAND, Key::C),
+                    i.consume_key(Modifiers::COMMAND, Key::P),
                     i.consume_key(Modifiers::NONE, Key::Delete)
                         || i.consume_key(Modifiers::NONE, Key::Backspace),
                     i.consume_key(Modifiers::NONE, Key::Enter),
@@ -365,6 +402,9 @@ impl SnipApp {
         if matches!(self.stage, Stage::Editing) {
             if save {
                 self.save_and_exit(ctx);
+            }
+            if pin {
+                self.pin_and_exit(ctx);
             }
             if copy || enter {
                 self.copy_and_exit(ctx);
@@ -578,6 +618,37 @@ pub type MosaicCell = (f32, f32, f32, Rgba);
 /// 马赛克预览缓存：图元 id → (几何指纹, 色块列表)。指纹见 `canvas::mosaic_key`。
 pub type MosaicCache = HashMap<u64, (u64, Vec<MosaicCell>)>;
 
+/// 拉起独立的贴图进程：stdin 写入 PNG 后即返回（不 wait——
+/// 贴图进程独立存活，父进程退出后被 init 收养）。
+fn spawn_pin(png: &[u8], x: f32, y: f32, scale: f32) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut child = Command::new(exe)
+        .args([
+            "pin",
+            "--pos",
+            &format!("{x},{y}"),
+            "--scale",
+            &scale.to_string(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("启动贴图进程失败: {e}"))?;
+    // 写完再退出：子进程读 stdin 到 EOF 才建窗，这里阻塞写不会死锁
+    // （管道 64KB，子进程在读；PNG 编码在内存中已完成）
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "无法写入贴图进程".to_string())?
+        .write_all(png)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -585,21 +656,6 @@ fn truncate(s: &str, max: usize) -> String {
         let cut: String = s.chars().take(max).collect();
         format!("{cut}…")
     }
-}
-
-fn setup_fonts(ctx: &egui::Context, bytes: Vec<u8>) {
-    let mut fonts = egui::FontDefinitions::default();
-    fonts
-        .font_data
-        .insert("system".into(), egui::FontData::from_owned(bytes).into());
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        fonts
-            .families
-            .entry(family)
-            .or_default()
-            .push("system".into());
-    }
-    ctx.set_fonts(fonts);
 }
 
 pub fn egui_color(c: Rgba) -> Color32 {

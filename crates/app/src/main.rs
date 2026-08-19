@@ -5,6 +5,7 @@
 
 mod export;
 mod font;
+mod pin;
 mod ui;
 
 use clap::{Parser, Subcommand};
@@ -66,6 +67,18 @@ enum Cmd {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// 贴图：把图片钉在屏幕上置顶悬浮（独立进程，支持多个并存）
+    Pin {
+        /// 图片文件路径（PNG）；缺省从 stdin 读 PNG（覆盖层 spawn 时走此通道）
+        #[arg(short, long)]
+        input: Option<PathBuf>,
+        /// 窗口左上角屏幕坐标（逻辑点），格式 X,Y
+        #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
+        pos: Option<String>,
+        /// 屏幕缩放比（物理像素/逻辑点），用于换算窗口初始尺寸；缺省 1.0
+        #[arg(long, default_value_t = 1.0, allow_hyphen_values = true)]
+        scale: f32,
+    },
     /// 无界面截屏：立即截取并保存/复制
     Shot {
         /// 截取区域，格式 X,Y,W,H（物理像素）；缺省为整个主屏
@@ -114,6 +127,7 @@ fn main() {
             output,
             clipboard,
         }) => run_shot(region, output, clipboard),
+        Some(Cmd::Pin { input, pos, scale }) => run_pin(input, pos, scale),
     };
     if let Err(e) = result {
         eprintln!("lscreen: {e}");
@@ -308,6 +322,79 @@ fn run_record(
     Ok(())
 }
 
+/// 贴图入口：读图（文件或 stdin）→ 置顶无边框窗口。
+fn run_pin(input: Option<PathBuf>, pos: Option<String>, scale: f32) -> Result<(), String> {
+    // 参数校验前置：避免交互式调用在 stdin 上阻塞等待 EOF
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err("无效的 --scale（应为正数）".into());
+    }
+    let pos = match pos {
+        Some(s) => parse_pos(&s)?,
+        None => eframe::egui::Pos2::new(80.0, 80.0),
+    };
+    if input.is_none() && is_stdin_tty() {
+        return Err("缺少图片：用 -i 指定 PNG 文件，或经管道传入（覆盖层自动走此通道）".into());
+    }
+    let img = match input {
+        Some(path) => image::open(&path)
+            .map_err(|e| format!("无法读取 {}: {e}", path.display()))?
+            .into_rgba8(),
+        None => {
+            // stdin 由父进程写完才退出，读到的就是完整 PNG
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)
+                .map_err(|e| format!("读取 stdin 失败: {e}"))?;
+            image::load_from_memory(&buf)
+                .map_err(|e| format!("stdin 不是有效图片: {e}（贴图仅支持 PNG）"))?
+                .into_rgba8()
+        }
+    };
+    let (w, h) = (img.width(), img.height());
+    let rgba = img.into_raw();
+    if w == 0 || h == 0 {
+        return Err("空图片".into());
+    }
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_position(pos)
+        .with_inner_size(eframe::egui::Vec2::new(w as f32 / scale, h as f32 / scale))
+        .with_decorations(false)
+        .with_always_on_top()
+        .with_resizable(false);
+    let options = eframe::NativeOptions {
+        viewport,
+        ..Default::default()
+    };
+    eframe::run_native(
+        "lscreen-pin",
+        options,
+        Box::new(move |cc| {
+            let font = font::load_system_font();
+            Ok(Box::new(pin::PinApp::new(cc, rgba, w, h, scale, font)))
+        }),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// stdin 是否为交互终端（tty）：是则没有管道数据可读，直接报错而非阻塞。
+/// 标准库 IsTerminal 三平台可用——cfg(unix) + libc 版本会让 Windows
+/// 恒返回 false，控制台直接敲 `lscreen pin` 就挂在等 stdin EOF 上。
+fn is_stdin_tty() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
+}
+
+fn parse_pos(s: &str) -> Result<eframe::egui::Pos2, String> {
+    let parts: Vec<f32> = s
+        .split(',')
+        .map(|v| v.trim().parse::<f32>())
+        .collect::<Result<_, _>>()
+        .map_err(|_| format!("无效的坐标: {s}（应为 X,Y）"))?;
+    if parts.len() != 2 || !parts.iter().all(|v| v.is_finite()) {
+        return Err(format!("无效的坐标: {s}（应为 X,Y）"));
+    }
+    Ok(eframe::egui::Pos2::new(parts[0], parts[1]))
+}
+
 fn parse_region(s: &str) -> Result<lscreen_core::RectF, String> {
     let parts: Vec<f32> = s
         .split(',')
@@ -326,4 +413,21 @@ fn parse_region(s: &str) -> Result<lscreen_core::RectF, String> {
         lscreen_core::P2::new(parts[0], parts[1]),
         lscreen_core::P2::new(parts[0] + parts[2], parts[1] + parts[3]),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_pos;
+
+    #[test]
+    fn pos_parsing() {
+        let p = parse_pos("100,200").unwrap();
+        assert_eq!((p.x, p.y), (100.0, 200.0));
+        // 负坐标（显示器在主屏左侧）
+        let p = parse_pos("-1920,0").unwrap();
+        assert_eq!((p.x, p.y), (-1920.0, 0.0));
+        assert!(parse_pos("abc").is_err());
+        assert!(parse_pos("1,2,3").is_err());
+        assert!(parse_pos("nan,2").is_err());
+    }
 }

@@ -1,6 +1,7 @@
 //! 系统字体定位：加载一个支持中文的系统字体供 UI 与导出渲染共用。
 //! 不在二进制里捆绑字体（CJK 字体动辄 10MB+），运行时从系统读取。
 
+use eframe::egui;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -12,6 +13,24 @@ pub fn load_system_font() -> Option<Vec<u8>> {
         }
     }
     None
+}
+
+/// 把字体字节挂进 egui 字体族（Proportional + Monospace 追加在内置字体后，
+/// 拉丁字形仍用内置、CJK 落到系统字体）。
+/// 调用方需先用 core Renderer 验证字节可解析：epaint 内部解析失败是 panic 而非 Err。
+pub fn setup_egui_fonts(ctx: &egui::Context, bytes: Vec<u8>) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts
+        .font_data
+        .insert("system".into(), egui::FontData::from_owned(bytes).into());
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("system".into());
+    }
+    ctx.set_fonts(fonts);
 }
 
 fn candidates() -> Vec<PathBuf> {

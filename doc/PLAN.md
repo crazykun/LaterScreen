@@ -133,22 +133,29 @@ crates/
 - [x] 颜色选择器改为单个当前色按钮 + 点击展开调色板 popup（egui 0.35 `Popup::menu`）
 - [x] 每个图标按钮有 `on_hover_text` 完整文案，禁用态（撤销/重做）灰显不可点
 
-### M7 贴图（Pin to screen）
+### M7 贴图（Pin to screen）✅ 2026-08-18
 
 Snipaste 的招牌能力：截完把图钉在屏幕上置顶悬浮，方便对照。
 
-- [ ] 新增 `lscreen pin` 子命令 + 覆盖层工具栏「贴图」按钮
-- [ ] 实现：合成当前选区 → 开一个新的 eframe 窗口
-      （`with_always_on_top` + `with_decorations(false)` + `with_transparent`），
-      窗口初始位置对齐原选区，尺寸等于选区
-- [ ] 交互：拖拽移动窗口（`ViewportCommand::StartDrag`）、滚轮缩放（25%–400%）、
-      双击复制、Esc/右键菜单关闭
-- [ ] 右键菜单 + 悬浮工具条：复制、保存为 PNG、删除（关闭贴图）；
-      快捷键 Ctrl+C 复制 / Ctrl+S 保存 / Delete 或 Esc 删除
-- [ ] 生命周期决策：**贴图窗口独立进程**（`lscreen pin` 由覆盖层 spawn 后自身退出）。
+- [x] 新增 `lscreen pin` 子命令 + 覆盖层工具栏「贴图」按钮（Ctrl+P）
+- [x] 实现：合成当前选区 → 开一个新的 eframe 窗口
+      （`with_always_on_top` + `with_decorations(false)` + `with_resizable(false)`），
+      窗口初始位置对齐原选区，尺寸等于选区。
+      **未用 with_transparent**：贴图内容本身是不透明位图，透明窗口无收益
+      且依赖合成器行为，刻意省略
+- [x] 交互：拖拽移动窗口（`ViewportCommand::StartDrag`）、滚轮缩放（25%–400%，
+      光标下的图像点锚定不动：InnerSize + OuterPosition 联动换算）、
+      双击复制、Esc/Delete 关闭
+- [x] 右键菜单 + 悬浮工具条：复制、保存为 PNG、关闭贴图；
+      快捷键 Ctrl+C 复制 / Ctrl+S 保存；缩放时有百分比 toast
+- [x] 生命周期决策：**贴图窗口独立进程**（`lscreen pin` 由覆盖层 spawn 后自身退出）。
       每个贴图是一个只持有一张图的轻量进程，符合「小而美常驻」：常驻体积随贴图数
-      线性增长且各自可独立关闭，不共享一个越用越大的主进程
-- [ ] 内存：贴图进程只保留一份 RGBA + 纹理，常态目标 < 60MB
+      线性增长且各自可独立关闭，不共享一个越用越大的主进程。
+      图片经 stdin 以 PNG 传入（父进程写完再退出，无临时文件与清理问题）
+- [x] 内存：贴图进程只保留一份 RGBA + 纹理，常态目标 < 60MB
+- [x] CLI 防呆：无 -i 且 stdin 是 tty 直接报错（不阻塞等 EOF）；
+      --pos/--scale 校验前置；负坐标支持（`--pos=-1920,0` 或
+      allow_hyphen_values 的空格写法）
 
 ### M8 托盘 + 配置面板
 

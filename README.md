@@ -20,12 +20,14 @@
 - 已绘制元素可编辑：悬停高亮、拖拽移动、控制点调整、Delete 删除、双击文本改内容
 - 调色板：8 预设色 + 完整取色器；线宽/字号联动滑杆；全量撤销/重做
 - 导出：复制到剪贴板（Ctrl+C / Enter / 双击）、保存 PNG（Ctrl+S）
+- 贴图：把选区钉在屏幕上置顶悬浮（Ctrl+P / 工具栏图钉按钮），独立进程可多个并存，
+  拖拽移动、滚轮缩放（25%–400%，光标锚定）、双击复制、右键菜单/悬浮工具条
 - 选区内容直接识别：二维码 / OCR 文字，结果一键复制
 
 **命令行直达**（无界面，适合脚本与快捷键绑定）
 
 - `shot` 截屏、`record` GIF 录屏（gifski 编码）、`qr` 二维码识别、
-  `ocr` 文字识别、`pick` 屏幕取色器
+  `ocr` 文字识别、`pick` 屏幕取色器、`pin` 贴图（`lscreen pin -i img.png`）
 
 ## 安装
 
@@ -81,6 +83,9 @@ lscreen shot --region 100,100,800,600 --clipboard         # 截区域进剪贴�
 | `qr` | `--region X,Y,W,H` | 识别区域，缺省整主屏 |
 | | `-i, --input <图片>` | 从图片识别，指定时忽略 `--region` |
 | `pick` | — | 无选项；Ctrl+R/H/K 复制 RGB/HEX/CMYK |
+| `pin` | `-i, --input <图片>` | 贴图的图片文件；缺省从 stdin 读 PNG（覆盖层内部通道） |
+| | `--pos X,Y` | 窗口初始位置（逻辑点），支持负坐标 |
+| | `--scale <比例>` | 屏幕缩放比（物理像素/逻辑点），缺省 1.0 |
 | `gui` | — | 无选项，与不带子命令等价 |
 
 交互模式快捷键：
@@ -152,14 +157,13 @@ git tag v0.1.0 && git push --tags   # 自动构建全平台包并发布 GitHub R
 ## 路线图
 
 已完成：截图标注、取色器、二维码、OCR（Linux）、GIF 录屏、图标化工具栏、
-CLI 无界面模式、全平台打包发布。
+CLI 无界面模式、贴图（Pin to screen）、全平台打包发布。
 
 规划中（详见 [doc/PLAN.md](doc/PLAN.md)）：
 
 - MP4 录屏（系统编码器）、滚动长截图
 - Wayland 支持（xdg-desktop-portal）、混合 DPI 多显示器
 - Windows（Windows.Media.Ocr）/ macOS（Vision）原生 OCR
-- 贴图（Pin to screen）
 - 托盘常驻 + 内置全局热键 + 配置面板
 
 ## 架构
