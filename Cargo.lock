@@ -2047,7 +2047,7 @@ dependencies = [
 
 [[package]]
 name = "lscreen"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arboard",
  "clap",
@@ -2064,7 +2064,7 @@ dependencies = [
 
 [[package]]
 name = "lscreen-capture"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "x11rb",
  "xcap",
@@ -2072,7 +2072,7 @@ dependencies = [
 
 [[package]]
 name = "lscreen-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ab_glyph",
  "image",
@@ -2083,7 +2083,7 @@ dependencies = [
 
 [[package]]
 name = "lscreen-ocr"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "image",
  "objc2 0.6.4",
@@ -2096,7 +2096,7 @@ dependencies = [
 
 [[package]]
 name = "lscreen-record"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gifski",
  "imgref",
@@ -2105,7 +2105,7 @@ dependencies = [
 
 [[package]]
 name = "lscreen-setup"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "image",
