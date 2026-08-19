@@ -1,10 +1,11 @@
 //! lscreen-ocr: 文字识别抽象层。
 //!
-//! 引擎策略（按优先级回退）：
+//! 引擎策略（系统优先 + 内置兜底）：
+//! - Windows：`Windows.Media.Ocr` 系统引擎（Win10+，语言包随系统分发）
+//! - macOS：Vision `VNRecognizeTextRequest` 系统引擎（10.15+，中文需 13+）
 //! - Linux：探测系统 tesseract 可执行文件，子进程调用（无链接依赖，支持中文）
-//! - 内置 ocrs：纯 Rust 引擎，零外部依赖兜底，Windows/macOS 首个可用引擎；
-//!   模型约 4MB 按需下载到 `~/.cache/ocrs`，仅支持拉丁字母文字
-//! - Windows `Windows.Media.Ocr` / macOS Vision 系统 OCR：计划中（M5）
+//! - 内置 ocrs：纯 Rust 引擎，零外部依赖兜底；英文模型约 4MB 按需下载到
+//!   `~/.cache/ocrs`，仅支持拉丁字母文字
 //!
 //! 识别结果统一为 [`OcrOutput`]，为后续「截图 → LLM 处理」（翻译/总结/问答）
 //! 预留结构化扩展点：调用方拿到的是带置信度的文本块，而非拼接后的字符串。
@@ -65,26 +66,93 @@ pub trait TextRecognizer: Send {
     fn recognize(&self, rgba: &[u8], width: u32, height: u32) -> Result<OcrOutput>;
 }
 
+// 语言码映射仅系统引擎（Win/mac）使用；带 test 使 Linux 宿主也能跑映射单测
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+mod lang;
 mod ocrs_engine;
 #[cfg(target_os = "linux")]
 mod tesseract;
+#[cfg(target_os = "macos")]
+mod vision;
+#[cfg(target_os = "windows")]
+mod win_ocr;
+
+/// RGBA → BGRA（原地交换 R/B 通道）。Windows WinRT 位图字节序是 BGRA。
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn rgba_to_bgra(rgba: &[u8]) -> Vec<u8> {
+    let mut bgra = rgba.to_vec();
+    for px in bgra.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    bgra
+}
 
 /// 返回当前平台的默认识别引擎。
-/// languages 形如 `["chi_sim", "eng"]`，各平台自行映射到引擎的语言标识。
+/// languages 形如 `["chi_sim", "eng"]`（tesseract 语言码），各平台自行映射
+/// 到引擎的语言标识。
 ///
-/// 选择逻辑：tesseract 可用且未被显式排除时优先（唯一支持中文的引擎），
-/// 否则回退到内置 ocrs（零依赖，仅拉丁文字）。
+/// 选择逻辑（PLAN「系统 API 优先 + 内置兜底」）：
+/// 1. Windows/macOS：系统引擎可用时优先（唯一支持中文且零依赖）
+/// 2. Linux：tesseract 可用时优先（中文质量最稳）
+/// 3. 回退内置 ocrs（零依赖，仅拉丁文字）
+///
+/// `LSCREEN_OCR_ENGINE` 显式指定引擎：`ocrs` / `tesseract`（Linux）/
+/// `system`（Windows/macOS），指定不可用时自动落回默认序。
 pub fn default_engine(languages: &[String]) -> Box<dyn TextRecognizer> {
-    let use_tesseract = std::env::var("LSCREEN_OCR_ENGINE")
-        .ok()
-        .map(|v| v == "tesseract")
-        .unwrap_or(true);
+    match std::env::var("LSCREEN_OCR_ENGINE").ok().as_deref() {
+        Some("ocrs") => return Box::new(ocrs_engine::OcrsEngine::new(languages)),
+        Some("system") => {
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            {
+                return system_engine(languages);
+            }
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            {
+                // Linux 无系统引擎，等价未指定，走默认序
+            }
+        }
+        _ => {}
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        let sys = system_engine(languages);
+        if sys.available() {
+            return sys;
+        }
+    }
+
     #[cfg(target_os = "linux")]
-    if use_tesseract {
+    {
         let t = tesseract::Tesseract::new(languages);
         if t.available() {
             return Box::new(t);
         }
     }
+
     Box::new(ocrs_engine::OcrsEngine::new(languages))
+}
+
+/// 当前平台的系统引擎构造（仅 Windows/macOS 存在）。
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn system_engine(languages: &[String]) -> Box<dyn TextRecognizer> {
+    #[cfg(target_os = "windows")]
+    {
+        Box::new(win_ocr::WinOcr::new(languages))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Box::new(vision::Vision::new(languages))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rgba_to_bgra;
+
+    #[test]
+    fn bgra_swaps_r_and_b_only() {
+        let rgba = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        assert_eq!(rgba_to_bgra(&rgba), vec![3, 2, 1, 4, 7, 6, 5, 8]);
+    }
 }

@@ -8,3 +8,23 @@ license.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
 ocrs = "0.12"
 rten = { version = "0.24", default-features = false, features = ["rten_format"] }
+
+# 平台系统 OCR 仅在对应目标编译，Linux 产物零新增依赖
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Media_Ocr",
+    "Graphics_Imaging",
+    "Globalization",
+    "Storage_Streams",
+    "Win32_System_WinRT",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSData", "NSDictionary", "NSError", "NSString"] }
+objc2-vision = { version = "0.3", features = [
+    "VNRecognizeTextRequest",
+    "VNRequest",
+    "VNRequestHandler",
+    "VNObservation",
+] }
