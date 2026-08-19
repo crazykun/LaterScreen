@@ -4,7 +4,7 @@
 //! 传入，本进程读完即建窗。每个贴图一个轻量进程，关闭即释放全部内存。
 //!
 //! 交互：拖拽移动窗口（手动定位，见 PinApp::drag）、滚轮缩放 25%–400%
-//! （光标下的图像点锚定不动）、双击复制、右键菜单、Esc/Delete 关闭。
+//! （光标下的图像点锚定不动）、双击复制、底部常驻图标工具条、Esc/Delete 关闭。
 
 use eframe::egui;
 use egui::{Color32, Pos2, Vec2, ViewportCommand};
@@ -24,8 +24,6 @@ pub struct PinApp {
     base: Vec2,
     zoom: f32,
     texture: Option<egui::TextureHandle>,
-    /// 右键菜单锚点（窗口内坐标）；None = 关闭
-    menu: Option<Pos2>,
     toast: Option<(String, f64)>,
     /// 手动拖拽状态。不用 ViewportCommand::StartDrag：它走 WM 交互式移动
     /// （_NET_WM_MOVERESIZE），spawn 后未激活的窗口第一次按下会被 WM 拿去做
@@ -81,7 +79,6 @@ impl PinApp {
             base: Vec2::new(w as f32 / scale, h as f32 / scale),
             zoom: 1.0,
             texture: Some(texture),
-            menu: None,
             toast: None,
             drag: None,
             scale,
@@ -148,63 +145,11 @@ impl PinApp {
         self.toast(ctx, format!("{dir}{pct}%"));
     }
 
-    fn show_menu(&mut self, ctx: &egui::Context) {
-        let Some(anchor) = self.menu else { return };
-        let mut action: Option<u8> = None; // 1=复制 2=保存 3=关闭
-        let ir = egui::Area::new(egui::Id::new("pin-menu"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(anchor)
-            .interactable(true)
-            .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    if ui.button("复制 (Ctrl+C)").clicked() {
-                        action = Some(1);
-                    }
-                    if ui.button("保存为 PNG (Ctrl+S)").clicked() {
-                        action = Some(2);
-                    }
-                    ui.separator();
-                    if ui.button("关闭贴图 (Esc)").clicked() {
-                        action = Some(3);
-                    }
-                })
-            });
-        // 点击菜单外任意处关闭（egui 的 LayerId 命中判断不可靠，用矩形判断）
-        let menu_rect = ir.response.rect;
-        let clicked_outside = ctx.input(|i| {
-            i.pointer.any_click()
-                && i.pointer
-                    .latest_pos()
-                    .is_some_and(|p| !menu_rect.contains(p))
-        });
-        if clicked_outside {
-            self.menu = None;
-        }
-        match action {
-            Some(1) => {
-                self.menu = None;
-                self.do_copy(ctx);
-            }
-            Some(2) => {
-                self.menu = None;
-                self.do_save(ctx);
-            }
-            Some(3) => {
-                self.menu = None;
-                self.do_close(ctx);
-            }
-            _ => {}
-        }
-    }
-
-    /// 悬浮工具条：指针在窗口内时显示于底部中央，离开即隐。
-    fn show_hover_bar(&mut self, ctx: &egui::Context, window: egui::Rect) {
-        let Some(cursor) = ctx.input(|i| i.pointer.latest_pos()) else {
-            return;
-        };
-        if !window.contains(cursor) || self.menu.is_some() {
-            return;
-        }
+    /// 常驻图标工具条：底部中央，与截图覆盖层同一套手绘图标/按钮（ui::toolbar）。
+    /// 前身是右键菜单：未激活窗口的右键常被 WM 拿去做焦点转移，菜单时常不弹，
+    /// 且 hover 才显示的工具条不可发现，改为常驻。
+    fn show_toolbar(&mut self, ctx: &egui::Context) {
+        use crate::ui::toolbar::{action_button, draw_check, draw_close, draw_save};
         let mut action: Option<u8> = None;
         egui::Area::new(egui::Id::new("pin-bar"))
             .order(egui::Order::Foreground)
@@ -213,23 +158,25 @@ impl PinApp {
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        if ui.small_button("复制").clicked() {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        if action_button(ui, true, "保存为 PNG (Ctrl+S)", draw_save) {
                             action = Some(1);
                         }
-                        if ui.small_button("保存").clicked() {
+                        if action_button(ui, true, "关闭贴图 (Esc / Delete)", draw_close) {
                             action = Some(2);
                         }
-                        if ui.small_button("关闭").clicked() {
+                        // 与覆盖层一致：最常用动作放最右，绿色对号
+                        if action_button(ui, true, "复制到剪贴板 (Ctrl+C / 双击)", draw_check)
+                        {
                             action = Some(3);
                         }
                     })
                 })
             });
         match action {
-            Some(1) => self.do_copy(ctx),
-            Some(2) => self.do_save(ctx),
-            Some(3) => self.do_close(ctx),
+            Some(1) => self.do_save(ctx),
+            Some(2) => self.do_close(ctx),
+            Some(3) => self.do_copy(ctx),
             _ => {}
         }
     }
@@ -289,59 +236,53 @@ impl eframe::App for PinApp {
             );
         }
 
-        if self.menu.is_none() {
-            if response.drag_started() {
-                // 抓取偏移用按下原点（越过拖动阈值前窗口静止，局部坐标可信）
-                if let (Some(outer), Some(origin)) = (
-                    ctx.input(|i| i.viewport().outer_rect),
-                    ctx.input(|i| i.pointer.press_origin()),
-                ) {
-                    self.drag = Some(DragState {
-                        grab_offset: origin.to_vec2(),
-                        sent: outer.min,
-                    });
-                }
-            }
-            let scale = self.scale;
-            if let Some(d) = &mut self.drag {
-                if response.dragged() {
-                    // 优先 X11 QueryPointer：绝对屏幕坐标，与窗口移动解耦，
-                    // 无自激回路（见 drag 字段注释）。Win/mac 拿不到时退回
-                    // egui 局部坐标换算，且仅在指针真实移动的帧重算，
-                    // 静止指针的陈旧局部坐标不参与计算
-                    let pointer_screen = lscreen_capture::cursor_position()
-                        .map(|(x, y)| Pos2::new(x as f32 / scale, y as f32 / scale))
-                        .or_else(|| {
-                            ctx.input(|i| {
-                                let fresh = i.pointer.delta() != Vec2::ZERO;
-                                match (fresh, i.viewport().outer_rect, i.pointer.latest_pos()) {
-                                    (true, Some(o), Some(c)) => Some(o.min + c.to_vec2()),
-                                    _ => None,
-                                }
-                            })
-                        });
-                    if let Some(p) = pointer_screen {
-                        let target = p - d.grab_offset;
-                        if target != d.sent {
-                            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(target));
-                            d.sent = target;
-                        }
-                    }
-                }
-                if response.drag_stopped() {
-                    self.drag = None;
-                }
+        if response.drag_started() {
+            // 抓取偏移用按下原点（越过拖动阈值前窗口静止，局部坐标可信）
+            if let (Some(outer), Some(origin)) = (
+                ctx.input(|i| i.viewport().outer_rect),
+                ctx.input(|i| i.pointer.press_origin()),
+            ) {
+                self.drag = Some(DragState {
+                    grab_offset: origin.to_vec2(),
+                    sent: outer.min,
+                });
             }
         }
-        if response.secondary_clicked() {
-            self.menu = ctx.input(|i| i.pointer.latest_pos());
+        let scale = self.scale;
+        if let Some(d) = &mut self.drag {
+            if response.dragged() {
+                // 优先 X11 QueryPointer：绝对屏幕坐标，与窗口移动解耦，
+                // 无自激回路（见 drag 字段注释）。Win/mac 拿不到时退回
+                // egui 局部坐标换算，且仅在指针真实移动的帧重算，
+                // 静止指针的陈旧局部坐标不参与计算
+                let pointer_screen = lscreen_capture::cursor_position()
+                    .map(|(x, y)| Pos2::new(x as f32 / scale, y as f32 / scale))
+                    .or_else(|| {
+                        ctx.input(|i| {
+                            let fresh = i.pointer.delta() != Vec2::ZERO;
+                            match (fresh, i.viewport().outer_rect, i.pointer.latest_pos()) {
+                                (true, Some(o), Some(c)) => Some(o.min + c.to_vec2()),
+                                _ => None,
+                            }
+                        })
+                    });
+                if let Some(p) = pointer_screen {
+                    let target = p - d.grab_offset;
+                    if target != d.sent {
+                        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(target));
+                        d.sent = target;
+                    }
+                }
+            }
+            if response.drag_stopped() {
+                self.drag = None;
+            }
         }
         if response.double_clicked() {
             self.do_copy(&ctx);
         }
 
-        self.show_menu(&ctx);
-        self.show_hover_bar(&ctx, rect);
+        self.show_toolbar(&ctx);
         self.show_toast(&ctx);
 
         if copy_k {

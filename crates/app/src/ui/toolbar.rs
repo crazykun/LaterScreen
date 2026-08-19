@@ -278,7 +278,8 @@ fn icon_button(
 }
 
 /// 动作图标按钮（可禁用），返回是否被点击。
-fn action_button(
+/// pub(crate)：贴图窗口（pin.rs）复用同一套按钮与图标，风格一致。
+pub(crate) fn action_button(
     ui: &mut egui::Ui,
     enabled: bool,
     tip: &str,
@@ -452,7 +453,7 @@ fn draw_redo(p: &egui::Painter, r: Rect, c: Color32) {
     p.line_segment([tip, tip + Vec2::new(-w * 0.28, w * 0.25)], s);
 }
 
-fn draw_save(p: &egui::Painter, r: Rect, c: Color32) {
+pub(crate) fn draw_save(p: &egui::Painter, r: Rect, c: Color32) {
     let s = Stroke::new(1.3, c);
     let w = r.width();
     // 软盘：外框 + 顶部标签 + 底部滑块
@@ -477,7 +478,7 @@ fn draw_save(p: &egui::Painter, r: Rect, c: Color32) {
 }
 
 /// 绿色对号：复制并退出（最常用动作，固定绿色突出）。
-fn draw_check(p: &egui::Painter, r: Rect, _c: Color32) {
+pub(crate) fn draw_check(p: &egui::Painter, r: Rect, _c: Color32) {
     let s = Stroke::new(2.0, Color32::from_rgb(0x4c, 0xaf, 0x50));
     let w = r.width();
     p.add(Shape::line(
@@ -540,7 +541,7 @@ fn draw_ocr(p: &egui::Painter, r: Rect, c: Color32) {
     );
 }
 
-fn draw_close(p: &egui::Painter, r: Rect, c: Color32) {
+pub(crate) fn draw_close(p: &egui::Painter, r: Rect, c: Color32) {
     let s = Stroke::new(1.5, c);
     let r = r.shrink(1.0);
     p.line_segment([r.left_top(), r.right_bottom()], s);
