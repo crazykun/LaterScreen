@@ -7,7 +7,7 @@
 //! （光标下的图像点锚定不动）、双击复制、底部常驻图标工具条、Esc/Delete 关闭。
 
 use eframe::egui;
-use egui::{Color32, Pos2, Vec2, ViewportCommand};
+use egui::{Color32, Pos2, Rect, Stroke, Vec2, ViewportCommand};
 
 use crate::export;
 
@@ -17,8 +17,8 @@ const MAX_ZOOM: f32 = 4.0;
 const TOAST_SECS: f64 = 1.6;
 /// 主题色：与覆盖层选区边框一致
 const ACCENT: Color32 = Color32::from_rgb(0x21, 0x96, 0xf3);
-/// 工具条需要的空间（3 个按钮 + 间距 + popup 边距的估计值）
-const BAR_NEED: f32 = 104.0;
+/// 工具条需要的空间（4 个按钮 + 间距 + popup 边距的估计值）
+const BAR_NEED: f32 = 130.0;
 
 pub struct PinApp {
     rgba: Vec<u8>,
@@ -42,6 +42,8 @@ pub struct PinApp {
     drag: Option<DragState>,
     /// 屏幕缩放比（物理像素/逻辑点），QueryPointer 物理坐标换算逻辑点用
     scale: f32,
+    /// 是否置顶（工具条可切换；建窗时 with_always_on_top，初始为 true）
+    topmost: bool,
 }
 
 struct DragState {
@@ -86,6 +88,7 @@ impl PinApp {
             toast: None,
             drag: None,
             scale,
+            topmost: true,
         }
     }
 
@@ -106,6 +109,24 @@ impl PinApp {
 
     fn do_close(&mut self, ctx: &egui::Context) {
         ctx.send_viewport_cmd(ViewportCommand::Close);
+    }
+
+    fn toggle_topmost(&mut self, ctx: &egui::Context) {
+        self.topmost = !self.topmost;
+        let level = if self.topmost {
+            egui::viewport::WindowLevel::AlwaysOnTop
+        } else {
+            egui::viewport::WindowLevel::Normal
+        };
+        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(level));
+        self.toast(
+            ctx,
+            if self.topmost {
+                "已置顶"
+            } else {
+                "已取消置顶"
+            },
+        );
     }
 
     fn toast(&mut self, ctx: &egui::Context, msg: impl Into<String>) {
@@ -156,14 +177,19 @@ impl PinApp {
     /// 窄窗兜底：横排放不下（窗宽 < BAR_NEED）改竖排贴右缘；
     /// 竖排也放不下的极小贴图直接不显示，交互走快捷键/双击。
     fn show_toolbar(&mut self, ctx: &egui::Context, window: egui::Rect) {
-        use crate::ui::toolbar::{action_button, draw_check, draw_close, draw_save};
+        use crate::ui::toolbar::{action_button, draw_check, draw_close, draw_save, icon_button};
         let horizontal = window.width() >= BAR_NEED;
         if !horizontal && window.height() < BAR_NEED {
             return;
         }
         let mut action: Option<u8> = None;
+        let topmost = self.topmost;
         let mut buttons = |ui: &mut egui::Ui| {
             ui.spacing_mut().item_spacing = Vec2::splat(2.0);
+            if icon_button(ui, topmost, "置顶：保持在最上层（点击切换）", draw_topmost).clicked()
+            {
+                action = Some(4);
+            }
             if action_button(ui, true, "保存为 PNG (Ctrl+S)", draw_save) {
                 action = Some(1);
             }
@@ -171,7 +197,7 @@ impl PinApp {
                 action = Some(2);
             }
             // 与覆盖层一致：最常用动作放最后（横排最右/竖排最下），绿色对号
-            if action_button(ui, true, "复制到剪贴板 (Ctrl+C / 双击)", draw_check) {
+            if action_button(ui, true, "复制并关闭 (双击/Ctrl+C 仅复制)", draw_check) {
                 action = Some(3);
             }
         };
@@ -196,7 +222,12 @@ impl PinApp {
         match action {
             Some(1) => self.do_save(ctx),
             Some(2) => self.do_close(ctx),
-            Some(3) => self.do_copy(ctx),
+            Some(3) => {
+                // 对号 = 拿到图并结束：复制后直接关闭（仅复制走双击/Ctrl+C）
+                self.do_copy(ctx);
+                self.do_close(ctx);
+            }
+            Some(4) => self.toggle_topmost(ctx),
             _ => {}
         }
     }
@@ -256,18 +287,12 @@ impl eframe::App for PinApp {
             );
         }
         // 描边高亮：贴图常常正好盖在被截的原位上，与背景无缝、根本找不到。
-        // 画不到窗口外侧（外发光/投影需要透明窗口 + 外扩边距，依赖合成器，
-        // M7 刻意不用 with_transparent），用窗口内缘双线近似：
-        // 最外 1px 暗线与相近色背景隔开，内侧 2px 主题蓝与选区边框同语言
+        // 画不到窗口外侧（外发光/投影需要透明窗口，M7 刻意不用）；
+        // 也不能贴边画直角线——Deepin/KWin 等合成器会给无边框窗口裁圆角，
+        // 直角描边在四角被裁出缺口。内缩 + 圆角画，观感是刻意的内框
         ui.painter().rect_stroke(
-            rect,
-            0.0,
-            egui::Stroke::new(1.0, Color32::from_black_alpha(160)),
-            egui::StrokeKind::Inside,
-        );
-        ui.painter().rect_stroke(
-            rect.shrink(1.0),
-            0.0,
+            rect.shrink(2.5),
+            6.0,
             egui::Stroke::new(2.0, ACCENT),
             egui::StrokeKind::Inside,
         );
@@ -328,4 +353,16 @@ impl eframe::App for PinApp {
             self.do_save(&ctx);
         }
     }
+}
+
+/// 置顶图标：顶部横线 + 向上箭头（推到最上层）。激活态由 icon_button 高亮。
+fn draw_topmost(p: &egui::Painter, r: Rect, c: Color32) {
+    let s = Stroke::new(1.4, c);
+    let w = r.width();
+    p.line_segment([r.left_top(), r.right_top()], s);
+    let cx = r.center().x;
+    let tip = Pos2::new(cx, r.min.y + w * 0.22);
+    p.line_segment([Pos2::new(cx, r.max.y), tip], s);
+    p.line_segment([tip, Pos2::new(cx - w * 0.28, r.min.y + w * 0.52)], s);
+    p.line_segment([tip, Pos2::new(cx + w * 0.28, r.min.y + w * 0.52)], s);
 }

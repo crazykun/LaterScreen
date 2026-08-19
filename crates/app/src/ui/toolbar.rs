@@ -262,7 +262,8 @@ fn color_picker(app: &mut SnipApp, ui: &mut egui::Ui) {
 }
 
 /// 可选中的图标按钮（工具）。
-fn icon_button(
+/// pub(crate)：贴图窗口（pin.rs）复用做置顶开关的选中态样式。
+pub(crate) fn icon_button(
     ui: &mut egui::Ui,
     active: bool,
     tip: &str,
