@@ -356,7 +356,8 @@ fn run_pin(input: Option<PathBuf>, pos: Option<String>, scale: f32) -> Result<()
     }
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_position(pos)
-        .with_inner_size(eframe::egui::Vec2::new(w as f32 / scale, h as f32 / scale))
+        // 窗口高度含底部工具条条带（pin::BAR_H）
+        .with_inner_size(pin::window_size(w, h, scale))
         .with_decorations(false)
         .with_always_on_top()
         .with_resizable(false);

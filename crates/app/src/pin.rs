@@ -4,7 +4,7 @@
 //! 传入，本进程读完即建窗。每个贴图一个轻量进程，关闭即释放全部内存。
 //!
 //! 交互：拖拽移动窗口（手动定位，见 PinApp::drag）、滚轮缩放 25%–400%
-//! （光标下的图像点锚定不动）、双击复制、底部常驻图标工具条、Esc/Delete 关闭。
+//! （光标下的图像点锚定不动）、双击复制、图像下方条带工具条、Esc/Delete 关闭。
 
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Stroke, Vec2, ViewportCommand};
@@ -17,8 +17,14 @@ const MAX_ZOOM: f32 = 4.0;
 const TOAST_SECS: f64 = 1.6;
 /// 主题色：与覆盖层选区边框一致
 const ACCENT: Color32 = Color32::from_rgb(0x21, 0x96, 0xf3);
-/// 工具条需要的空间（4 个按钮 + 间距 + popup 边距的估计值）
-const BAR_NEED: f32 = 130.0;
+/// 底部工具条条带高度：窗口高 = 图像显示高 + BAR_H，按钮在图像外侧，
+/// 不遮挡贴图内容（与截图覆盖层「工具栏在选区下方」同布局）
+pub const BAR_H: f32 = 34.0;
+
+/// 贴图窗口初始逻辑尺寸：图像 + 底部工具条条带。
+pub fn window_size(w: u32, h: u32, scale: f32) -> Vec2 {
+    Vec2::new(w as f32 / scale, h as f32 / scale + BAR_H)
+}
 
 pub struct PinApp {
     rgba: Vec<u8>,
@@ -148,7 +154,8 @@ impl PinApp {
         let old_zoom = self.zoom;
         self.zoom = new_zoom;
         let new_size = self.base * new_zoom;
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(new_size));
+        // 窗口 = 图像 + 底部条带
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(new_size + Vec2::new(0.0, BAR_H)));
 
         // 锚定光标：cursor_screen = outer.min + cursor_local，
         // 新窗口位置 = cursor_screen - new_size * (cursor_local / cur_size)
@@ -170,54 +177,47 @@ impl PinApp {
         self.toast(ctx, format!("{dir}{pct}%"));
     }
 
-    /// 常驻图标工具条：与截图覆盖层同一套手绘图标/按钮（ui::toolbar）。
-    /// 前身是右键菜单：未激活窗口的右键常被 WM 拿去做焦点转移，菜单时常不弹，
-    /// 且 hover 才显示的工具条不可发现，改为常驻。
-    ///
-    /// 窄窗兜底：横排放不下（窗宽 < BAR_NEED）改竖排贴右缘；
-    /// 竖排也放不下的极小贴图直接不显示，交互走快捷键/双击。
-    fn show_toolbar(&mut self, ctx: &egui::Context, window: egui::Rect) {
+    /// 底部条带工具条：按钮在图像外侧的专属条带里（与截图覆盖层
+    /// 「工具栏在选区下方」同布局），不遮挡贴图内容。
+    /// 条带宽度放不下全部按钮时按优先级裁减：复制并关闭 > 关闭 > 置顶 > 保存。
+    fn show_toolbar(&mut self, ctx: &egui::Context, bar: Rect) {
         use crate::ui::toolbar::{action_button, draw_check, draw_close, draw_save, icon_button};
-        let horizontal = window.width() >= BAR_NEED;
-        if !horizontal && window.height() < BAR_NEED {
+        // 单按钮 24pt + 间距 2pt，左右各留 4pt
+        let fit = (((bar.width() - 8.0) / 26.0) as usize).min(4);
+        if fit == 0 {
             return;
         }
+        let (show_close, show_top, show_save) = (fit >= 2, fit >= 3, fit >= 4);
+        let need = fit as f32 * 26.0 - 2.0;
+        let pos = Pos2::new(bar.center().x - need / 2.0, bar.center().y - 12.0);
         let mut action: Option<u8> = None;
         let topmost = self.topmost;
-        let mut buttons = |ui: &mut egui::Ui| {
-            ui.spacing_mut().item_spacing = Vec2::splat(2.0);
-            if icon_button(ui, topmost, "置顶：保持在最上层（点击切换）", draw_topmost).clicked()
-            {
-                action = Some(4);
-            }
-            if action_button(ui, true, "保存为 PNG (Ctrl+S)", draw_save) {
-                action = Some(1);
-            }
-            if action_button(ui, true, "关闭贴图 (Esc / Delete)", draw_close) {
-                action = Some(2);
-            }
-            // 与覆盖层一致：最常用动作放最后（横排最右/竖排最下），绿色对号
-            if action_button(ui, true, "复制并关闭 (双击/Ctrl+C 仅复制)", draw_check) {
-                action = Some(3);
-            }
-        };
-        let (align, offset) = if horizontal {
-            (egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -8.0))
-        } else {
-            (egui::Align2::RIGHT_CENTER, Vec2::new(-8.0, 0.0))
-        };
         egui::Area::new(egui::Id::new("pin-bar"))
             .order(egui::Order::Foreground)
-            .anchor(align, offset)
+            .fixed_pos(pos)
             .interactable(true)
             .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    if horizontal {
-                        ui.horizontal(&mut buttons);
-                    } else {
-                        ui.vertical(&mut buttons);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::splat(2.0);
+                    if show_top
+                        && icon_button(ui, topmost, "置顶：保持在最上层（点击切换）", draw_topmost)
+                            .clicked()
+                    {
+                        action = Some(4);
                     }
-                })
+                    if show_save && action_button(ui, true, "保存为 PNG (Ctrl+S)", draw_save) {
+                        action = Some(1);
+                    }
+                    if show_close && action_button(ui, true, "关闭贴图 (Esc / Delete)", draw_close)
+                    {
+                        action = Some(2);
+                    }
+                    // 与覆盖层一致：最常用动作放最右，绿色对号
+                    if action_button(ui, true, "复制并关闭 (双击/Ctrl+C 仅复制)", draw_check)
+                    {
+                        action = Some(3);
+                    }
+                });
             });
         match action {
             Some(1) => self.do_save(ctx),
@@ -242,7 +242,7 @@ impl PinApp {
         }
         egui::Area::new(egui::Id::new("pin-toast"))
             .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -40.0))
+            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -(BAR_H + 10.0)))
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style())
                     .fill(Color32::from_black_alpha(200))
@@ -257,10 +257,14 @@ impl PinApp {
 impl eframe::App for PinApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        let rect = ui.max_rect();
+        let full = ui.max_rect();
+        // 窗口纵向切成两段：上方图像区 + 下方工具条条带
+        let split_y = (full.max.y - BAR_H).max(full.min.y);
+        let image_rect = Rect::from_min_max(full.min, Pos2::new(full.max.x, split_y));
+        let bar_rect = Rect::from_min_max(Pos2::new(full.min.x, split_y), full.max);
 
         // 滚轮缩放（先于绘制：InnerSize 下一帧生效）
-        self.handle_zoom(&ctx, rect.size());
+        self.handle_zoom(&ctx, image_rect.size());
 
         // 键盘
         use egui::{Key, Modifiers};
@@ -277,11 +281,11 @@ impl eframe::App for PinApp {
             return;
         }
 
-        let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+        let response = ui.allocate_rect(full, egui::Sense::click_and_drag());
         if let Some(tex) = &self.texture {
             ui.painter().image(
                 tex.id(),
-                rect,
+                image_rect,
                 egui::Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
             );
@@ -291,10 +295,17 @@ impl eframe::App for PinApp {
         // 也不能贴边画直角线——Deepin/KWin 等合成器会给无边框窗口裁圆角，
         // 直角描边在四角被裁出缺口。内缩 + 圆角画，观感是刻意的内框
         ui.painter().rect_stroke(
-            rect.shrink(2.5),
+            image_rect.shrink(2.5),
             6.0,
             egui::Stroke::new(2.0, ACCENT),
             egui::StrokeKind::Inside,
+        );
+        // 底部条带背景 + 分隔线（按钮由 show_toolbar 画）
+        ui.painter()
+            .rect_filled(bar_rect, 0.0, ui.visuals().panel_fill);
+        ui.painter().line_segment(
+            [bar_rect.left_top(), bar_rect.right_top()],
+            Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
         );
 
         if response.drag_started() {
@@ -343,7 +354,7 @@ impl eframe::App for PinApp {
             self.do_copy(&ctx);
         }
 
-        self.show_toolbar(&ctx, rect);
+        self.show_toolbar(&ctx, bar_rect);
         self.show_toast(&ctx);
 
         if copy_k {
