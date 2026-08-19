@@ -41,9 +41,11 @@ pub fn compose(
 
 /// 默认保存路径：~/Pictures（存在时）或当前目录，文件名带时间戳。
 /// 同秒内多次保存自动追加序号，不覆盖既有文件。
-pub fn default_save_path() -> PathBuf {
+/// ext 为扩展名（"png" / "gif"）：查重必须针对最终写入的文件名，
+/// 先查 png 再改后缀会让 GIF 路径的防覆盖检查失效。
+pub fn default_save_path(ext: &str) -> PathBuf {
     let stamp = timestamp();
-    let name = format!("lscreen_{stamp}.png");
+    let name = format!("lscreen_{stamp}.{ext}");
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from);
@@ -55,7 +57,7 @@ pub fn default_save_path() -> PathBuf {
     let mut path = dir.join(name);
     let mut n = 1;
     while path.exists() {
-        path = dir.join(format!("lscreen_{stamp}_{n}.png"));
+        path = dir.join(format!("lscreen_{stamp}_{n}.{ext}"));
         n += 1;
     }
     path

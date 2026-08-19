@@ -36,7 +36,7 @@ fn main() {
     }
     #[cfg(target_os = "windows")]
     {
-        let uninstall = std::env::args().any(|a| a == "--uninstall");
+        let uninstall = std::env::args_os().any(|a| a == std::ffi::OsStr::new("--uninstall"));
         if let Err(e) = app::run(uninstall) {
             eprintln!("启动失败: {e}");
             std::process::exit(1);

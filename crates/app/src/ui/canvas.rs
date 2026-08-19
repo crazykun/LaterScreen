@@ -618,11 +618,16 @@ fn on_release(app: &mut SnipApp) {
                 // 拖拽出的退化图形（没有实际尺寸）直接回滚
                 let degenerate = app.doc.get(id).is_some_and(|e| {
                     let b = e.bounds();
-                    match e.kind {
+                    match &e.kind {
                         ElementKind::Rect { .. }
                         | ElementKind::Ellipse { .. }
                         | ElementKind::Arrow { .. }
                         | ElementKind::Line { .. } => b.width() + b.height() < 3.0,
+                        // 自由笔迹是拖拽工具；静止单击（包括双击的第一击）不应留下
+                        // 点状图元，也不应占用一个撤销步骤。
+                        ElementKind::Curve { points }
+                        | ElementKind::Mosaic { points }
+                        | ElementKind::Eraser { points } => points.len() < 2,
                         _ => false,
                     }
                 });

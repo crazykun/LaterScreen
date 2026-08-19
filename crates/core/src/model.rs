@@ -136,7 +136,12 @@ impl Element {
                     .expand(tol)
                     .contains(p)
             }
-            ElementKind::Mosaic { points } => dist_to_polyline(p, points) <= self.mosaic_brush(),
+            // 可见范围 = 笔刷半径 + 被标记格子中心的外扩半格（见
+            // render::mosaic_cells）+ 格子矩形自身的外半格。
+            // 命中阈值必须覆盖完整可见区，否则最外一圈「画得到、选不中」。
+            ElementKind::Mosaic { points } => {
+                dist_to_polyline(p, points) <= tol + self.mosaic_brush() + self.mosaic_cell()
+            }
             ElementKind::Eraser { points } => dist_to_polyline(p, points) <= self.eraser_brush(),
         }
     }
@@ -371,6 +376,30 @@ mod tests {
         assert_eq!(doc.next_marker_number(), 2);
         doc.undo();
         assert_eq!(doc.next_marker_number(), 1);
+    }
+
+    #[test]
+    fn mosaic_hit_covers_outer_cell_band() {
+        // 回归：命中阈值原先只有笔刷半径，笔迹外沿约一个格子画得到却选不中
+        let mut doc = Document::default();
+        doc.begin_change();
+        let id = doc.add(
+            ElementKind::Mosaic {
+                points: vec![P2::new(0.0, 0.0), P2::new(100.0, 0.0)],
+            },
+            Style::default(),
+        );
+        let e = doc.get(id).unwrap();
+        let (brush, cell) = (e.mosaic_brush(), e.mosaic_cell());
+        let tol = 4.0;
+        for extra in [cell * 0.5, cell * 0.75, cell] {
+            assert!(
+                e.hit_test(P2::new(50.0, brush + extra), tol),
+                "可见外沿 brush + {extra} 应可命中"
+            );
+        }
+        assert!(e.hit_test(P2::new(0.0, brush + cell), tol));
+        assert!(!e.hit_test(P2::new(50.0, brush + cell + tol + 0.1), tol));
     }
 
     #[test]

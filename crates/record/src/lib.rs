@@ -6,7 +6,7 @@
 //! 帧源以闭包注入（返回 RGBA 帧），本 crate 不依赖截屏实现，便于单测与复用。
 
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -68,12 +68,16 @@ pub fn record_gif(
     };
     let (collector, writer) = gifski::new(settings).map_err(err)?;
 
-    let file = BufWriter::new(File::create(out_path).map_err(err)?);
+    let mut file = BufWriter::new(File::create(out_path).map_err(err)?);
     // 编码在独立线程消费帧队列，采帧循环不被编码耗时拖慢
     let encode_thread = std::thread::spawn(move || -> Result<()> {
+        // 以 &mut 传入保留所有权：gifski 的 write 会按值吃掉 W 并在其内部
+        // drop，BufWriter 落盘失败（ENOSPC/EIO）会被静默吞掉、截断文件仍报 Ok。
+        // 写完显式 flush，把尾盘失败并入错误路径，触发半成品清理
         writer
-            .write(file, &mut gifski::progress::NoProgress {})
-            .map_err(err)
+            .write(&mut file, &mut gifski::progress::NoProgress {})
+            .map_err(err)?;
+        file.flush().map_err(err)
     });
 
     let interval = Duration::from_secs_f64(1.0 / fps as f64);

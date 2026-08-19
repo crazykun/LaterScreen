@@ -97,7 +97,10 @@ fn main() {
     // 剪贴板守护进程（内部机制，见 export::clipd_main）：在 clap 之前拦截，
     // 不出现在 --help 中
     #[cfg(target_os = "linux")]
-    if std::env::args().nth(1).as_deref() == Some(export::CLIPD_ARG) {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|a| a.as_os_str() == std::ffi::OsStr::new(export::CLIPD_ARG))
+    {
         if let Err(e) = export::clipd_main() {
             eprintln!("lscreen clipd: {e}");
             std::process::exit(1);
@@ -248,7 +251,7 @@ fn run_shot(
         export::copy_to_clipboard(&rgba, w, h)?;
     }
     if output.is_some() || !clipboard {
-        let path = output.unwrap_or_else(export::default_save_path);
+        let path = output.unwrap_or_else(|| export::default_save_path("png"));
         let saved = export::save_png(&rgba, w, h, &path)?;
         println!("{}", saved.display());
     }
@@ -296,7 +299,7 @@ fn run_record(
         }
     };
 
-    let path = output.unwrap_or_else(|| export::default_save_path().with_extension("gif"));
+    let path = output.unwrap_or_else(|| export::default_save_path("gif"));
     let stop = Arc::new(AtomicBool::new(false));
     {
         let stop = stop.clone();

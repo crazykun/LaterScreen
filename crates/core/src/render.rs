@@ -64,33 +64,50 @@ impl Renderer {
             line_join: tiny_skia::LineJoin::Round,
             ..Stroke::default()
         };
+        // egui 的 line_segment / Shape::line 使用平头端帽；箭头和椭圆继续
+        // 使用圆头参数，避免共享 stroke 让导出端点额外外扩半个线宽。
+        let flat_stroke = Stroke {
+            line_cap: tiny_skia::LineCap::Butt,
+            ..stroke.clone()
+        };
+        // 矩形四角用尖角连接：交互层 egui 矩形描边（Middle）是直角拐角，
+        // Round join 会在导出层多出半径 w/2 的外圆角，两边不一致
+        let miter_stroke = Stroke {
+            line_join: tiny_skia::LineJoin::Miter,
+            ..stroke.clone()
+        };
         let id = Transform::identity();
 
         match &e.kind {
             ElementKind::Rect { rect } => {
                 if let Some(r) = sk_rect(rect) {
                     let path = PathBuilder::from_rect(r);
-                    canvas.stroke_path(&path, &paint, &stroke, id, None);
+                    canvas.stroke_path(&path, &paint, &miter_stroke, id, None);
                 }
             }
             ElementKind::Ellipse { rect } => {
+                // egui 的 EllipseShape 用 StrokeKind::Outside（描边整体落在椭圆边界外侧），
+                // tiny-skia 是居中描边：把椭圆外扩半线宽再居中描边，内外边界都与交互层一致。
                 if let Some(r) = sk_rect(rect) {
-                    if let Some(path) = PathBuilder::from_oval(r) {
-                        canvas.stroke_path(&path, &paint, &stroke, id, None);
+                    if let Some(oval) = r.outset(e.style.width * 0.5, e.style.width * 0.5) {
+                        if let Some(path) = PathBuilder::from_oval(oval) {
+                            canvas.stroke_path(&path, &paint, &stroke, id, None);
+                        }
                     }
                 }
             }
             ElementKind::Line { from, to } => {
                 if let Some(path) = polyline_path(&[*from, *to]) {
-                    canvas.stroke_path(&path, &paint, &stroke, id, None);
+                    canvas.stroke_path(&path, &paint, &flat_stroke, id, None);
                 }
             }
             ElementKind::Arrow { from, to } => {
-                self.draw_arrow(canvas, &paint, &stroke, *from, *to, e.style.width);
+                // 箭头杆在交互层是 line_segment（平头端帽），与 Line/Curve 同规则
+                self.draw_arrow(canvas, &paint, &flat_stroke, *from, *to, e.style.width);
             }
             ElementKind::Curve { points } => {
                 if let Some(path) = polyline_path(points) {
-                    canvas.stroke_path(&path, &paint, &stroke, id, None);
+                    canvas.stroke_path(&path, &paint, &flat_stroke, id, None);
                 }
             }
             ElementKind::Marker { center, number } => {
@@ -119,7 +136,10 @@ impl Renderer {
                 draw_mosaic(canvas, original, points, e.mosaic_brush(), e.mosaic_cell());
             }
             ElementKind::Eraser { points } => {
-                // 用原图作为 Pattern 沿笔迹描边，把原始像素贴回
+                // 原图回贴：方形盖章（边长 2r、步进 0.6r），与交互层逐参数一致
+                // （canvas.rs 的 UV 盖章）。原先这里是 Pattern 圆头描边（胶囊形），
+                // 与交互层的方形预览形状不同，违反双路径像素一致约束。
+                // Pattern 锚定在画布原点，每处盖章取回同一位置的原始像素。
                 let pat = Paint {
                     shader: Pattern::new(
                         original.as_ref(),
@@ -130,14 +150,29 @@ impl Renderer {
                     ),
                     ..Paint::default()
                 };
-                let brush = Stroke {
-                    width: e.eraser_brush() * 2.0,
-                    line_cap: tiny_skia::LineCap::Round,
-                    line_join: tiny_skia::LineJoin::Round,
-                    ..Stroke::default()
+                let r = e.eraser_brush();
+                let stamp = |canvas: &mut Pixmap, p: P2| {
+                    if let Some(rect) = SkRect::from_ltrb(p.x - r, p.y - r, p.x + r, p.y + r) {
+                        canvas.fill_rect(rect, &pat, id, None);
+                    }
                 };
-                if let Some(path) = polyline_path(points) {
-                    canvas.stroke_path(&path, &pat, &brush, id, None);
+                match points.as_slice() {
+                    [] => {}
+                    [p] => stamp(canvas, *p),
+                    pts => {
+                        let step = r * 0.6;
+                        for seg in pts.windows(2) {
+                            let (a, b) = (seg[0], seg[1]);
+                            let n = (a.dist(b) / step).ceil().max(1.0) as i32;
+                            for i in 0..=n {
+                                let t = i as f32 / n as f32;
+                                stamp(
+                                    canvas,
+                                    P2::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t),
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }

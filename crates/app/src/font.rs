@@ -16,8 +16,8 @@ pub fn load_system_font() -> Option<Vec<u8>> {
     None
 }
 
-/// 把字体字节挂进 egui 字体族（Proportional + Monospace 追加在内置字体后，
-/// 拉丁字形仍用内置、CJK 落到系统字体）。
+/// 把字体字节挂进 egui 字体族（Proportional + Monospace 均作为首选，
+/// 内置字体保留作缺字 fallback），使预览与 core Renderer 导出使用同一主字体。
 /// 调用方需先用 core Renderer 验证字节可解析：epaint 内部解析失败是 panic 而非 Err。
 pub fn setup_egui_fonts(ctx: &egui::Context, bytes: Vec<u8>) {
     let mut fonts = egui::FontDefinitions::default();
@@ -29,7 +29,7 @@ pub fn setup_egui_fonts(ctx: &egui::Context, bytes: Vec<u8>) {
             .families
             .entry(family)
             .or_default()
-            .push("system".into());
+            .insert(0, "system".into());
     }
     ctx.set_fonts(fonts);
 }

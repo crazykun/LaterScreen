@@ -225,8 +225,15 @@ impl SnipApp {
         )
     }
 
+    fn compose_for_export(&mut self) -> Option<(Vec<u8>, u32, u32)> {
+        // 工具栏按钮可在 TextEdit 失焦回调前触发；导出边界必须主动提交，
+        // 否则 compose 只会看到图元里的旧内容，静默丢掉当前输入缓冲。
+        self.commit_text_edit();
+        self.compose()
+    }
+
     pub fn copy_and_exit(&mut self, ctx: &egui::Context) {
-        let Some((rgba, w, h)) = self.compose() else {
+        let Some((rgba, w, h)) = self.compose_for_export() else {
             self.toast(ctx, "选区为空");
             return;
         };
@@ -237,11 +244,11 @@ impl SnipApp {
     }
 
     pub fn save_and_exit(&mut self, ctx: &egui::Context) {
-        let Some((rgba, w, h)) = self.compose() else {
+        let Some((rgba, w, h)) = self.compose_for_export() else {
             self.toast(ctx, "选区为空");
             return;
         };
-        let path = export::default_save_path();
+        let path = export::default_save_path("png");
         match export::save_png(&rgba, w, h, &path) {
             Ok(saved) => {
                 println!("{}", saved.display());
@@ -255,7 +262,7 @@ impl SnipApp {
     /// 图片经 stdin 以 PNG 传入子进程，免临时文件与清理问题；
     /// 写完再退出，保证子进程读到完整数据。
     pub fn pin_and_exit(&mut self, ctx: &egui::Context) {
-        let Some((rgba, w, h)) = self.compose() else {
+        let Some((rgba, w, h)) = self.compose_for_export() else {
             self.toast(ctx, "选区为空");
             return;
         };
@@ -362,6 +369,7 @@ impl SnipApp {
             }
             return;
         }
+        let wants_keyboard = ctx.egui_wants_keyboard_input();
         let (undo, redo_y, redo_sz, save, copy, pin, del, enter, esc, rgb, hex, cmyk) = ctx
             .input_mut(|i| {
                 (
@@ -371,10 +379,11 @@ impl SnipApp {
                     i.consume_key(Modifiers::COMMAND, Key::S),
                     i.consume_key(Modifiers::COMMAND, Key::C),
                     i.consume_key(Modifiers::COMMAND, Key::P),
-                    i.consume_key(Modifiers::NONE, Key::Delete)
-                        || i.consume_key(Modifiers::NONE, Key::Backspace),
-                    i.consume_key(Modifiers::NONE, Key::Enter),
-                    i.consume_key(Modifiers::NONE, Key::Escape),
+                    !wants_keyboard
+                        && (i.consume_key(Modifiers::NONE, Key::Delete)
+                            || i.consume_key(Modifiers::NONE, Key::Backspace)),
+                    !wants_keyboard && i.consume_key(Modifiers::NONE, Key::Enter),
+                    !wants_keyboard && i.consume_key(Modifiers::NONE, Key::Escape),
                     i.consume_key(Modifiers::COMMAND, Key::R),
                     i.consume_key(Modifiers::COMMAND, Key::H),
                     i.consume_key(Modifiers::COMMAND, Key::K),

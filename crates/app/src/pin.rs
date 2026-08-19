@@ -118,7 +118,7 @@ impl PinApp {
     }
 
     fn do_save(&mut self, ctx: &egui::Context) {
-        let path = export::default_save_path();
+        let path = export::default_save_path("png");
         match export::save_png(&self.rgba, self.w, self.h, &path) {
             Ok(p) => self.toast(ctx, format!("已保存 {}", p.display())),
             Err(e) => self.toast(ctx, format!("保存失败: {e}")),
