@@ -15,8 +15,6 @@ const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 4.0;
 /// 缩放指示条/工具条的显示时长（秒）
 const TOAST_SECS: f64 = 1.6;
-/// 主题色：与覆盖层选区边框一致
-const ACCENT: Color32 = Color32::from_rgb(0x21, 0x96, 0xf3);
 /// 底部工具条条带高度：窗口高 = 图像显示高 + BAR_H，按钮在图像外侧，
 /// 不遮挡贴图内容（与截图覆盖层「工具栏在选区下方」同布局）
 pub const BAR_H: f32 = 34.0;
@@ -50,6 +48,19 @@ pub struct PinApp {
     scale: f32,
     /// 是否置顶（工具条可切换；建窗时 with_always_on_top，初始为 true）
     topmost: bool,
+    /// 缩放手势锚点。一次滚动手势内定格：逐帧用「窗口位置 + 窗口内指针
+    /// 坐标」重算会踩「窗口移动后静止指针局部坐标陈旧」的同一坑
+    /// （见 drag 注释），表现为缩放时窗口位置抖动
+    zoom_anchor: Option<ZoomAnchor>,
+}
+
+struct ZoomAnchor {
+    /// 指针屏幕坐标（逻辑点，取锚时定格）
+    screen: Pos2,
+    /// 锚点在图像内的比例位置（0–1，取锚时定格）
+    frac: Vec2,
+    /// 上次滚动时刻：间隔超过阈值视为新手势，重新取锚
+    at: f64,
 }
 
 struct DragState {
@@ -95,6 +106,7 @@ impl PinApp {
             drag: None,
             scale,
             topmost: true,
+            zoom_anchor: None,
         }
     }
 
@@ -140,7 +152,9 @@ impl PinApp {
     }
 
     /// 滚轮缩放：光标下的图像点锚定不动（窗口尺寸与位置同步换算）。
-    fn handle_zoom(&mut self, ctx: &egui::Context, cur_size: Vec2) {
+    /// 锚点在手势开始时定格（见 zoom_anchor 注释），手势内所有几何量
+    /// 恒定，无逐帧重算的反馈抖动。
+    fn handle_zoom(&mut self, ctx: &egui::Context, image_rect: Rect) {
         let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
         if scroll == 0.0 {
             return;
@@ -153,22 +167,37 @@ impl PinApp {
         }
         let old_zoom = self.zoom;
         self.zoom = new_zoom;
+
+        // 手势间隔 > 0.4s 重新取锚；取锚用 QueryPointer 绝对坐标
+        // （退回 outer_rect + 局部坐标，此刻窗口静止、坐标可信）
+        let now = ctx.input(|i| i.time);
+        if self.zoom_anchor.as_ref().is_none_or(|a| now - a.at > 0.4) {
+            let outer_min = ctx.input(|i| i.viewport().outer_rect).map(|r| r.min);
+            let screen = lscreen_capture::cursor_position()
+                .map(|(x, y)| Pos2::new(x as f32 / self.scale, y as f32 / self.scale))
+                .or_else(|| {
+                    let local = ctx.input(|i| i.pointer.latest_pos())?;
+                    Some(outer_min? + local.to_vec2())
+                });
+            self.zoom_anchor = screen.zip(outer_min).map(|(screen, omin)| {
+                let local = screen - omin;
+                ZoomAnchor {
+                    screen,
+                    frac: Vec2::new(
+                        (local.x / image_rect.width().max(1.0)).clamp(0.0, 1.0),
+                        (local.y / image_rect.height().max(1.0)).clamp(0.0, 1.0),
+                    ),
+                    at: now,
+                }
+            });
+        }
+
         let new_size = self.base * new_zoom;
         // 窗口 = 图像 + 底部条带
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(new_size + Vec2::new(0.0, BAR_H)));
-
-        // 锚定光标：cursor_screen = outer.min + cursor_local，
-        // 新窗口位置 = cursor_screen - new_size * (cursor_local / cur_size)
-        let anchor = ctx.input(|i| i.pointer.latest_pos()).map(|c| {
-            Vec2::new(
-                (c.x / cur_size.x.max(1.0)).clamp(0.0, 1.0),
-                (c.y / cur_size.y.max(1.0)).clamp(0.0, 1.0),
-            )
-        });
-        let outer = ctx.input(|i| i.viewport().outer_rect);
-        if let (Some(cursor), Some(outer)) = (ctx.input(|i| i.pointer.latest_pos()), outer) {
-            let screen_cursor = outer.min + cursor.to_vec2();
-            let new_min = screen_cursor - new_size * anchor.unwrap_or(Vec2::splat(0.5));
+        if let Some(a) = &mut self.zoom_anchor {
+            a.at = now;
+            let new_min = a.screen - Vec2::new(new_size.x * a.frac.x, new_size.y * a.frac.y);
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(new_min));
         }
 
@@ -247,7 +276,11 @@ impl PinApp {
                 egui::Frame::popup(ui.style())
                     .fill(Color32::from_black_alpha(200))
                     .show(ui, |ui| {
-                        ui.colored_label(Color32::WHITE, msg);
+                        // 不换行：窄贴图里 "+150%" 会被折成两行
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(msg).color(Color32::WHITE))
+                                .wrap_mode(egui::TextWrapMode::Extend),
+                        );
                     });
             });
         ctx.request_repaint();
@@ -264,7 +297,7 @@ impl eframe::App for PinApp {
         let bar_rect = Rect::from_min_max(Pos2::new(full.min.x, split_y), full.max);
 
         // 滚轮缩放（先于绘制：InnerSize 下一帧生效）
-        self.handle_zoom(&ctx, image_rect.size());
+        self.handle_zoom(&ctx, image_rect);
 
         // 键盘
         use egui::{Key, Modifiers};
@@ -290,14 +323,12 @@ impl eframe::App for PinApp {
                 Color32::WHITE,
             );
         }
-        // 描边高亮：贴图常常正好盖在被截的原位上，与背景无缝、根本找不到。
-        // 画不到窗口外侧（外发光/投影需要透明窗口，M7 刻意不用）；
-        // 也不能贴边画直角线——Deepin/KWin 等合成器会给无边框窗口裁圆角，
-        // 直角描边在四角被裁出缺口。内缩 + 圆角画，观感是刻意的内框
+        // 图像区 1px 中性细线：与相近背景略作区隔。底部条带已承担
+        // 贴图辨识职责，醒目蓝框叠在图像内容上反而突兀，弃用
         ui.painter().rect_stroke(
-            image_rect.shrink(2.5),
-            6.0,
-            egui::Stroke::new(2.0, ACCENT),
+            image_rect,
+            0.0,
+            Stroke::new(1.0, Color32::from_black_alpha(90)),
             egui::StrokeKind::Inside,
         );
         // 底部条带背景 + 分隔线（按钮由 show_toolbar 画）
