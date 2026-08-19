@@ -15,6 +15,10 @@ const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 4.0;
 /// 缩放指示条/工具条的显示时长（秒）
 const TOAST_SECS: f64 = 1.6;
+/// 主题色：与覆盖层选区边框一致
+const ACCENT: Color32 = Color32::from_rgb(0x21, 0x96, 0xf3);
+/// 工具条需要的空间（3 个按钮 + 间距 + popup 边距的估计值）
+const BAR_NEED: f32 = 104.0;
 
 pub struct PinApp {
     rgba: Vec<u8>,
@@ -145,32 +149,48 @@ impl PinApp {
         self.toast(ctx, format!("{dir}{pct}%"));
     }
 
-    /// 常驻图标工具条：底部中央，与截图覆盖层同一套手绘图标/按钮（ui::toolbar）。
+    /// 常驻图标工具条：与截图覆盖层同一套手绘图标/按钮（ui::toolbar）。
     /// 前身是右键菜单：未激活窗口的右键常被 WM 拿去做焦点转移，菜单时常不弹，
     /// 且 hover 才显示的工具条不可发现，改为常驻。
-    fn show_toolbar(&mut self, ctx: &egui::Context) {
+    ///
+    /// 窄窗兜底：横排放不下（窗宽 < BAR_NEED）改竖排贴右缘；
+    /// 竖排也放不下的极小贴图直接不显示，交互走快捷键/双击。
+    fn show_toolbar(&mut self, ctx: &egui::Context, window: egui::Rect) {
         use crate::ui::toolbar::{action_button, draw_check, draw_close, draw_save};
+        let horizontal = window.width() >= BAR_NEED;
+        if !horizontal && window.height() < BAR_NEED {
+            return;
+        }
         let mut action: Option<u8> = None;
+        let mut buttons = |ui: &mut egui::Ui| {
+            ui.spacing_mut().item_spacing = Vec2::splat(2.0);
+            if action_button(ui, true, "保存为 PNG (Ctrl+S)", draw_save) {
+                action = Some(1);
+            }
+            if action_button(ui, true, "关闭贴图 (Esc / Delete)", draw_close) {
+                action = Some(2);
+            }
+            // 与覆盖层一致：最常用动作放最后（横排最右/竖排最下），绿色对号
+            if action_button(ui, true, "复制到剪贴板 (Ctrl+C / 双击)", draw_check) {
+                action = Some(3);
+            }
+        };
+        let (align, offset) = if horizontal {
+            (egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -8.0))
+        } else {
+            (egui::Align2::RIGHT_CENTER, Vec2::new(-8.0, 0.0))
+        };
         egui::Area::new(egui::Id::new("pin-bar"))
             .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -8.0))
+            .anchor(align, offset)
             .interactable(true)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        if action_button(ui, true, "保存为 PNG (Ctrl+S)", draw_save) {
-                            action = Some(1);
-                        }
-                        if action_button(ui, true, "关闭贴图 (Esc / Delete)", draw_close) {
-                            action = Some(2);
-                        }
-                        // 与覆盖层一致：最常用动作放最右，绿色对号
-                        if action_button(ui, true, "复制到剪贴板 (Ctrl+C / 双击)", draw_check)
-                        {
-                            action = Some(3);
-                        }
-                    })
+                    if horizontal {
+                        ui.horizontal(&mut buttons);
+                    } else {
+                        ui.vertical(&mut buttons);
+                    }
                 })
             });
         match action {
@@ -235,6 +255,22 @@ impl eframe::App for PinApp {
                 Color32::WHITE,
             );
         }
+        // 描边高亮：贴图常常正好盖在被截的原位上，与背景无缝、根本找不到。
+        // 画不到窗口外侧（外发光/投影需要透明窗口 + 外扩边距，依赖合成器，
+        // M7 刻意不用 with_transparent），用窗口内缘双线近似：
+        // 最外 1px 暗线与相近色背景隔开，内侧 2px 主题蓝与选区边框同语言
+        ui.painter().rect_stroke(
+            rect,
+            0.0,
+            egui::Stroke::new(1.0, Color32::from_black_alpha(160)),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().rect_stroke(
+            rect.shrink(1.0),
+            0.0,
+            egui::Stroke::new(2.0, ACCENT),
+            egui::StrokeKind::Inside,
+        );
 
         if response.drag_started() {
             // 抓取偏移用按下原点（越过拖动阈值前窗口静止，局部坐标可信）
@@ -282,7 +318,7 @@ impl eframe::App for PinApp {
             self.do_copy(&ctx);
         }
 
-        self.show_toolbar(&ctx);
+        self.show_toolbar(&ctx, rect);
         self.show_toast(&ctx);
 
         if copy_k {
