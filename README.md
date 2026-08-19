@@ -6,7 +6,7 @@
 
 跨平台截图标注工具（Linux / Windows / macOS），Rust 编写。
 **单文件、≤20MB、无动态库依赖、冷启动即用**，命令名 `lscreen`。
-目标对齐 Snipaste 级体验：截图、标注、取色、二维码、OCR、GIF 录屏。
+目标对齐 Snipaste 级体验：截图、标注、取色、二维码、OCR、GIF 录屏、贴图。
 
 ## 特性
 
@@ -15,8 +15,8 @@
 - 拖拽框选 / 单击全屏；框选时带像素放大镜（网格取景 + 实时色值）
 - 选区可再调整：拖角点/边缘缩放（框外一圈也可命中）、框内拖拽移动、
   工具栏宽 × 高输入框精确设定尺寸
-- 9 种标注工具：选择、矩形、椭圆（Shift 正圆/正方形）、箭头、画笔（Shift 直线）、
-  自增标号、文本（支持中文输入法）、马赛克、橡皮擦（恢复原图）
+- 9 个工具：选择（移动/编辑元素）+ 8 种标注——矩形、椭圆（Shift 正圆/正方形）、
+  箭头、画笔（Shift 直线）、自增标号、文本（支持中文输入法）、马赛克、橡皮擦（恢复原图）
 - 已绘制元素可编辑：悬停高亮、拖拽移动、控制点调整、Delete 删除、双击文本改内容
 - 调色板：8 预设色 + 完整取色器；线宽/字号联动滑杆；全量撤销/重做
 - 导出：复制到剪贴板（Ctrl+C / Enter / 双击）、保存 PNG（Ctrl+S）
@@ -155,19 +155,19 @@ sudo apt install rpm             # rpm 包（Windows 安装器由 cargo 自行�
 全平台出包（含 macOS、Windows MSVC）走 GitHub Actions：
 
 ```bash
-git tag v0.1.0 && git push --tags   # 自动构建全平台包并发布 GitHub Release
+git tag v0.2.0 && git push --tags   # 自动构建全平台包并发布 GitHub Release
 ```
 
 ## 路线图
 
-已完成：截图标注、取色器、二维码、OCR（Linux tesseract + 内置 ocrs 兜底）、GIF 录屏、
-图标化工具栏、CLI 无界面模式、贴图（Pin to screen）、全平台打包发布。
+已完成：截图标注、取色器、二维码、OCR（Windows 系统 OCR / macOS Vision /
+Linux tesseract + 内置 ocrs 兜底）、GIF 录屏、图标化工具栏、CLI 无界面模式、
+贴图（Pin to screen）、Windows 自绘安装器、全平台打包发布。
 
 规划中（详见 [doc/PLAN.md](doc/PLAN.md)）：
 
 - MP4 录屏（系统编码器）、滚动长截图
 - Wayland 支持（xdg-desktop-portal）、混合 DPI 多显示器
-- Windows（Windows.Media.Ocr）/ macOS（Vision）原生 OCR
 - 托盘常驻 + 内置全局热键 + 配置面板
 
 ## 架构

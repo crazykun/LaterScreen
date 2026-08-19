@@ -81,36 +81,37 @@ crates/
 | 二维码 | rqrr | 纯 Rust |
 | GIF 编码 | gifski | 纯 Rust，质量最好 |
 | MP4 编码 | 系统编码器 | Win MF / mac VideoToolbox / Linux openh264 静态链接 |
-| OCR | 系统 API + 内置 ocrs | Win `Windows.Media.Ocr` / mac Vision（规划）/ Linux tesseract 子进程；内置 ocrs 纯 Rust 兜底 |
+| OCR | 系统 API + 内置 ocrs | Win `Windows.Media.Ocr` / mac Vision / Linux tesseract 子进程；内置 ocrs 纯 Rust 兜底 |
 
 ## 4. 里程碑
 
-### M1 截图 + 标注（核心价值，先做）
-- [ ] workspace 骨架 + 体积优化 profile
-- [ ] core：图元模型（矩形/椭圆/箭头/直线/曲线/标号/文本/马赛克/橡皮擦）、
+### M1 截图 + 标注 ✅（核心价值）
+- [x] workspace 骨架 + 体积优化 profile
+- [x] core：图元模型（矩形/椭圆/箭头/直线/曲线/标号/文本/马赛克/橡皮擦）、
       样式（颜色/线宽/字号）、命中检测、撤销/重做
-- [ ] capture：多显示器截屏
-- [ ] app：全屏覆盖层、区域框选（可调整边缘）、工具栏、绘制交互、
+- [x] capture：多显示器截屏
+- [x] app：全屏覆盖层、区域框选（可调整边缘）、工具栏、绘制交互、
       Shift 约束（正圆/正方形/水平垂直直线）、悬停选中/拖拽移动/删除
-- [ ] 快捷键：Ctrl+Z 撤销、Ctrl+Y 重做、Ctrl+S 存文件、Ctrl+C/双击 进剪贴板、Esc 退出
-- [ ] 导出：tiny-skia 合成 → PNG 文件 / 剪贴板
+- [x] 快捷键：Ctrl+Z 撤销、Ctrl+Y 重做、Ctrl+S 存文件、Ctrl+C/双击 进剪贴板、Esc 退出
+- [x] 导出：tiny-skia 合成 → PNG 文件 / 剪贴板
 
-### M2 取色器 + 二维码 + CLI
-- [ ] 取景框放大镜（像素级十字线 + 周边像素放大）
-- [ ] Ctrl+R 复制 RGB / Ctrl+H 复制 HEX / Ctrl+K 复制 CMYK
-- [ ] 框选区域内二维码识别（rqrr）
-- [ ] CLI：`lscreen`（交互截图）、`lscreen shot --region x,y,w,h -o f.png`、
-      `lscreen pick`（取色）、`lscreen qr`、`lscreen ocr`（M3 后可用）
+### M2 取色器 + 二维码 + CLI ✅
+- [x] 取景框放大镜（像素级十字线 + 周边像素放大）
+- [x] Ctrl+R 复制 RGB / Ctrl+H 复制 HEX / Ctrl+K 复制 CMYK
+- [x] 框选区域内二维码识别（rqrr）
+- [x] CLI：`lscreen`（交互截图）、`lscreen shot --region x,y,w,h -o f.png`、
+      `lscreen pick`（取色）、`lscreen qr`、`lscreen ocr`
 
 ### M3 OCR ✅
 - [x] `TextRecognizer` trait；识别结果浮层展示 + 一键复制
 - [x] Linux：探测系统 tesseract 可执行文件调用（中文方案，未安装时明确引导）
-- [x] 内置 ocrs 兜底引擎：纯 Rust 零依赖，Win/mac 首个可用引擎；模型约 4MB
+- [x] 内置 ocrs 兜底引擎：纯 Rust 零依赖，系统引擎缺失时的最终兜底；模型约 4MB
       按需下载到 `~/.cache/ocrs`，仅拉丁字母文字（CJK 需 tesseract）
-- [ ] Windows（windows-rs）/ macOS（objc2 + Vision）原生 OCR（M5 真机环境验证）
+- [x] Windows（Windows.Media.Ocr）/ macOS（objc2 + Vision）原生 OCR ✅（2026-08-18）
+- [ ] Windows/macOS 原生 OCR 真机验证（CI 无桌面环境，需双系统手动确认）
 
 ### M4 录屏 + 滚动截图（技术风险最高，放最后）
-- [ ] 选区连续采帧（xcap）→ gifski 编码 GIF
+- [x] 选区连续采帧 → gifski 编码 GIF（✅ 已交付 `lscreen record`）
 - [ ] MP4：三平台系统编码器抽象
 - [ ] 滚动截图：模拟滚轮 + 帧间特征匹配拼接（先支持等速滚动的简单场景）
 
