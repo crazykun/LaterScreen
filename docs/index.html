@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LaterScreen — 跨平台截图标注工具</title>
+<meta name="description" content="Rust 编写的跨平台截图标注工具：截图、标注、取色、二维码、OCR、GIF 录屏、贴图。单文件 ≤20MB，无依赖，冷启动即用。Linux / Windows / macOS。">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232f8be8'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-soft: #161b22;
+    --bg-card: #1a2029;
+    --border: #2b3340;
+    --text: #e6edf3;
+    --text-dim: #9aa7b5;
+    --accent: #2f8be8;
+    --accent-soft: rgba(47, 139, 232, .12);
+    --radius: 14px;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+
+  /* ===== 顶栏 ===== */
+  header {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(13, 17, 23, .85);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+  }
+  .nav { display: flex; align-items: center; gap: 10px; height: 60px; }
+  .nav .logo { width: 28px; height: 28px; border-radius: 7px; }
+  .nav .name { font-weight: 700; font-size: 17px; letter-spacing: .2px; }
+  .nav .links { margin-left: auto; display: flex; gap: 22px; font-size: 14.5px; }
+  .nav .links a { color: var(--text-dim); }
+  .nav .links a:hover { color: var(--text); text-decoration: none; }
+
+  /* ===== Hero ===== */
+  .hero { padding: 88px 0 64px; text-align: center; position: relative; overflow: hidden; }
+  .hero::before {
+    content: ""; position: absolute; inset: -40% 0 auto 0; height: 480px;
+    background: radial-gradient(ellipse at 50% 0%, rgba(47,139,232,.16), transparent 65%);
+    pointer-events: none;
+  }
+  .hero .logo-big { width: 84px; height: 84px; border-radius: 20px; margin-bottom: 26px;
+    box-shadow: 0 8px 40px rgba(47,139,232,.35); }
+  .hero h1 { font-size: clamp(34px, 6vw, 54px); font-weight: 800; letter-spacing: -1px; }
+  .hero h1 .grad {
+    background: linear-gradient(92deg, #4ea3f5 20%, #7cc0ff 80%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .hero .sub {
+    margin: 18px auto 8px; max-width: 640px;
+    font-size: clamp(16px, 2.4vw, 19px); color: var(--text-dim);
+  }
+  .hero .stats { margin: 20px 0 34px; display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; }
+  .chip {
+    font-size: 13.5px; padding: 5px 14px; border-radius: 999px;
+    background: var(--accent-soft); color: #7cc0ff; border: 1px solid rgba(47,139,232,.3);
+  }
+  .cta { display: flex; justify-content: center; gap: 14px; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 13px 28px; border-radius: 10px; font-size: 16px; font-weight: 600;
+    transition: transform .15s, box-shadow .15s;
+  }
+  .btn:hover { text-decoration: none; transform: translateY(-2px); }
+  .btn-primary { background: var(--accent); color: #fff; box-shadow: 0 4px 18px rgba(47,139,232,.4); }
+  .btn-primary:hover { box-shadow: 0 6px 24px rgba(47,139,232,.55); }
+  .btn-ghost { border: 1px solid var(--border); color: var(--text); background: var(--bg-soft); }
+  .hero .ver { margin-top: 14px; font-size: 13px; color: var(--text-dim); }
+
+  /* ===== 终端演示 ===== */
+  .term {
+    margin: 56px auto 0; max-width: 720px; text-align: left;
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: 0 20px 60px rgba(0,0,0,.45); overflow: hidden;
+  }
+  .term-bar { display: flex; gap: 7px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+  .term-bar i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+  .term-bar i:nth-child(1) { background: #ff5f57; }
+  .term-bar i:nth-child(2) { background: #febc2e; }
+  .term-bar i:nth-child(3) { background: #28c840; }
+  .term pre { padding: 20px 22px; font-family: var(--mono); font-size: 13.5px; line-height: 1.9; overflow-x: auto; }
+  .term .c { color: #6a737d; }
+  .term .p { color: #56d364; }
+  .term .cmd { color: #e6edf3; }
+
+  /* ===== 区块通用 ===== */
+  section { padding: 72px 0; }
+  section h2 { font-size: clamp(26px, 4vw, 34px); font-weight: 800; text-align: center; letter-spacing: -.5px; }
+  section .lead { text-align: center; color: var(--text-dim); margin: 12px auto 48px; max-width: 560px; }
+
+  /* ===== 特性网格 ===== */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
+  .card {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 26px 24px; transition: border-color .2s, transform .2s;
+  }
+  .card:hover { border-color: rgba(47,139,232,.5); transform: translateY(-3px); }
+  .card .ico {
+    width: 42px; height: 42px; border-radius: 10px; margin-bottom: 16px;
+    background: var(--accent-soft); display: grid; place-items: center;
+  }
+  .card .ico svg { width: 22px; height: 22px; stroke: #5fb0f7; }
+  .card h3 { font-size: 17px; margin-bottom: 8px; }
+  .card p { font-size: 14.5px; color: var(--text-dim); }
+
+  /* ===== 下载矩阵 ===== */
+  .dl-table { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; background: var(--bg-card);
+    border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  th, td { padding: 14px 18px; text-align: left; font-size: 14.5px; border-bottom: 1px solid var(--border); }
+  th { background: var(--bg-soft); color: var(--text-dim); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  td code, .inline-code {
+    font-family: var(--mono); font-size: 13px; background: var(--bg-soft);
+    padding: 2px 7px; border-radius: 6px; border: 1px solid var(--border);
+  }
+  .dl-note { margin-top: 16px; font-size: 13.5px; color: var(--text-dim); text-align: center; }
+
+  /* ===== 页脚 ===== */
+  footer { border-top: 1px solid var(--border); padding: 36px 0; text-align: center;
+    color: var(--text-dim); font-size: 14px; }
+  footer .foot-links { margin-bottom: 10px; display: flex; justify-content: center; gap: 24px; }
+
+  @media (max-width: 640px) {
+    .nav .links a:not(:last-child) { display: none; }
+    section { padding: 52px 0; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Logo：内联 SVG 复刻 packaging/icon.png（蓝底圆角 + 选区括角 + 中心点） -->
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="logo" viewBox="0 0 64 64">
+      <rect width="64" height="64" rx="14" fill="#2f8be8"/>
+      <g stroke="#fff" stroke-width="5.5" stroke-linecap="round" fill="none">
+        <path d="M14 22 v-5 a3 3 0 0 1 3-3 h5"/>
+        <path d="M42 14 h5 a3 3 0 0 1 3 3 v5"/>
+        <path d="M50 42 v5 a3 3 0 0 1-3 3 h-5"/>
+        <path d="M22 50 h-5 a3 3 0 0 1-3-3 v-5"/>
+      </g>
+      <circle cx="32" cy="32" r="7" fill="#fff"/>
+    </symbol>
+  </defs>
+</svg>
+
+<header>
+  <div class="wrap nav">
+    <svg class="logo"><use href="#logo"/></svg>
+    <span class="name">LaterScreen</span>
+    <nav class="links">
+      <a href="#features">特性</a>
+      <a href="#cli">命令行</a>
+      <a href="#download">下载</a>
+      <a href="https://github.com/crazykun/LaterScreen" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrap">
+    <svg class="logo-big"><use href="#logo"/></svg>
+    <h1>截图标注，<span class="grad">快到不用等</span></h1>
+    <p class="sub">Rust 编写的跨平台截图工具 —— 截图、标注、取色、二维码、OCR、GIF 录屏、贴图，
+    一个命令全搞定。</p>
+    <div class="stats">
+      <span class="chip">单文件 ≤ 20MB</span>
+      <span class="chip">零依赖</span>
+      <span class="chip">冷启动即用</span>
+      <span class="chip">Linux / Windows / macOS</span>
+      <span class="chip">MIT 开源</span>
+    </div>
+    <div class="cta">
+      <a class="btn btn-primary" href="https://github.com/crazykun/LaterScreen/releases/latest">
+        ⬇ 免费下载
+      </a>
+      <a class="btn btn-ghost" href="https://github.com/crazykun/LaterScreen" target="_blank" rel="noopener">
+        ★ GitHub 源码
+      </a>
+    </div>
+    <p class="ver" id="ver">最新版本 v0.2.0</p>
+
+    <div class="term">
+      <div class="term-bar"><i></i><i></i><i></i></div>
+      <pre><span class="p">$</span> <span class="cmd">lscreen</span>                <span class="c"># 交互截图：框选 → 标注 → 复制/保存/贴图</span>
+<span class="p">$</span> <span class="cmd">lscreen pick</span>           <span class="c"># 屏幕取色，单击复制 HEX</span>
+<span class="p">$</span> <span class="cmd">lscreen ocr</span>            <span class="c"># 屏幕文字识别，直接输出</span>
+<span class="p">$</span> <span class="cmd">lscreen record -o a.gif</span> <span class="c"># GIF 录屏，Ctrl+C 停止</span></pre>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="wrap">
+    <h2>一个工具，覆盖屏幕上的所有事</h2>
+    <p class="lead">对齐 Snipaste 级体验，但更轻、更快、开源免费。</p>
+    <div class="grid">
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="2.5"/></svg></div>
+        <h3>截图 + 8 种标注</h3>
+        <p>拖拽框选带像素放大镜，矩形、椭圆、箭头、画笔、标号、文本、马赛克、橡皮擦。已画元素随时可改，全量撤销重做。</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M12 3v2M12 19v2M3 12h2M19 12h2"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1" fill="#5fb0f7"/></svg></div>
+        <h3>贴图置顶悬浮</h3>
+        <p>把选区钉在屏幕上对照参考（Ctrl+P）。可多个并存，拖拽移动、滚轮缩放、双击复制，互不干扰。</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M4 7h3l2-3h6l2 3h3v13H4z"/><circle cx="12" cy="13" r="3.5"/></svg></div>
+        <h3>OCR 文字识别</h3>
+        <p>框选即识别，一键复制。Windows / macOS 走系统引擎（支持中文零依赖），Linux 用 tesseract，另有内置纯 Rust 引擎兜底。</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM18 18h3v3h-3z"/></svg></div>
+        <h3>二维码识别</h3>
+        <p>选区内的二维码直接解出内容，纯 Rust 解码，无需打开手机扫一扫。</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M19 11.5s-2 4.5-7 4.5-7-4.5-7-4.5"/><path d="M12 5v6l3 2"/><circle cx="12" cy="12" r="9.5"/></svg></div>
+        <h3>GIF 录屏</h3>
+        <p>选区录制 GIF（gifski 编码，质量拔群），命令行一句话开录，Ctrl+C 收尾。</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M12 2l3 6 6 1-4.5 4.5L18 20l-6-3-6 3 1.5-6.5L3 9l6-1z"/></svg></div>
+        <h3>像素级取色器</h3>
+        <p>13×13 像素网格放大镜 + 十字线，RGB / HEX / CMYK 三种格式快捷键直接复制。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="cli" style="background: var(--bg-soft); border-block: 1px solid var(--border);">
+  <div class="wrap">
+    <h2>命令行直达，天生适合脚本</h2>
+    <p class="lead">每个功能都有无界面模式，绑定快捷键、写进脚本、塞进 CI 都行。</p>
+    <div class="term" style="margin-top: 0; max-width: 820px;">
+      <div class="term-bar"><i></i><i></i><i></i></div>
+      <pre><span class="p">$</span> <span class="cmd">lscreen shot --region 0,0,1920,1080 -o shot.png</span>   <span class="c"># 定点截屏</span>
+<span class="p">$</span> <span class="cmd">lscreen shot --clipboard</span>                          <span class="c"># 全屏进剪贴板</span>
+<span class="p">$</span> <span class="cmd">lscreen ocr -i doc.png --lang chi_sim --lang eng</span>  <span class="c"># 图片文字识别</span>
+<span class="p">$</span> <span class="cmd">lscreen qr -i photo.png</span>                           <span class="c"># 图片二维码识别</span>
+<span class="p">$</span> <span class="cmd">lscreen record --fps 10 --quality 90 -o demo.gif</span>  <span class="c"># 录屏参数可调</span>
+<span class="p">$</span> <span class="cmd">lscreen pin -i mockup.png</span>                         <span class="c"># 任意图片贴屏幕上</span></pre>
+    </div>
+  </div>
+</section>
+
+<section id="download">
+  <div class="wrap">
+    <h2>下载安装</h2>
+    <p class="lead">全平台原生包，Linux 覆盖 x64 / arm64 / armv7 / x86 四种架构。</p>
+    <div class="dl-table">
+      <table>
+        <tr><th>平台</th><th>包格式</th><th>安装方式</th></tr>
+        <tr><td>Debian / Ubuntu / Deepin</td><td><code>.deb</code></td><td><code>sudo apt install ./lscreen_*.deb</code></td></tr>
+        <tr><td>Fedora / RHEL / openSUSE</td><td><code>.rpm</code></td><td><code>sudo rpm -i lscreen-*.rpm</code></td></tr>
+        <tr><td>任意 Linux 发行版</td><td><code>.AppImage</code> / <code>.tar.gz</code></td><td>下载即用，免安装</td></tr>
+        <tr><td>Windows</td><td><code>-setup.exe</code> / <code>.zip</code></td><td>安装器免管理员权限，zip 解压即用</td></tr>
+        <tr><td>macOS</td><td><code>.dmg</code></td><td>拖入 Applications（首次右键 → 打开）</td></tr>
+      </table>
+    </div>
+    <p class="dl-note">
+      也可源码安装：<span class="inline-code">cargo install --path crates/app</span>
+      · 全部产物见 <a href="https://github.com/crazykun/LaterScreen/releases">Releases</a>
+    </p>
+    <div class="cta" style="margin-top: 34px;">
+      <a class="btn btn-primary" href="https://github.com/crazykun/LaterScreen/releases/latest">⬇ 前往下载</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="foot-links">
+      <a href="https://github.com/crazykun/LaterScreen">GitHub</a>
+      <a href="https://github.com/crazykun/LaterScreen/releases">Releases</a>
+      <a href="https://github.com/crazykun/LaterScreen/issues">反馈问题</a>
+      <a href="https://github.com/crazykun/LaterScreen/blob/main/LICENSE">MIT License</a>
+    </div>
+    <p>LaterScreen — 用 Rust 打磨的截图工具，小而美。</p>
+  </div>
+</footer>
+
+<script>
+// 从 GitHub API 拉最新版本号；失败则保留页面上写死的兜底版本
+fetch('https://api.github.com/repos/crazykun/LaterScreen/releases/latest')
+  .then(r => r.ok ? r.json() : null)
+  .then(d => { if (d && d.tag_name) document.getElementById('ver').textContent = '最新版本 ' + d.tag_name; })
+  .catch(() => {});
+</script>
+</body>
+</html>
