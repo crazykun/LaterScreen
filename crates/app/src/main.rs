@@ -200,7 +200,8 @@ fn run_tray(foreground: bool) -> Result<(), String> {
 /// 配置面板窗口。
 fn run_settings() -> Result<(), String> {
     let viewport = eframe::egui::ViewportBuilder::default()
-        .with_inner_size([440.0, 580.0])
+        .with_inner_size([480.0, 640.0])
+        .with_min_inner_size([420.0, 520.0])
         .with_resizable(true);
     let options = eframe::NativeOptions {
         viewport,
