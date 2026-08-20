@@ -28,6 +28,8 @@ pub struct Config {
     pub default_color: String,
     /// 默认线宽 1-12
     pub default_width: f32,
+    /// 进入截图时的初始选区：window=最前窗口 / fullscreen=全屏 / none=无（手动框选）
+    pub default_selection: String,
     /// 复制到剪贴板后自动退出
     pub copy_auto_exit: bool,
     /// 保存文件后打开所在目录
@@ -48,6 +50,7 @@ impl Default for Config {
             default_tool: "select".to_string(),
             default_color: "#e53935".to_string(),
             default_width: 3.0,
+            default_selection: "window".to_string(),
             copy_auto_exit: true,
             open_dir_after_save: false,
             hotkey_screenshot: "F1".to_string(),
@@ -114,6 +117,25 @@ impl Config {
             font_size: 12.0 + default_width_clamp(self.default_width) * 4.0,
         }
     }
+
+    pub fn initial_selection(&self) -> InitialSelection {
+        match self.default_selection.trim().to_ascii_lowercase().as_str() {
+            "fullscreen" => InitialSelection::Fullscreen,
+            "none" => InitialSelection::None,
+            _ => InitialSelection::Window,
+        }
+    }
+}
+
+/// 进入截图覆盖层时的初始选区（M9）
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InitialSelection {
+    /// 最前（活跃）窗口矩形——一步 Enter/双击即可出图
+    Window,
+    /// 整个屏幕
+    Fullscreen,
+    /// 不预选，保持纯手动框选（旧行为）
+    None,
 }
 
 /// 配置文件路径。
@@ -167,6 +189,13 @@ pub const TOOL_NAMES: &[(&str, &str)] = &[
     ("text", "文本"),
     ("mosaic", "马赛克"),
     ("eraser", "橡皮"),
+];
+
+/// 初始选区选项：(配置值, 面板文案)
+pub const SELECTION_NAMES: &[(&str, &str)] = &[
+    ("window", "最前窗口"),
+    ("fullscreen", "全屏"),
+    ("none", "无"),
 ];
 
 pub fn tool_from_name(name: &str) -> Option<Tool> {
@@ -313,6 +342,22 @@ mod tests {
         assert_eq!(hex_color(c), "#e53935");
         assert!(parse_hex_color("#12345").is_none());
         assert!(parse_hex_color("red").is_none());
+    }
+
+    #[test]
+    fn initial_selection_parsing() {
+        let c = Config::default();
+        assert_eq!(c.initial_selection(), InitialSelection::Window);
+        let c = cfg("default_selection = \"fullscreen\"\n");
+        assert_eq!(c.initial_selection(), InitialSelection::Fullscreen);
+        let c = cfg("default_selection = \"none\"\n");
+        assert_eq!(c.initial_selection(), InitialSelection::None);
+        // 未知值回退默认（最前窗口）
+        let c = cfg("default_selection = \"bogus\"\n");
+        assert_eq!(c.initial_selection(), InitialSelection::Window);
+        // 配置文件缺字段（旧版本写入）→ serde 默认值
+        let c = cfg("default_color = \"#ffffff\"\n");
+        assert_eq!(c.default_selection, "window");
     }
 
     #[test]

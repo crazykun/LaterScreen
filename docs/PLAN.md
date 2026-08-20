@@ -206,7 +206,7 @@ Snipaste 的招牌能力：截完把图钉在屏幕上置顶悬浮，方便对�
       **zbus 钉 =5.18.0**（5.19 在 default-features=false + blocking-api 组合下
       自身编译失败，上游打包缺陷，修复后放开）
 
-### M9 窗口截图（选中最前窗口，默认截当前窗口）
+### M9 窗口截图（选中最前窗口，默认截当前窗口）✅ 2026-08-20
 
 Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默认选区就是当前
 最前面的窗口**；移动鼠标时自动高亮悬停处的窗口，单击即选中该窗口区域。
@@ -216,33 +216,50 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
 避免被遮挡窗口内容缺失、DWM 圆角阴影裁剪等一堆平台坑；截图语义 =
 「屏幕上此刻看到的这个窗口区域」，与现有覆盖层管线零冲突。
 
-- [ ] capture 新增窗口枚举 API：
-      `WindowInfo { id, title, rect: (x,y,w,h), z_order, is_minimized }` +
+- [x] capture 新增窗口枚举 API：
+      `WindowInfo { id, title, x/y/w/h, z_order, is_minimized }` +
       `list_windows() -> Vec<WindowInfo>`（按 Z 序自顶向下）+
-      `frontmost_window() -> Option<WindowInfo>`
+      `frontmost_window() / window_at(x,y)` +
+      `window_rect_in_image()`（平台坐标 → 显示器图像像素，含求交；
+      mac 的 CG 逻辑点 → 物理像素换算收敛在此，不泄漏到 app）
       - Linux X11（x11rb，纯 Rust）：`_NET_CLIENT_LIST_STACKING` 取 Z 序，
         `_NET_ACTIVE_WINDOW` 取最前窗口；几何用 GetGeometry +
         TranslateCoordinates 折算到根坐标，`_NET_FRAME_EXTENTS` 补装饰边框；
-        过滤 `_NET_WM_STATE_HIDDEN`（最小化）与非当前桌面窗口
-      - Windows / macOS：xcap `Window::all()` 已有枚举（含几何/最小化状态），
-        最前窗口 Win 用 GetForegroundWindow、mac 用 CGWindowList 首个
-        on-screen 普通层窗口；封装进 other.rs 保持接口一致
-      - Wayland：portal 无窗口几何能力，明确降级为纯手动框选（不报错）
-- [ ] 关键时序：**窗口列表必须在覆盖层窗口创建前采集**（与全屏截图同时机），
-      否则覆盖层自己就是最前窗口；列表里同时按自身 pid/窗口 id 排除自己
-      与贴图窗口（贴图常驻置顶，避免截图时总是吸到贴图上）
-- [ ] 覆盖层交互（对齐 Snipaste）：
-      - 进入截图：初始选区 = 最前窗口矩形（与屏幕求交），一步 Enter/双击
-        即可出图 ——「默认截图当前窗口」
+        过滤 `_NET_WM_STATE_HIDDEN`（最小化）、非当前桌面（`_NET_WM_DESKTOP`，
+        sticky 保留）与 DOCK/DESKTOP/MENU 等辅助窗口类型；无 EWMH 的 WM
+        返回空列表降级。x11rb 0.13 的 `value32()` 返回 Option 迭代器，
+        统一经 `values32()` 展平
+      - Windows / macOS：xcap `Window::all()`（两平台天然按 Z 序自顶向下），
+        最前窗口 Win = GetForegroundWindow、mac = 活跃 App（xcap `is_focused`）；
+        最小化/零尺寸过滤
+      - Wayland：portal 无窗口几何能力，返回空列表明确降级为纯手动框选（不报错）
+- [x] 关键时序：**窗口列表必须在覆盖层窗口创建前采集**（`overlay_window_list`
+      与截屏同时机），否则覆盖层自己就是最前窗口；按 `_NET_WM_PID` +
+      `/proc/<pid>/exe` == 自身可执行文件排除自家窗口（贴图/录制状态/配置
+      面板——它们是同 exe 的独立进程；覆盖层自身尚未建窗天然不在列表）；
+      Win/mac 按 xcap `app_name` 与自身 exe 文件名比对
+- [x] 覆盖层交互（对齐 Snipaste）：
+      - 进入截图：初始选区 = 最前窗口矩形（与屏幕求交），一步 Enter/
+        Ctrl+C/双击即可出图——「默认截图当前窗口」
       - 未按下拖拽时：鼠标移动实时命中悬停窗口（Z 序自顶向下第一个含点者），
-        高亮其边框 + 角落显示标题/尺寸；单击 = 选中该窗口
-      - 一旦开始拖拽即进入自由框选，行为与现状完全一致；选中窗口后仍可
-        拖边缘微调（复用现有可调整选区）
-- [ ] CLI：`lscreen shot --window`（最前窗口直接出图）、
-      `--window-at x,y`（取该点下窗口，供脚本用）
-- [ ] 配置面板：新增「默认选区」选项（最前窗口 / 全屏 / 无），默认最前窗口
-- [ ] 验收：Deepin/KWin X11 真机——初始选区即当前窗口、悬停高亮跟手、
-      多屏负坐标窗口矩形正确；Win/mac 待真机确认（CI 无桌面）
+        高亮其边框 + 左上角显示窗口标题；单击 = 选中该窗口并进标注
+        （可拖边缘微调、可标注，复用现有全部 Editing 交互）
+      - 一旦开始拖拽即进入自由框选，行为与现状完全一致
+      - 双击 = 第一击选中窗口进标注、第二击触发现有「双击复制」链路，
+        点击型工具（标号/文本）例外逻辑不变
+      - 空白桌面单击 = 全屏（旧行为保留）；Record 框选模式同样受益
+        （窗口单击/Enter 即交付该窗口区域）
+- [x] CLI：`lscreen shot --window`（最前窗口直接出图；直接 capture_region
+      抓窗口矩形，跨显示器窗口天然正确，优于「截主屏再裁剪」的旧路径）、
+      `--window-at x,y`（取该点下窗口，供脚本用）；与 --region clap 互斥
+- [x] 配置面板：新增「初始选区」选项（最前窗口/全屏/无），默认最前窗口；
+      未知配置值回退默认；旧配置文件缺字段自动取默认
+- [x] 验收（Deepin 25 / KWin / X11 真机 2026-08-20）：窗口枚举 Z 序/
+      标题/几何正确（含最大化窗 frame extents 与 +1920 副屏坐标）、
+      frontmost = 活跃窗口、`shot --window` / `--window-at` 出图尺寸与
+      窗口一致；覆盖层交互路径（初始预选/悬停高亮/单击选窗/Enter 出图）
+      已实现待人工点验。Win/mac 待真机确认（CI 无桌面）；mac 窗口坐标
+      走「CG 点 × 窗口中心所在显示器缩放比」换算，混合 DPI 场景随 M5 一并验证
 
 ### 遗留 TODO（review 2026-08-17）
 

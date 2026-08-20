@@ -512,6 +512,33 @@ impl SettingsApp {
         });
 
         card(ui, "行为", |ui| {
+            egui::Grid::new("behavior-grid")
+                .num_columns(2)
+                .spacing([12.0, 10.0])
+                .show(ui, |ui| {
+                    row_label(ui, "初始选区");
+                    let current = config::SELECTION_NAMES
+                        .iter()
+                        .find(|(id, _)| *id == self.cfg.default_selection)
+                        .map(|(_, label)| *label)
+                        .unwrap_or("最前窗口");
+                    egui::ComboBox::from_id_salt("initial-selection")
+                        .selected_text(egui::RichText::new(current).color(TEXT))
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            for (id, label) in config::SELECTION_NAMES {
+                                ui.selectable_value(
+                                    &mut self.cfg.default_selection,
+                                    id.to_string(),
+                                    *label,
+                                );
+                            }
+                        })
+                        .response
+                        .on_hover_text("进入截图时预选的区域：最前窗口可直接 Enter/双击出图");
+                    ui.end_row();
+                });
+            ui.add_space(6.0);
             ui.checkbox(
                 &mut self.cfg.copy_auto_exit,
                 egui::RichText::new("复制到剪贴板后自动退出").color(TEXT),

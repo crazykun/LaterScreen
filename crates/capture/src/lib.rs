@@ -80,3 +80,151 @@ pub fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<Screenshot> {
 pub fn cursor_position() -> Option<(i32, i32)> {
     platform::cursor_position()
 }
+
+// ---------------------------------------------------------------- 窗口枚举（M9）
+
+/// 一个可交互的顶层窗口。坐标语义与 `Screenshot::origin` 同一坐标系同一单位
+/// （Linux X11 = 根窗口物理像素；Windows = 屏幕物理像素；macOS = CG 全局点），
+/// 与 `Screenshot` 的原点相减即可换算到图像像素。
+#[derive(Debug, Clone)]
+pub struct WindowInfo {
+    pub id: u64,
+    pub title: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    /// Z 序：越大越靠前。列表本身已按 Z 序自顶向下排序
+    pub z_order: u32,
+    /// 最小化窗口已在上游过滤，此字段恒 false（保留以符合数据模型）
+    pub is_minimized: bool,
+}
+
+impl WindowInfo {
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        self.width > 0
+            && self.height > 0
+            && x >= self.x
+            && y >= self.y
+            && x < self.x + self.width as i32
+            && y < self.y + self.height as i32
+    }
+}
+
+/// 枚举顶层窗口，按 Z 序自顶向下。已过滤：最小化、其他桌面、面板/停靠区
+/// 等辅助窗口、本程序自己的窗口（贴图/录制状态窗）。
+/// 失败或平台不支持（如 Wayland）返回空列表——上层降级为纯手动框选，不报错。
+pub fn list_windows() -> Vec<WindowInfo> {
+    platform::list_windows()
+}
+
+/// 当前最前（活跃）窗口。取不到活跃窗口时退回 Z 序最顶的普通窗口。
+pub fn frontmost_window() -> Option<WindowInfo> {
+    platform::frontmost_window()
+}
+
+/// 虚拟桌面坐标 (x, y) 处最上面的窗口（Z 序自顶向下第一个含点者）。
+pub fn window_at(x: i32, y: i32) -> Option<WindowInfo> {
+    list_windows().into_iter().find(|w| w.contains(x, y))
+}
+
+/// 窗口矩形与一台显示器截图的交集，换算为图像像素坐标 (x, y, w, h)。
+/// 无交集返回 None。macOS 的窗口矩形是 CG 逻辑点，这里按该显示器的
+/// 缩放比换算成物理像素——平台差异收敛在本函数，不泄漏到 app。
+pub fn window_rect_in_image(win: &WindowInfo, shot: &Screenshot) -> Option<(f32, f32, f32, f32)> {
+    #[cfg(target_os = "macos")]
+    let (x, y, w, h) = (
+        (win.x as f32 - shot.origin.0 as f32) * shot.scale,
+        (win.y as f32 - shot.origin.1 as f32) * shot.scale,
+        win.width as f32 * shot.scale,
+        win.height as f32 * shot.scale,
+    );
+    #[cfg(not(target_os = "macos"))]
+    let (x, y, w, h) = (
+        win.x as f32 - shot.origin.0 as f32,
+        win.y as f32 - shot.origin.1 as f32,
+        win.width as f32,
+        win.height as f32,
+    );
+    let (sw, sh) = (shot.width as f32, shot.height as f32);
+    let x0 = x.max(0.0).min(sw);
+    let y0 = y.max(0.0).min(sh);
+    let x1 = (x + w).min(sw).max(0.0);
+    let y1 = (y + h).min(sh).max(0.0);
+    if x1 <= x0 || y1 <= y0 {
+        None
+    } else {
+        Some((x0, y0, x1 - x0, y1 - y0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shot(w: u32, h: u32, origin: (i32, i32)) -> Screenshot {
+        Screenshot {
+            rgba: vec![0; (w * h * 4) as usize],
+            width: w,
+            height: h,
+            origin,
+            scale: 1.0,
+            is_primary: true,
+        }
+    }
+
+    fn win(x: i32, y: i32, w: u32, h: u32) -> WindowInfo {
+        WindowInfo {
+            id: 1,
+            title: String::new(),
+            x,
+            y,
+            width: w,
+            height: h,
+            z_order: 0,
+            is_minimized: false,
+        }
+    }
+
+    #[test]
+    fn window_contains() {
+        let w = win(10, 20, 100, 50);
+        assert!(w.contains(10, 20));
+        assert!(w.contains(109, 69));
+        assert!(!w.contains(110, 20));
+        assert!(!w.contains(10, 70));
+        assert!(!win(0, 0, 0, 10).contains(0, 0));
+    }
+
+    #[test]
+    fn rect_in_image_full() {
+        let s = shot(1920, 1080, (0, 0));
+        assert_eq!(
+            window_rect_in_image(&win(100, 50, 800, 600), &s),
+            Some((100.0, 50.0, 800.0, 600.0))
+        );
+    }
+
+    #[test]
+    fn rect_in_image_negative_origin() {
+        // 显示器在主屏左侧（原点为负）：窗口根坐标换算到图像坐标
+        let s = shot(1920, 1080, (-1920, 0));
+        assert_eq!(
+            window_rect_in_image(&win(-1920, 100, 800, 600), &s),
+            Some((0.0, 100.0, 800.0, 600.0))
+        );
+    }
+
+    #[test]
+    fn rect_in_image_clip_and_miss() {
+        let s = shot(1920, 1080, (0, 0));
+        // 越出右/下边界 → 裁剪
+        assert_eq!(
+            window_rect_in_image(&win(1500, 900, 800, 400), &s),
+            Some((1500.0, 900.0, 420.0, 180.0))
+        );
+        // 完全在屏幕外 → None
+        assert_eq!(window_rect_in_image(&win(2000, 0, 100, 100), &s), None);
+        assert_eq!(window_rect_in_image(&win(-500, 0, 100, 100), &s), None);
+    }
+}

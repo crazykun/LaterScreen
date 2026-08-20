@@ -166,6 +166,250 @@ pub fn cursor_position() -> Option<(i32, i32)> {
     .ok()
 }
 
+// ------------------------------------------------------- 窗口枚举（M9，EWMH）
+
+use x11rb::protocol::xproto::AtomEnum;
+
+use crate::WindowInfo;
+
+/// 本次枚举要用到的 EWMH 原子。intern 失败（WM 不支持 EWMH）时值为 0。
+struct WinAtoms {
+    supporting_wm_check: u32,
+    client_list_stacking: u32,
+    current_desktop: u32,
+    net_wm_desktop: u32,
+    net_wm_state: u32,
+    net_wm_state_hidden: u32,
+    net_wm_name: u32,
+    wm_name: u32,
+    net_wm_pid: u32,
+    frame_extents: u32,
+    window_type: u32,
+    /// 这些类型的窗口不参与「窗口吸附选区」：面板/桌面/菜单/气泡等
+    skip_types: Vec<u32>,
+}
+
+fn intern(conn: &impl Connection, name: &str) -> u32 {
+    conn.intern_atom(true, name.as_bytes())
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .map(|r| r.atom)
+        .unwrap_or(0)
+}
+
+impl WinAtoms {
+    fn intern_all(conn: &impl Connection) -> Self {
+        let skip_types = [
+            "_NET_WM_WINDOW_TYPE_DOCK",
+            "_NET_WM_WINDOW_TYPE_DESKTOP",
+            "_NET_WM_WINDOW_TYPE_TOOLBAR",
+            "_NET_WM_WINDOW_TYPE_MENU",
+            "_NET_WM_WINDOW_TYPE_SPLASH",
+            "_NET_WM_WINDOW_TYPE_NOTIFICATION",
+            "_NET_WM_WINDOW_TYPE_TOOLTIP",
+            "_NET_WM_WINDOW_TYPE_COMBO",
+            "_NET_WM_WINDOW_TYPE_DND",
+        ]
+        .iter()
+        .map(|n| intern(conn, n))
+        .filter(|a| *a != 0)
+        .collect();
+        Self {
+            supporting_wm_check: intern(conn, "_NET_SUPPORTING_WM_CHECK"),
+            client_list_stacking: intern(conn, "_NET_CLIENT_LIST_STACKING"),
+            current_desktop: intern(conn, "_NET_CURRENT_DESKTOP"),
+            net_wm_desktop: intern(conn, "_NET_WM_DESKTOP"),
+            net_wm_state: intern(conn, "_NET_WM_STATE"),
+            net_wm_state_hidden: intern(conn, "_NET_WM_STATE_HIDDEN"),
+            net_wm_name: intern(conn, "_NET_WM_NAME"),
+            wm_name: intern(conn, "WM_NAME"),
+            net_wm_pid: intern(conn, "_NET_WM_PID"),
+            frame_extents: intern(conn, "_NET_FRAME_EXTENTS"),
+            window_type: intern(conn, "_NET_WM_WINDOW_TYPE"),
+            skip_types,
+        }
+    }
+}
+
+/// 读窗口属性原始字节；属性不存在或出错返回 None。
+fn prop(
+    conn: &impl Connection,
+    window: u32,
+    property: u32,
+) -> Option<x11rb::protocol::xproto::GetPropertyReply> {
+    if property == 0 {
+        return None;
+    }
+    conn.get_property(false, window, property, AtomEnum::ANY, 0, 4096)
+        .ok()?
+        .reply()
+        .ok()
+}
+
+/// 属性值的 u32 迭代视图。x11rb 的 value32() 在格式不符时返回 None，
+/// 这里展平为空迭代，缺失属性一律当「无值」处理。
+fn values32(r: &x11rb::protocol::xproto::GetPropertyReply) -> impl Iterator<Item = u32> + '_ {
+    r.value32().into_iter().flatten()
+}
+
+fn window_title(conn: &impl Connection, win: u32, atoms: &WinAtoms) -> String {
+    for prop_atom in [atoms.net_wm_name, atoms.wm_name] {
+        if let Some(r) = prop(conn, win, prop_atom) {
+            if !r.value.is_empty() {
+                return String::from_utf8_lossy(&r.value).into_owned();
+            }
+        }
+    }
+    String::new()
+}
+
+/// 是否本程序自己的窗口（贴图/录制状态/配置面板）：贴图是独立进程，
+/// 按「窗口 pid 的可执行文件 == 自身可执行文件」识别。
+/// 覆盖层自身在窗口列表采集之后才建窗，不会出现在列表里。
+fn is_own_process(conn: &impl Connection, win: u32, atoms: &WinAtoms) -> bool {
+    let Some(pid) = prop(conn, win, atoms.net_wm_pid).and_then(|r| values32(&r).next()) else {
+        return false;
+    };
+    if pid == std::process::id() {
+        return true;
+    }
+    let Some(my_exe) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.canonicalize().ok())
+    else {
+        return false;
+    };
+    // /proc/<pid>/exe 是符号链接；同用户可读，异用户 Err → 不排除
+    std::fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|p| p == my_exe)
+}
+
+/// 客户区根坐标 + 装饰边框（_NET_FRAME_EXTENTS）= 可见窗口矩形。
+fn window_geometry(
+    conn: &impl Connection,
+    screen: &Screen,
+    win: u32,
+    atoms: &WinAtoms,
+) -> Option<(i32, i32, u32, u32)> {
+    let geo = conn.get_geometry(win).ok()?.reply().ok()?;
+    let tr = conn
+        .translate_coordinates(win, screen.root, 0, 0)
+        .ok()?
+        .reply()
+        .ok()?;
+    let border = geo.border_width as i32;
+    let (mut x, mut y) = (tr.dst_x as i32 - border, tr.dst_y as i32 - border);
+    let (mut w, mut h) = (geo.width as u32, geo.height as u32);
+    if let Some(ext) = prop(conn, win, atoms.frame_extents) {
+        let v: Vec<u32> = values32(&ext).collect();
+        if v.len() == 4 {
+            // _NET_FRAME_EXTENTS = left, right, top, bottom
+            x -= v[0] as i32;
+            y -= v[2] as i32;
+            w = w.saturating_add(v[0]).saturating_add(v[1]);
+            h = h.saturating_add(v[2]).saturating_add(v[3]);
+        }
+    }
+    if w == 0 || h == 0 {
+        return None;
+    }
+    Some((x, y, w, h))
+}
+
+fn list_windows_inner(conn: &impl Connection, screen: &Screen) -> Vec<WindowInfo> {
+    let atoms = WinAtoms::intern_all(conn);
+    // 无 EWMH 的 WM（裸 WM 等）给不了 Z 序/状态，降级为手动框选
+    if atoms.supporting_wm_check == 0 || atoms.client_list_stacking == 0 {
+        return Vec::new();
+    }
+    let Some(list_reply) = prop(conn, screen.root, atoms.client_list_stacking) else {
+        return Vec::new();
+    };
+    // _NET_CLIENT_LIST_STACKING 自底向上
+    let stacking: Vec<u32> = values32(&list_reply).collect();
+    let current_desktop =
+        prop(conn, screen.root, atoms.current_desktop).and_then(|r| values32(&r).next());
+
+    let mut out = Vec::new();
+    let n = stacking.len();
+    for (i, &win) in stacking.iter().enumerate() {
+        // 非当前桌面（0xFFFFFFFF = sticky，出现在所有桌面，保留）
+        if atoms.net_wm_desktop != 0 {
+            if let Some(desktop) =
+                prop(conn, win, atoms.net_wm_desktop).and_then(|r| values32(&r).next())
+            {
+                if desktop != 0xFFFF_FFFF && Some(desktop) != current_desktop {
+                    continue;
+                }
+            }
+        }
+        // 最小化（_NET_WM_STATE_HIDDEN）
+        if atoms.net_wm_state != 0
+            && atoms.net_wm_state_hidden != 0
+            && prop(conn, win, atoms.net_wm_state)
+                .map(|r| values32(&r).any(|a| a == atoms.net_wm_state_hidden))
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        // 面板/桌面/菜单等辅助窗口
+        if atoms.window_type != 0
+            && !atoms.skip_types.is_empty()
+            && prop(conn, win, atoms.window_type)
+                .map(|r| values32(&r).any(|t| atoms.skip_types.contains(&t)))
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        if is_own_process(conn, win, &atoms) {
+            continue;
+        }
+        let Some((x, y, w, h)) = window_geometry(conn, screen, win, &atoms) else {
+            continue;
+        };
+        out.push(WindowInfo {
+            id: win as u64,
+            title: window_title(conn, win, &atoms),
+            x,
+            y,
+            width: w,
+            height: h,
+            z_order: (n - 1 - i) as u32,
+            is_minimized: false,
+        });
+    }
+    // stacking 自底向上 → 输出自顶向下（Z 序优先命中测试的顺序）
+    out.reverse();
+    out
+}
+
+pub fn list_windows() -> Vec<WindowInfo> {
+    // Wayland 会话直接降级（不报错），由上层走纯手动框选
+    with_conn(|conn, screen| Ok(list_windows_inner(conn, screen))).unwrap_or_default()
+}
+
+pub fn frontmost_window() -> Option<WindowInfo> {
+    with_conn(|conn, screen| {
+        let list = list_windows_inner(conn, screen);
+        if list.is_empty() {
+            return Ok(None);
+        }
+        // _NET_ACTIVE_WINDOW = 当前聚焦窗口；不在列表里（自家/已过滤）时
+        // 退回 Z 序最顶
+        if let Some(r) = prop(conn, screen.root, intern(conn, "_NET_ACTIVE_WINDOW")) {
+            if let Some(active) = values32(&r).next() {
+                if active != 0 {
+                    if let Some(found) = list.iter().find(|w| w.id == active as u64) {
+                        return Ok(Some(found.clone()));
+                    }
+                }
+            }
+        }
+        Ok(list.first().cloned())
+    })
+    .ok()
+    .flatten()
+}
+
 pub fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<Screenshot> {
     with_conn(|conn, screen| {
         // 可截区域 = 全部显示器的并集。显示器原点可为负（位于主屏左侧/上方），

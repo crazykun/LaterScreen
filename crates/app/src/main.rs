@@ -99,6 +99,17 @@ enum Cmd {
         /// 截取区域，格式 X,Y,W,H（物理像素）；缺省为整个主屏
         #[arg(long, value_name = "X,Y,W,H", allow_hyphen_values = true)]
         region: Option<String>,
+        /// 截取当前最前（活跃）窗口
+        #[arg(long, conflicts_with_all = ["region", "window_at"])]
+        window: bool,
+        /// 截取虚拟桌面坐标 (X,Y) 处最上面的窗口
+        #[arg(
+            long,
+            value_name = "X,Y",
+            allow_hyphen_values = true,
+            conflicts_with = "region"
+        )]
+        window_at: Option<String>,
         /// 输出文件路径（PNG）；缺省输出到 ~/Pictures
         #[arg(short, long)]
         output: Option<PathBuf>,
@@ -163,9 +174,11 @@ fn main() {
         }
         Some(Cmd::Shot {
             region,
+            window,
+            window_at,
             output,
             clipboard,
-        }) => run_shot(region, output, clipboard),
+        }) => run_shot(region, window, window_at, output, clipboard),
         Some(Cmd::Pin { input, pos, scale }) => run_pin(input, pos, scale),
         Some(Cmd::Config) => run_settings(),
     };
@@ -227,6 +240,8 @@ fn pick_region_interactive() -> Result<Option<String>, String> {
     .map_err(|e| e.to_string())?;
     let (ox, oy) = shot.origin;
     let font = font::load_system_font();
+    let config = config::Config::load();
+    let (windows, initial) = overlay_window_list(&shot, ui::Mode::Record, &config);
 
     let scale = if shot.scale > 0.0 { shot.scale } else { 1.0 };
     let pos = eframe::egui::Pos2::new(ox as f32 / scale, oy as f32 / scale);
@@ -249,11 +264,15 @@ fn pick_region_interactive() -> Result<Option<String>, String> {
         Box::new(move |cc| {
             Ok(Box::new(ui::SnipApp::new(
                 cc,
-                shot,
-                font,
-                ui::Mode::Record,
-                config::Config::load(),
-                Some(shared),
+                ui::OverlayInit {
+                    shot,
+                    font,
+                    mode: ui::Mode::Record,
+                    config,
+                    record_region: Some(shared),
+                    windows,
+                    initial_region: initial,
+                },
             )))
         }),
     )
@@ -281,6 +300,10 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
     }
     .map_err(|e| e.to_string())?;
     let font = font::load_system_font();
+    let config = config::Config::load();
+    // 窗口列表同样必须先于覆盖层建窗采集（否则最前窗口就是自己）；
+    // 失败（Wayland 等）返回空列表，覆盖层自动降级为纯手动框选
+    let (windows, initial) = overlay_window_list(&shot, mode, &config);
 
     // origin 为物理像素；X11 下 winit 逻辑坐标与物理一致（scale=1），
     // 其余平台按截屏缩放比换算
@@ -303,15 +326,61 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
         Box::new(move |cc| {
             Ok(Box::new(ui::SnipApp::new(
                 cc,
-                shot,
-                font,
-                mode,
-                config::Config::load(),
-                None,
+                ui::OverlayInit {
+                    shot,
+                    font,
+                    mode,
+                    config,
+                    record_region: None,
+                    windows,
+                    initial_region: initial,
+                },
             )))
         }),
     )
     .map_err(|e| e.to_string())
+}
+
+/// 覆盖层的窗口吸附列表（M9）：窗口矩形换算到图像像素坐标（含与屏幕求交），
+/// 以及按配置计算的初始预选矩形（仅 Window 模式需要；全屏/无在 SnipApp 内合成）。
+/// 返回空列表 = 平台不支持或失败，覆盖层退化为纯手动框选。
+fn overlay_window_list(
+    shot: &lscreen_capture::Screenshot,
+    mode: ui::Mode,
+    config: &config::Config,
+) -> (Vec<ui::WinRect>, Option<ui::WinRect>) {
+    if mode == ui::Mode::Pick {
+        return (Vec::new(), None);
+    }
+    let rect_of = |x: f32, y: f32, w: f32, h: f32| {
+        lscreen_core::RectF::from_points(
+            lscreen_core::P2::new(x, y),
+            lscreen_core::P2::new(x + w, y + h),
+        )
+    };
+    let windows: Vec<ui::WinRect> = lscreen_capture::list_windows()
+        .iter()
+        .filter_map(|w| {
+            lscreen_capture::window_rect_in_image(w, shot).map(|(x, y, w_, h_)| ui::WinRect {
+                title: w.title.clone(),
+                rect: rect_of(x, y, w_, h_),
+            })
+        })
+        .collect();
+    let initial = if config.initial_selection() == config::InitialSelection::Window {
+        // 最前窗口（活跃窗口优先）；其与当前屏无交或枚举失败时退回 Z 序最顶
+        lscreen_capture::frontmost_window()
+            .and_then(|fw| {
+                lscreen_capture::window_rect_in_image(&fw, shot).map(|(x, y, w_, h_)| ui::WinRect {
+                    title: fw.title.clone(),
+                    rect: rect_of(x, y, w_, h_),
+                })
+            })
+            .or_else(|| windows.first().cloned())
+    } else {
+        None
+    };
+    (windows, initial)
 }
 
 /// 无头模式的图像来源：文件优先，否则截屏（可选区域裁剪）。
@@ -373,20 +442,48 @@ fn run_ocr(
 
 fn run_shot(
     region: Option<String>,
+    window: bool,
+    window_at: Option<String>,
     output: Option<PathBuf>,
     clipboard: bool,
 ) -> Result<(), String> {
-    let shot = lscreen_capture::capture_primary().map_err(|e| e.to_string())?;
-    let region = match region {
-        Some(s) => parse_region(&s)?,
-        None => lscreen_core::RectF::from_points(
-            lscreen_core::P2::new(0.0, 0.0),
-            lscreen_core::P2::new(shot.width as f32, shot.height as f32),
-        ),
-    };
     let renderer = lscreen_core::render::Renderer::new(None);
-    let (rgba, w, h) = export::compose(&renderer, &shot.rgba, shot.width, shot.height, &[], region)
-        .ok_or_else(|| "选区为空（region 与屏幕无交集）".to_string())?;
+    let (rgba, w, h) = if window || window_at.is_some() {
+        // 窗口模式：直接按窗口矩形抓虚拟桌面（capture_region 内部会钳到屏幕
+        // 并集），天然支持跨显示器窗口；比「截主屏再裁剪」多屏更正确
+        let win = if window {
+            lscreen_capture::frontmost_window()
+        } else {
+            let (x, y) = parse_xy(window_at.as_deref().unwrap_or_default())?;
+            lscreen_capture::window_at(x, y)
+        }
+        .ok_or("未找到可用窗口（可能无 EWMH 窗口管理器或会话不支持）")?;
+        let shot = lscreen_capture::capture_region(win.x, win.y, win.width, win.height)
+            .map_err(|e| e.to_string())?;
+        export::compose(
+            &renderer,
+            &shot.rgba,
+            shot.width,
+            shot.height,
+            &[],
+            lscreen_core::RectF::from_points(
+                lscreen_core::P2::new(0.0, 0.0),
+                lscreen_core::P2::new(shot.width as f32, shot.height as f32),
+            ),
+        )
+        .ok_or_else(|| "选区为空（窗口与屏幕无交集）".to_string())?
+    } else {
+        let shot = lscreen_capture::capture_primary().map_err(|e| e.to_string())?;
+        let region = match region {
+            Some(s) => parse_region(&s)?,
+            None => lscreen_core::RectF::from_points(
+                lscreen_core::P2::new(0.0, 0.0),
+                lscreen_core::P2::new(shot.width as f32, shot.height as f32),
+            ),
+        };
+        export::compose(&renderer, &shot.rgba, shot.width, shot.height, &[], region)
+            .ok_or_else(|| "选区为空（region 与屏幕无交集）".to_string())?
+    };
 
     if clipboard {
         export::copy_to_clipboard(&rgba, w, h)?;
@@ -590,6 +687,19 @@ fn parse_pos(s: &str) -> Result<eframe::egui::Pos2, String> {
     Ok(eframe::egui::Pos2::new(parts[0], parts[1]))
 }
 
+/// 解析 "X,Y" 整数坐标（虚拟桌面物理像素，`shot --window-at` 用）。
+fn parse_xy(s: &str) -> Result<(i32, i32), String> {
+    let parts: Vec<i32> = s
+        .split(',')
+        .map(|v| v.trim().parse::<i32>())
+        .collect::<Result<_, _>>()
+        .map_err(|_| format!("无效的坐标: {s}（应为 X,Y）"))?;
+    if parts.len() != 2 {
+        return Err(format!("无效的坐标: {s}（应为 X,Y）"));
+    }
+    Ok((parts[0], parts[1]))
+}
+
 fn parse_region(s: &str) -> Result<lscreen_core::RectF, String> {
     let parts: Vec<f32> = s
         .split(',')
@@ -612,7 +722,7 @@ fn parse_region(s: &str) -> Result<lscreen_core::RectF, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_pos;
+    use super::{parse_pos, parse_xy};
 
     #[test]
     fn pos_parsing() {
@@ -624,5 +734,14 @@ mod tests {
         assert!(parse_pos("abc").is_err());
         assert!(parse_pos("1,2,3").is_err());
         assert!(parse_pos("nan,2").is_err());
+    }
+
+    #[test]
+    fn xy_parsing() {
+        assert_eq!(parse_xy("100,200").unwrap(), (100, 200));
+        assert_eq!(parse_xy(" -1920 , 0 ").unwrap(), (-1920, 0));
+        assert!(parse_xy("100").is_err());
+        assert!(parse_xy("1,2,3").is_err());
+        assert!(parse_xy("a,b").is_err());
     }
 }

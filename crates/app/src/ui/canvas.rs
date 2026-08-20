@@ -204,6 +204,15 @@ fn draw_magnifier(
 
 // ---------------------------------------------------------------- Selecting
 
+/// 悬停窗口命中：Z 序自顶向下第一个含点的窗口（拖拽中不做窗口吸附）。
+fn hovered_window(app: &SnipApp) -> Option<usize> {
+    if app.drag.is_some() {
+        return None;
+    }
+    let p = app.cursor_px?;
+    app.windows.iter().position(|w| w.rect.contains(p))
+}
+
 fn selecting(
     app: &mut SnipApp,
     ui: &egui::Ui,
@@ -233,6 +242,15 @@ fn selecting(
         current = Some(RectF::from_points(*start, view.to_px(pos)));
     }
 
+    // 悬停窗口（自由框选拖拽期间关闭）
+    let hover = hovered_window(app);
+    // 悬停窗口是否与当前候选选区同位（同位不再重复高亮）
+    let hover_same = hover.is_some_and(|i| {
+        app.sel_window
+            .as_ref()
+            .is_some_and(|s| s.rect == app.windows[i].rect)
+    });
+
     match current {
         Some(r) => {
             dim_outside(painter, view, screen, r);
@@ -240,15 +258,40 @@ fn selecting(
             painter.rect_stroke(rp, 0.0, Stroke::new(1.5, ACCENT), StrokeKind::Outside);
             size_label(painter, rp, r);
         }
-        None => {
-            painter.rect_filled(screen, 0.0, DIM);
-            painter.text(
-                screen.center(),
-                Align2::CENTER_CENTER,
-                "拖拽选择区域 · 单击全屏 · Esc 退出",
-                FontId::proportional(16.0),
-                Color32::from_white_alpha(200),
+        None => match app.sel_window.as_ref() {
+            Some(sel) => {
+                // 初始/已选窗口：暗化四周 + 边框 + 标签
+                dim_outside(painter, view, screen, sel.rect);
+                let rp = view.rect_pt(sel.rect);
+                painter.rect_stroke(rp, 0.0, Stroke::new(1.5, ACCENT), StrokeKind::Outside);
+                size_label(painter, rp, sel.rect);
+                win_label(painter, rp, screen, &sel.title);
+            }
+            None => {
+                painter.rect_filled(screen, 0.0, DIM);
+                painter.text(
+                    screen.center(),
+                    Align2::CENTER_CENTER,
+                    "拖拽选择区域 · 移动鼠标选窗口 · 单击全屏 · Esc 退出",
+                    FontId::proportional(16.0),
+                    Color32::from_white_alpha(200),
+                );
+            }
+        },
+    }
+
+    // 悬停窗口高亮（拖拽中/与候选选区同位时不画）
+    if let Some(i) = hover.filter(|_| current.is_none()) {
+        if !hover_same {
+            let w = &app.windows[i];
+            let rp = view.rect_pt(w.rect);
+            painter.rect_stroke(
+                rp,
+                0.0,
+                Stroke::new(1.5, Color32::from_rgba_unmultiplied(0x21, 0x96, 0xf3, 200)),
+                StrokeKind::Outside,
             );
+            win_label(painter, rp, screen, &w.title);
         }
     }
 
@@ -257,34 +300,54 @@ fn selecting(
             if r.width() >= 4.0 && r.height() >= 4.0 {
                 app.region = r;
                 app.clamp_region();
-                // Mode::Record：框完即交付区域并关窗，不进标注阶段
-                if app.mode == super::Mode::Record {
-                    if let Some(shared) = &app.record_region {
-                        *shared.lock().unwrap() = Some(app.region);
-                    }
-                    app.request_close(ui.ctx());
-                    app.drag = None;
-                    return;
-                }
-                app.stage = Stage::Editing;
+                app.confirm_region(ui.ctx());
+                app.drag = None;
+                return;
             }
         }
         app.drag = None;
     }
     if response.clicked() {
-        // 单击（未拖拽）：全屏选区
-        app.region = RectF::from_points(
-            P2::new(0.0, 0.0),
-            P2::new(app.shot.width as f32, app.shot.height as f32),
-        );
-        if app.mode == super::Mode::Record {
-            if let Some(shared) = &app.record_region {
-                *shared.lock().unwrap() = Some(app.region);
-            }
-            app.request_close(ui.ctx());
-            return;
+        // 单击（未拖拽）：窗口上 = 选中该窗口；空白处 = 全屏（旧行为）
+        if let Some(i) = hover {
+            app.region = app.windows[i].rect;
+        } else {
+            app.region = RectF::from_points(
+                P2::new(0.0, 0.0),
+                P2::new(app.shot.width as f32, app.shot.height as f32),
+            );
         }
-        app.stage = Stage::Editing;
+        app.clamp_region();
+        app.confirm_region(ui.ctx());
+    }
+}
+
+/// 窗口标签：标题（截断），画在矩形左上角上方。
+fn win_label(painter: &egui::Painter, region_pt: Rect, _screen: Rect, title: &str) {
+    let label = if title.is_empty() {
+        "窗口".to_string()
+    } else {
+        truncate_str(title, 40)
+    };
+    let galley = painter.layout_no_wrap(label, FontId::proportional(12.0), Color32::WHITE);
+    let bg = Rect::from_min_size(
+        Pos2::new(region_pt.min.x, (region_pt.min.y - 20.0).max(4.0)),
+        galley.size() + Vec2::new(10.0, 5.0),
+    );
+    painter.rect_filled(bg, 3.0, Color32::from_black_alpha(180));
+    painter.galley(
+        Pos2::new(bg.min.x + 5.0, bg.min.y + 2.0),
+        galley,
+        Color32::WHITE,
+    );
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let cut: String = s.chars().take(max).collect();
+        format!("{cut}…")
     }
 }
 

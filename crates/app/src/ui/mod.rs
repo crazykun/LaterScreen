@@ -108,6 +108,27 @@ pub struct TextEditState {
     pub is_new: bool,
 }
 
+/// 一个可吸附选区的窗口矩形（图像像素坐标，已与屏幕求交）。
+#[derive(Clone)]
+pub struct WinRect {
+    pub title: String,
+    pub rect: RectF,
+}
+
+/// 覆盖层启动参数（M9 收敛 new 的参数个数）。
+pub struct OverlayInit {
+    pub shot: Screenshot,
+    pub font: Option<Vec<u8>>,
+    pub mode: Mode,
+    pub config: Config,
+    /// Mode::Record 专用：框选完成后的输出通道
+    pub record_region: Option<SharedRegion>,
+    /// 窗口吸附列表（Z 序自顶向下，图像像素坐标；空 = 降级纯手动框选）
+    pub windows: Vec<WinRect>,
+    /// 初始预选窗口（仅配置为「最前窗口」时由调用方算好传入）
+    pub initial_region: Option<WinRect>,
+}
+
 pub struct SnipApp {
     pub shot: Screenshot,
     texture: Option<TextureHandle>,
@@ -116,6 +137,12 @@ pub struct SnipApp {
     pub mode: Mode,
     pub stage: Stage,
     pub region: RectF,
+    /// Selecting 阶段的候选选区（M9）：初始 = 最前窗口/全屏（按配置），
+    /// 悬停单击窗口时更新；确认后进 Editing
+    pub sel_window: Option<WinRect>,
+    /// 窗口矩形列表（Z 序自顶向下，图像像素坐标）。开窗前采集，
+    /// 之后冻结——覆盖层自身与贴图窗口已被 capture 层排除
+    pub windows: Vec<WinRect>,
     pub tool: Tool,
     pub style: Style,
     pub hover: Option<u64>,
@@ -144,14 +171,16 @@ pub struct SnipApp {
 }
 
 impl SnipApp {
-    pub fn new(
-        cc: &eframe::CreationContext<'_>,
-        shot: Screenshot,
-        font: Option<Vec<u8>>,
-        mode: Mode,
-        config: Config,
-        record_region: Option<SharedRegion>,
-    ) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, init: OverlayInit) -> Self {
+        let OverlayInit {
+            shot,
+            font,
+            mode,
+            config,
+            record_region,
+            windows,
+            initial_region,
+        } = init;
         // 先用 Renderer 解析一遍：epaint 内部同样用 ab_glyph，且解析失败是 panic!
         // 而非 Err。这里只把已确认可解析的字节交给 egui，坏字体退回内置字体。
         let renderer = Renderer::new(font.clone());
@@ -163,6 +192,22 @@ impl SnipApp {
         // 默认工具与样式来自配置（M8）
         let tool = config.tool();
         let style = config.style();
+        // 初始选区（M9）：Pick 模式不预选；Snip/Record 按配置（窗口/全屏/无）
+        let sel_window = if mode == Mode::Pick {
+            None
+        } else {
+            match config.initial_selection() {
+                crate::config::InitialSelection::Window => initial_region,
+                crate::config::InitialSelection::Fullscreen => Some(WinRect {
+                    title: "全屏".to_string(),
+                    rect: RectF::from_points(
+                        P2::new(0.0, 0.0),
+                        P2::new(shot.width as f32, shot.height as f32),
+                    ),
+                }),
+                crate::config::InitialSelection::None => None,
+            }
+        };
         Self {
             shot,
             texture: None,
@@ -171,6 +216,8 @@ impl SnipApp {
             mode,
             stage: Stage::Selecting,
             region: RectF::default(),
+            sel_window,
+            windows,
             tool,
             style,
             hover: None,
@@ -230,6 +277,19 @@ impl SnipApp {
         self.region.min.y = self.region.min.y.min(sh - h).max(0.0);
         self.region.max.x = self.region.min.x + w;
         self.region.max.y = self.region.min.y + h;
+    }
+
+    /// 选区确认：Snip 进标注阶段；Record 交付区域并关窗。
+    pub fn confirm_region(&mut self, ctx: &egui::Context) {
+        self.sel_window = None;
+        if self.mode == Mode::Record {
+            if let Some(shared) = &self.record_region {
+                *shared.lock().unwrap() = Some(self.region);
+            }
+            self.request_close(ctx);
+        } else {
+            self.stage = Stage::Editing;
+        }
     }
 
     fn compose(&self) -> Option<(Vec<u8>, u32, u32)> {
@@ -451,6 +511,19 @@ impl SnipApp {
                 if let Some(id) = self.selected.take() {
                     self.doc.begin_change();
                     self.doc.remove(id);
+                }
+            }
+        } else if matches!(self.stage, Stage::Selecting) && (enter || copy) {
+            // 初始选区已就位：Enter/Ctrl+C 一步出图——Snip 复制退出，Record 交付区域
+            if let Some(sel) = self.sel_window.clone() {
+                self.region = sel.rect;
+                if self.mode == Mode::Record {
+                    if let Some(shared) = &self.record_region {
+                        *shared.lock().unwrap() = Some(self.region);
+                    }
+                    self.request_close(ctx);
+                } else {
+                    self.copy_and_exit(ctx);
                 }
             }
         }
