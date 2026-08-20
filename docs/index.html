@@ -54,8 +54,6 @@
     background: radial-gradient(ellipse at 50% 0%, rgba(47,139,232,.16), transparent 65%);
     pointer-events: none;
   }
-  .hero .logo-big { width: 84px; height: 84px; border-radius: 20px; margin-bottom: 26px;
-    box-shadow: 0 8px 40px rgba(47,139,232,.35); }
   .hero h1 { font-size: clamp(34px, 6vw, 54px); font-weight: 800; letter-spacing: -1px; }
   .hero h1 .grad {
     background: linear-gradient(92deg, #4ea3f5 20%, #7cc0ff 80%);
@@ -100,13 +98,12 @@
 
   /* ===== 首屏截图 ===== */
   .shot {
-    margin: 56px auto 0; max-width: 820px;
+    margin: 0 auto 40px; max-width: 720px;
     background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
     box-shadow: 0 20px 60px rgba(0,0,0,.45), 0 0 80px rgba(47,139,232,.12);
     overflow: hidden;
   }
   .shot img { display: block; width: 100%; height: auto; }
-  .shot-cap { margin-top: 14px; font-size: 13px; color: var(--text-dim); text-align: center; }
 
   /* ===== 区块通用 ===== */
   section { padding: 72px 0; }
@@ -185,7 +182,10 @@
 
 <section class="hero">
   <div class="wrap">
-    <svg class="logo-big"><use href="#logo"/></svg>
+    <figure class="shot">
+      <div class="term-bar"><i></i><i></i><i></i></div>
+      <img src="img/image.png" alt="LaterScreen 截图标注界面：框选区域与标注工具栏" width="896" height="497">
+    </figure>
     <h1>截图标注，<span class="grad">快到不用等</span></h1>
     <p class="sub">Rust 编写的跨平台截图工具 —— 截图、标注、取色、二维码、OCR、GIF 录屏、贴图，
     一个命令全搞定。</p>
@@ -205,12 +205,6 @@
       </a>
     </div>
     <p class="ver" id="ver">最新版本 v0.2.0</p>
-
-    <figure class="shot">
-      <div class="term-bar"><i></i><i></i><i></i></div>
-      <img src="img/image.png" alt="LaterScreen 截图标注界面：框选区域与标注工具栏" width="896" height="497">
-    </figure>
-    <p class="shot-cap">框选 → 标注 → 复制/保存，全程不离手</p>
   </div>
 </section>
 
