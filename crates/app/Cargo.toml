@@ -11,10 +11,10 @@ ctrlc = "3"
 eframe = { version = "0.35", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
 global-hotkey = "0.8"
 image = { version = "0.25", default-features = false, features = ["png"] }
-lscreen-capture = { version = "0.2.0", path = "../capture" }
-lscreen-core = { version = "0.2.0", path = "../core" }
-lscreen-ocr = { version = "0.2.0", path = "../ocr" }
-lscreen-record = { version = "0.2.0", path = "../record" }
+lscreen-capture = { version = "0.3.0", path = "../capture" }
+lscreen-core = { version = "0.3.0", path = "../core" }
+lscreen-ocr = { version = "0.3.0", path = "../ocr" }
+lscreen-record = { version = "0.3.0", path = "../record" }
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 
