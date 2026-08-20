@@ -4,38 +4,47 @@
 [![Release](https://img.shields.io/github/v/release/crazykun/LaterScreen)](https://github.com/crazykun/LaterScreen/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-跨平台截图标注工具（Linux / Windows / macOS），Rust 编写。
-**单文件、≤20MB、无动态库依赖、冷启动即用**，命令名 `lscreen`。
+跨平台截图标注工具（Linux / Windows / macOS），Rust 编写。**单文件、≤20MB、无动态库依赖、冷启动即用**，命令名 `lscreen`。
+
 目标对齐 Snipaste 级体验：截图、标注、取色、二维码、OCR、GIF 录屏、贴图。
 
 ![主界面：框选 → 标注工具栏](docs/img/image.png)
 
 ## 特性
 
-**交互截图**（`lscreen`）
+### 交互截图（`lscreen gui`）
 
-- 拖拽框选 / 单击全屏；框选时带像素放大镜（网格取景 + 实时色值）
-- 选区可再调整：拖角点/边缘缩放（框外一圈也可命中）、框内拖拽移动、
-  工具栏宽 × 高输入框精确设定尺寸
-- 9 个工具：选择（移动/编辑元素）+ 8 种标注——矩形、椭圆（Shift 正圆/正方形）、
-  箭头、画笔（Shift 直线）、自增标号、文本（支持中文输入法）、马赛克、橡皮擦（恢复原图）
-- 已绘制元素可编辑：悬停高亮、拖拽移动、控制点调整、Delete 删除、双击文本改内容
-- 调色板：8 预设色 + 完整取色器；线宽/字号联动滑杆；全量撤销/重做
-- 导出：复制到剪贴板（Ctrl+C / Enter / 双击）、保存 PNG（Ctrl+S）
-- 贴图：把选区钉在屏幕上置顶悬浮（Ctrl+P / 工具栏图钉按钮），独立进程可多个并存，
-  拖拽移动、滚轮缩放（25%–400%，光标锚定）、双击复制、置顶切换、
-  图像下方条带工具条（不遮挡内容）
-- 选区内容直接识别：二维码 / OCR 文字，结果一键复制
+| 功能 | 说明 |
+|---|---|
+| 框选 | 拖拽框选 / 单击全屏，框选时带像素放大镜（网格取景 + 实时色值） |
+| 选区调整 | 拖角点/边缘缩放（框外一圈也可命中）、框内拖拽移动、工具栏宽 × 高输入框精确设定尺寸 |
+| 标注工具 | 选择 + 8 种标注：矩形、椭圆（Shift 正圆/正方形）、箭头、画笔（Shift 直线）、自增标号、文本（支持中文输入法）、马赛克、橡皮擦（恢复原图） |
+| 元素编辑 | 悬停高亮、拖拽移动、控制点调整、Delete 删除、双击文本改内容 |
+| 样式 | 调色板（8 预设色 + 完整取色器）、线宽/字号联动滑杆、全量撤销/重做 |
+| 导出 | 复制到剪贴板（Ctrl+C / Enter / 双击）、保存 PNG（Ctrl+S） |
+| 贴图 | 选区钉在屏幕上置顶悬浮（Ctrl+P / 图钉按钮），独立进程可多个并存；拖拽移动、滚轮缩放（25%–400%，光标锚定）、双击复制、置顶切换、图像下方条带工具条 |
+| 识别 | 选区内容直接识别二维码 / OCR 文字，结果一键复制 |
 
-**命令行直达**（无界面，适合脚本与快捷键绑定）
+### 托盘常驻（`lscreen`）
 
-- `shot` 截屏、`record` GIF 录屏（gifski 编码）、`qr` 二维码识别、
-  `ocr` 文字识别、`pick` 屏幕取色器、`pin` 贴图（`lscreen pin -i img.png`）
+不带参数运行即静默驻留后台（空闲内存 < 10MB），托盘菜单 + 全局热键随时唤起，每个动作是独立子进程，用完即退。默认热键 **F1 截图**。
+
+### 命令行直达
+
+无界面运行，适合脚本与快捷键绑定：
+
+| 子命令 | 功能 |
+|---|---|
+| `shot` | 截屏（全屏/区域，输出文件或剪贴板） |
+| `record` | GIF 录屏（gifski 编码） |
+| `qr` | 二维码识别（屏幕/图片） |
+| `ocr` | 文字识别（屏幕/图片，自动选择引擎） |
+| `pick` | 屏幕取色器 |
+| `pin` | 贴图（`lscreen pin -i img.png`） |
 
 ## 安装
 
-从 [Releases](https://github.com/crazykun/LaterScreen/releases) 下载对应平台的包
-（Linux 覆盖 x64 / arm64 / armv7 / x86 四种架构）：
+从 [Releases](https://github.com/crazykun/LaterScreen/releases) 下载对应平台的包（Linux 覆盖 x64 / arm64 / armv7 / x86 四种架构）：
 
 | 平台 | 包 | 安装方式 |
 |---|---|---|
@@ -72,7 +81,11 @@ lscreen shot -o out.png                # 无界面截全屏
 lscreen shot --region 100,100,800,600 --clipboard         # 截区域进剪贴板
 ```
 
-各子命令选项（完整以 `lscreen <子命令> --help` 为准）：
+> 注意：所有 `--region X,Y,W,H` 参数使用**物理像素**坐标（截图/录屏的实际像素），HiDPI 缩放下与桌面环境显示的「逻辑分辨率」不同。多显示器时坐标基于虚拟桌面原点。
+
+### 子命令选项
+
+完整以 `lscreen <子命令> --help` 为准：
 
 | 子命令 | 选项 | 说明 |
 |---|---|---|
@@ -85,9 +98,6 @@ lscreen shot --region 100,100,800,600 --clipboard         # 截区域进剪贴�
 | | `--fps <1-30>` | 帧率，缺省 10 |
 | | `--quality <1-100>` | GIF 编码质量，缺省 90 |
 | | `-o, --output <路径>` | 输出 `.gif` 路径，缺省 `~/Pictures` |
-
-录屏期间会弹出一个置顶状态窗口（已录时长/帧数 + 停止按钮），按 Esc 或点
-「停止录制」结束；终端内直接运行也可 Ctrl+C 停止。
 | `ocr` | `--region X,Y,W,H` | 识别区域，缺省整主屏 |
 | | `-i, --input <图片>` | 从图片识别（PNG/JPEG），指定时忽略 `--region` |
 | | `--lang <语言>` | 识别语言，可多次，如 `--lang chi_sim --lang eng` |
@@ -101,7 +111,9 @@ lscreen shot --region 100,100,800,600 --clipboard         # 截区域进剪贴�
 | `config` | — | 打开配置面板 |
 | `gui` | — | 交互式截图，与托盘模式的「截图」动作相同 |
 
-交互模式快捷键：
+录屏期间会弹出一个置顶状态窗口（已录时长/帧数 + 停止按钮），按 Esc 或点「停止录制」结束；终端内直接运行也可 Ctrl+C 停止。
+
+### 交互模式快捷键
 
 | 键 | 功能 |
 |---|---|
@@ -113,36 +125,44 @@ lscreen shot --region 100,100,800,600 --clipboard         # 截区域进剪贴�
 | Delete / Backspace | 删除选中元素 |
 | Esc | 关闭弹窗 / 取消选中 / 退出 |
 
-### 托盘常驻与全局热键
+### 托盘与全局热键
 
-不带参数的 `lscreen` 即托盘常驻模式：静默驻留后台（空闲内存 < 10MB），托盘菜单
-（截图/取色/贴图/录屏/配置/退出）与全局热键随时唤起功能，每个动作是独立子进程，
-用完即退。默认热键 **F1 截图**（Snipaste 惯例；可在配置面板修改，如
-`Ctrl+Alt+A`——注意 Deepin 等桌面已把该组合占用为系统截图键）。
+- 托盘菜单：截图 / 取色 / 贴图 / 录屏 / 配置 / 退出
+- 默认热键 **F1 截图**（Snipaste 惯例），可在配置面板修改，如 `Ctrl+Alt+A`——注意 Deepin 等桌面已把该组合占用为系统截图键
+- 托盘实现：Linux 走 ksni（纯 Rust 的 StatusNotifierItem/D-Bus 直连，无动态库依赖）；Windows/macOS 走 tray-icon（系统原生 API）
+- 全局热键在 Wayland 会话（无 X11）不可用，托盘与菜单不受影响
 
-托盘实现：Linux 走 ksni（纯 Rust 的 StatusNotifierItem/D-Bus 直连，无动态库依赖）；
-Windows/macOS 走 tray-icon（系统原生 API）。全局热键在 Wayland 会话（无 X11）不可用，
-托盘与菜单不受影响。
+### 配置文件
 
-配置文件 `~/.config/lscreen/config.toml`（Win `%APPDATA%\lscreen`、mac
-`~/Library/Application Support/lscreen`）：保存目录、文件名模板
-（默认 `lscreen_{YYYYMMDD}_{HHMMSS}`）、默认工具/颜色/线宽、复制后是否自动退出、
-保存后是否打开目录、三个全局热键。零配置完全可用（无文件时全默认值且不生成文件）；
-`lscreen config` 面板保存后，运行中的托盘 1 秒内自动热加载。
+路径按平台：
 
-注意：所有 `--region X,Y,W,H` 参数使用**物理像素**坐标（截图/录屏的实际像素），
-HiDPI 缩放下与桌面环境显示的"逻辑分辨率"不同。多显示器时坐标基于虚拟桌面原点。
+| 平台 | 路径 |
+|---|---|
+| Linux | `~/.config/lscreen/config.toml` |
+| Windows | `%APPDATA%\lscreen\config.toml` |
+| macOS | `~/Library/Application Support/lscreen/config.toml` |
+
+可配置项：保存目录、文件名模板（默认 `lscreen_{YYYYMMDD}_{HHMMSS}`）、默认工具/颜色/线宽、复制后是否自动退出、保存后是否打开目录、三个全局热键。
+
+零配置完全可用（无文件时全默认值且不生成文件）；`lscreen config` 面板保存后，运行中的托盘 1 秒内自动热加载。
 
 ## 运行环境
 
-- **Linux**：交互模式需 X11 桌面（`DISPLAY`）；Wayland 会话暂不支持（规划中）。
-  截屏为纯 Rust X11 协议实现，运行时无需任何额外库
-- **Windows / macOS**：走系统 API（xcap），无外部依赖
-- `ocr` 自动选择引擎：Windows 用系统 `Windows.Media.Ocr`、macOS 用系统 Vision
-  （支持中文、零依赖），Linux 优先系统 tesseract（支持中文，`sudo apt install
-  tesseract-ocr tesseract-ocr-chi-sim`）；系统引擎不可用时回退内置纯 Rust ocrs
-  引擎（零依赖，仅拉丁字母，首次使用自动下载约 4MB 模型到 `~/.cache/ocrs`）
-- Linux 上复制后由分离的守护子进程持有剪贴板，被覆盖后自动退出，无需常驻
+| 平台 | 说明 |
+|---|---|
+| Linux | 交互模式需 X11 桌面（`DISPLAY`）；Wayland 会话暂不支持（规划中）。截屏为纯 Rust X11 协议实现，运行时无需任何额外库 |
+| Windows / macOS | 走系统 API（xcap），无外部依赖 |
+
+OCR 引擎自动选择：
+
+| 平台 | 引擎 | 说明 |
+|---|---|---|
+| Windows | 系统 `Windows.Media.Ocr` | 支持中文，零依赖 |
+| macOS | 系统 Vision | 支持中文，零依赖 |
+| Linux | 系统 tesseract（优先） | 支持中文：`sudo apt install tesseract-ocr tesseract-ocr-chi-sim` |
+| 全平台兜底 | 内置纯 Rust ocrs 引擎 | 零依赖，仅拉丁字母，首次使用自动下载约 4MB 模型到 `~/.cache/ocrs` |
+
+Linux 上复制后由分离的守护子进程持有剪贴板，被覆盖后自动退出，无需常驻。
 
 ## 从源码构建
 
@@ -160,10 +180,11 @@ Linux 构建仅需 Rust 工具链，无 C 库依赖。开发约定见 [AGENTS.md
 
 一键打包脚本 `scripts/package.sh`，产物统一进 `dist/`（含 SHA256SUMS）：
 
-- **Linux**（x64 / arm64 / armv7 / x86）：tar.gz + deb + rpm + AppImage
-- **Windows**（x64）：zip + 自绘安装器 exe（egui 单屏向导，per-user 安装，
-  内嵌主程序，`crates/setup`；无需 NSIS/makensis）
-- **macOS**（arm64 / x64）：tar.gz + dmg（仅 CI 出包）
+| 平台 | 架构 | 产物 |
+|---|---|---|
+| Linux | x64 / arm64 / armv7 / x86 | tar.gz + deb + rpm + AppImage |
+| Windows | x64 | zip + 自绘安装器 exe（egui 单屏向导，per-user 安装，内嵌主程序，`crates/setup`；无需 NSIS） |
+| macOS | arm64 / x64 | tar.gz + dmg（仅 CI 出包） |
 
 ```bash
 scripts/package.sh              # 打包本机具备工具链的全部默认目标
@@ -186,12 +207,9 @@ git tag v0.2.0 && git push --tags   # 自动构建全平台包并发布 GitHub R
 
 ## 路线图
 
-已完成：截图标注、取色器、二维码、OCR（Windows 系统 OCR / macOS Vision /
-Linux tesseract + 内置 ocrs 兜底）、GIF 录屏、图标化工具栏、CLI 无界面模式、
-贴图（Pin to screen）、Windows 自绘安装器、全平台打包发布、
-托盘常驻 + 全局热键 + 配置面板。
+**已完成**：截图标注、取色器、二维码、OCR（Windows 系统 OCR / macOS Vision / Linux tesseract + 内置 ocrs 兜底）、GIF 录屏、图标化工具栏、CLI 无界面模式、贴图（Pin to screen）、Windows 自绘安装器、全平台打包发布、托盘常驻 + 全局热键 + 配置面板。
 
-规划中（详见 [docs/PLAN.md](docs/PLAN.md)）：
+**规划中**（详见 [docs/PLAN.md](docs/PLAN.md)）：
 
 - MP4 录屏（系统编码器）、滚动长截图
 - Wayland 支持（xdg-desktop-portal）、混合 DPI 多显示器
@@ -207,8 +225,7 @@ crates/
   record/    GIF 录屏编码（gifski）
 ```
 
-交互期用 egui Painter 实时绘制，导出用 tiny-skia 软渲染合成，两条路径共享同一份
-图元数据。设计细节与里程碑见 [docs/PLAN.md](docs/PLAN.md)。
+交互期用 egui Painter 实时绘制，导出用 tiny-skia 软渲染合成，两条路径共享同一份图元数据。设计细节与里程碑见 [docs/PLAN.md](docs/PLAN.md)。
 
 ## License
 
