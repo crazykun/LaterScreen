@@ -98,6 +98,16 @@
   .term .p { color: #56d364; }
   .term .cmd { color: #e6edf3; }
 
+  /* ===== 首屏截图 ===== */
+  .shot {
+    margin: 56px auto 0; max-width: 820px;
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: 0 20px 60px rgba(0,0,0,.45), 0 0 80px rgba(47,139,232,.12);
+    overflow: hidden;
+  }
+  .shot img { display: block; width: 100%; height: auto; }
+  .shot-cap { margin-top: 14px; font-size: 13px; color: var(--text-dim); text-align: center; }
+
   /* ===== 区块通用 ===== */
   section { padding: 72px 0; }
   section h2 { font-size: clamp(26px, 4vw, 34px); font-weight: 800; text-align: center; letter-spacing: -.5px; }
@@ -196,13 +206,11 @@
     </div>
     <p class="ver" id="ver">最新版本 v0.2.0</p>
 
-    <div class="term">
+    <figure class="shot">
       <div class="term-bar"><i></i><i></i><i></i></div>
-      <pre><span class="p">$</span> <span class="cmd">lscreen</span>                <span class="c"># 交互截图：框选 → 标注 → 复制/保存/贴图</span>
-<span class="p">$</span> <span class="cmd">lscreen pick</span>           <span class="c"># 屏幕取色，单击复制 HEX</span>
-<span class="p">$</span> <span class="cmd">lscreen ocr</span>            <span class="c"># 屏幕文字识别，直接输出</span>
-<span class="p">$</span> <span class="cmd">lscreen record -o a.gif</span> <span class="c"># GIF 录屏，Ctrl+C 停止</span></pre>
-    </div>
+      <img src="img/image.png" alt="LaterScreen 截图标注界面：框选区域与标注工具栏" width="896" height="497">
+    </figure>
+    <p class="shot-cap">框选 → 标注 → 复制/保存，全程不离手</p>
   </div>
 </section>
 
@@ -251,7 +259,9 @@
     <p class="lead">每个功能都有无界面模式，绑定快捷键、写进脚本、塞进 CI 都行。</p>
     <div class="term" style="margin-top: 0; max-width: 820px;">
       <div class="term-bar"><i></i><i></i><i></i></div>
-      <pre><span class="p">$</span> <span class="cmd">lscreen shot --region 0,0,1920,1080 -o shot.png</span>   <span class="c"># 定点截屏</span>
+      <pre><span class="p">$</span> <span class="cmd">lscreen</span>                                           <span class="c"># 托盘常驻，F1 随时截图</span>
+<span class="p">$</span> <span class="cmd">lscreen pick</span>                                      <span class="c"># 屏幕取色，单击复制 HEX</span>
+<span class="p">$</span> <span class="cmd">lscreen shot --region 0,0,1920,1080 -o shot.png</span>   <span class="c"># 定点截屏</span>
 <span class="p">$</span> <span class="cmd">lscreen shot --clipboard</span>                          <span class="c"># 全屏进剪贴板</span>
 <span class="p">$</span> <span class="cmd">lscreen ocr -i doc.png --lang chi_sim --lang eng</span>  <span class="c"># 图片文字识别</span>
 <span class="p">$</span> <span class="cmd">lscreen qr -i photo.png</span>                           <span class="c"># 图片二维码识别</span>
