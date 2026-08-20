@@ -59,6 +59,13 @@
 | Windows（免安装） | `*.zip` | 解压即用 |
 | macOS | `*.dmg` | 拖入 Applications；未签名，首次需右键 → 打开 |
 
+macOS 未签名应用会被 Gatekeeper 拦截（「已损坏 / 无法打开」），除右键 → 打开外，
+也可清除隔离属性一次性放行：
+
+```bash
+xattr -d com.apple.quarantine /Applications/LaterScreen.app
+```
+
 或从源码安装（仅需 Rust 工具链，无 C 库依赖）：
 
 ```bash
