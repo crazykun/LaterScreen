@@ -206,6 +206,44 @@ Snipaste 的招牌能力：截完把图钉在屏幕上置顶悬浮，方便对�
       **zbus 钉 =5.18.0**（5.19 在 default-features=false + blocking-api 组合下
       自身编译失败，上游打包缺陷，修复后放开）
 
+### M9 窗口截图（选中最前窗口，默认截当前窗口）
+
+Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默认选区就是当前
+最前面的窗口**；移动鼠标时自动高亮悬停处的窗口，单击即选中该窗口区域。
+
+设计原则：**窗口矩形只用来「吸附选区」，像素仍来自已截好的全屏图**。
+不做单窗口独立采集（XGetImage 单窗口 / PrintWindow / CGWindowListCreateImage），
+避免被遮挡窗口内容缺失、DWM 圆角阴影裁剪等一堆平台坑；截图语义 =
+「屏幕上此刻看到的这个窗口区域」，与现有覆盖层管线零冲突。
+
+- [ ] capture 新增窗口枚举 API：
+      `WindowInfo { id, title, rect: (x,y,w,h), z_order, is_minimized }` +
+      `list_windows() -> Vec<WindowInfo>`（按 Z 序自顶向下）+
+      `frontmost_window() -> Option<WindowInfo>`
+      - Linux X11（x11rb，纯 Rust）：`_NET_CLIENT_LIST_STACKING` 取 Z 序，
+        `_NET_ACTIVE_WINDOW` 取最前窗口；几何用 GetGeometry +
+        TranslateCoordinates 折算到根坐标，`_NET_FRAME_EXTENTS` 补装饰边框；
+        过滤 `_NET_WM_STATE_HIDDEN`（最小化）与非当前桌面窗口
+      - Windows / macOS：xcap `Window::all()` 已有枚举（含几何/最小化状态），
+        最前窗口 Win 用 GetForegroundWindow、mac 用 CGWindowList 首个
+        on-screen 普通层窗口；封装进 other.rs 保持接口一致
+      - Wayland：portal 无窗口几何能力，明确降级为纯手动框选（不报错）
+- [ ] 关键时序：**窗口列表必须在覆盖层窗口创建前采集**（与全屏截图同时机），
+      否则覆盖层自己就是最前窗口；列表里同时按自身 pid/窗口 id 排除自己
+      与贴图窗口（贴图常驻置顶，避免截图时总是吸到贴图上）
+- [ ] 覆盖层交互（对齐 Snipaste）：
+      - 进入截图：初始选区 = 最前窗口矩形（与屏幕求交），一步 Enter/双击
+        即可出图 ——「默认截图当前窗口」
+      - 未按下拖拽时：鼠标移动实时命中悬停窗口（Z 序自顶向下第一个含点者），
+        高亮其边框 + 角落显示标题/尺寸；单击 = 选中该窗口
+      - 一旦开始拖拽即进入自由框选，行为与现状完全一致；选中窗口后仍可
+        拖边缘微调（复用现有可调整选区）
+- [ ] CLI：`lscreen shot --window`（最前窗口直接出图）、
+      `--window-at x,y`（取该点下窗口，供脚本用）
+- [ ] 配置面板：新增「默认选区」选项（最前窗口 / 全屏 / 无），默认最前窗口
+- [ ] 验收：Deepin/KWin X11 真机——初始选区即当前窗口、悬停高亮跟手、
+      多屏负坐标窗口矩形正确；Win/mac 待真机确认（CI 无桌面）
+
 ### 遗留 TODO（review 2026-08-17）
 
 - [x] clipd 静默失败（✅ 2026-08-18）：守护进程在 X 连接 + 协议校验全部通过后
