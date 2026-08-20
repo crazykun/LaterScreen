@@ -41,8 +41,8 @@ pub enum Action {
 const MENU_ACTIONS: &[(Action, &str)] = &[
     (Action::Screenshot, "截图"),
     (Action::Picker, "取色"),
-    (Action::Pin, "贴图（剪贴板）"),
-    (Action::Record, "录屏（框选区域）"),
+    (Action::Pin, "贴图"),
+    (Action::Record, "录屏"),
     (Action::Config, "配置"),
     (Action::Quit, "退出"),
 ];
