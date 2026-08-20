@@ -41,6 +41,11 @@
     border-bottom: 1px solid var(--border);
   }
   .nav { display: flex; align-items: center; gap: 10px; height: 60px; }
+  .nav .brand {
+    display: flex; align-items: center; gap: 10px;
+    color: var(--text); transition: opacity .15s;
+  }
+  .nav .brand:hover { text-decoration: none; opacity: .78; }
   .nav .logo { width: 28px; height: 28px; border-radius: 7px; }
   .nav .name { font-weight: 700; font-size: 17px; letter-spacing: .2px; }
   .nav .links { margin-left: auto; display: flex; gap: 22px; font-size: 14.5px; }
@@ -149,7 +154,7 @@
   }
 </style>
 </head>
-<body>
+<body id="top">
 
 <!-- Logo：内联 SVG 复刻 packaging/icon.png（蓝底圆角 + 选区括角 + 中心点） -->
 <svg width="0" height="0" style="position:absolute">
@@ -169,8 +174,10 @@
 
 <header>
   <div class="wrap nav">
-    <svg class="logo"><use href="#logo"/></svg>
-    <span class="name">LaterScreen</span>
+    <a class="brand" href="#top" aria-label="返回顶部">
+      <svg class="logo"><use href="#logo"/></svg>
+      <span class="name">LaterScreen</span>
+    </a>
     <nav class="links">
       <a href="#features">特性</a>
       <a href="#cli">命令行</a>
