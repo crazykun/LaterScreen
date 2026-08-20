@@ -11,7 +11,12 @@ use lscreen_capture::Screenshot;
 use lscreen_core::render::Renderer;
 use lscreen_core::{Document, ElementKind, RectF, Rgba, Style, Tool, P2};
 
+use crate::config::Config;
 use crate::export;
+use std::sync::{Arc, Mutex};
+
+/// 交互框选出的区域（`record --select` 用）：覆盖层写入，主流程读取。
+pub type SharedRegion = Arc<Mutex<Option<RectF>>>;
 
 /// 图像物理像素 <-> egui 逻辑点 的换算。
 #[derive(Clone, Copy)]
@@ -50,11 +55,13 @@ pub enum Stage {
     Editing,
 }
 
-/// 启动模式：常规截图 / 纯取色器（`lscreen pick`）。
+/// 启动模式：常规截图 / 纯取色器（`lscreen pick`）/ 录屏框选（`record --select`）。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Snip,
     Pick,
+    /// 框选完成后不进标注，而是把区域写入 record_region 并关窗
+    Record,
 }
 
 /// 一次按下-拖拽-释放手势正在进行的操作。
@@ -130,6 +137,10 @@ pub struct SnipApp {
     toast: Option<(String, f64)>,
     /// 复制/保存出错时置 false 阻止退出
     close_requested: bool,
+    /// 用户配置（默认工具/颜色/线宽、复制后是否自动退出、保存后是否开目录）
+    pub config: Config,
+    /// Mode::Record 专用：框选完成后的输出通道
+    pub record_region: Option<SharedRegion>,
 }
 
 impl SnipApp {
@@ -138,6 +149,8 @@ impl SnipApp {
         shot: Screenshot,
         font: Option<Vec<u8>>,
         mode: Mode,
+        config: Config,
+        record_region: Option<SharedRegion>,
     ) -> Self {
         // 先用 Renderer 解析一遍：epaint 内部同样用 ab_glyph，且解析失败是 panic!
         // 而非 Err。这里只把已确认可解析的字节交给 egui，坏字体退回内置字体。
@@ -147,6 +160,9 @@ impl SnipApp {
                 crate::font::setup_egui_fonts(&cc.egui_ctx, bytes);
             }
         }
+        // 默认工具与样式来自配置（M8）
+        let tool = config.tool();
+        let style = config.style();
         Self {
             shot,
             texture: None,
@@ -155,8 +171,8 @@ impl SnipApp {
             mode,
             stage: Stage::Selecting,
             region: RectF::default(),
-            tool: Tool::Select,
-            style: Style::default(),
+            tool,
+            style,
             hover: None,
             selected: None,
             drag: None,
@@ -169,6 +185,8 @@ impl SnipApp {
             scan_job: None,
             toast: None,
             close_requested: false,
+            config,
+            record_region,
         }
     }
 
@@ -238,7 +256,13 @@ impl SnipApp {
             return;
         };
         match export::copy_to_clipboard(&rgba, w, h) {
-            Ok(()) => self.request_close(ctx),
+            Ok(()) => {
+                if self.config.copy_auto_exit {
+                    self.request_close(ctx);
+                } else {
+                    self.toast(ctx, "已复制到剪贴板");
+                }
+            }
             Err(e) => self.toast(ctx, format!("复制失败: {e}")),
         }
     }
@@ -248,10 +272,15 @@ impl SnipApp {
             self.toast(ctx, "选区为空");
             return;
         };
-        let path = export::default_save_path("png");
+        let path = export::save_path(&self.config, "png");
         match export::save_png(&rgba, w, h, &path) {
             Ok(saved) => {
                 println!("{}", saved.display());
+                if self.config.open_dir_after_save {
+                    if let Some(dir) = saved.parent() {
+                        export::open_in_file_manager(dir);
+                    }
+                }
                 self.request_close(ctx);
             }
             Err(e) => self.toast(ctx, format!("保存失败: {e}")),

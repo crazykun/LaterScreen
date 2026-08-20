@@ -20,7 +20,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 - `crates/core`（lscreen-core）：图元模型、撤销栈、命中检测、tiny-skia 导出渲染、取色、二维码。**禁止依赖任何 UI/GUI crate**；CLI 与 egui 覆盖层都只是其上的薄壳。
 - `crates/capture`（lscreen-capture）：Linux 走自研 x11rb（X11，纯 Rust）；Win/mac 走 xcap。平台差异必须收敛在此 crate，不得泄漏到 app/core。
-- `crates/app`（lscreen）：clap CLI 入口 + egui 覆盖层（`src/ui/`）。
+- `crates/app`（lscreen）：clap CLI 入口 + egui 覆盖层（`src/ui/`）+ 托盘常驻（`src/tray.rs`）+ 配置（`src/config.rs`）+ 配置面板（`src/settings_ui.rs`）。**裸 `lscreen` = 静默驻留后台托盘**，`lscreen gui` 才直达截图。
 - `crates/ocr`（lscreen-ocr）：Windows `Windows.Media.Ocr` / macOS Vision / Linux 子进程调用系统 tesseract（stdin/stdout 管道，TSV 解析），内置 ocrs 纯 Rust 引擎作零依赖兜底。**OCR 是「无动态库依赖」目标的唯一豁免项**，不得引入链接型依赖。
 - `crates/record`（lscreen-record）：录屏编码（GIF 走 gifski）。帧源以闭包注入，不依赖截屏实现；任何失败路径都要收尾编码线程并清理半成品文件。
 - `crates/setup`（lscreen-setup）：仅 Windows 的自绘安装器（egui）。主程序经构建期 `LSCREEN_BIN` 环境变量内嵌（build.rs 指纹触发重编译）；未内嵌时为占位可在任意平台编译。per-user 安装（%LOCALAPPDATA% + HKCU），不要引入需要管理员的路径。
@@ -31,7 +31,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 - **撤销/重做是全量快照**（`Vec<Vec<Element>>`），非命令模式；图片本体不进快照。
 - **体积硬约束**：发布产物 ≤ 20MB、单文件、无动态库依赖。workspace release profile 已做 `opt-level="z"` + fat LTO + strip + `panic="abort"`（无 unwind，勿依赖 catch_unwind）。新增依赖前先评估体积/链接影响。
 - 字体运行时从系统加载（`app/src/font.rs`，fc-match/平台字体目录），不捆绑字体文件。
-- egui/eframe 锁 0.35，勿随意升级（上游 API 变动快）。
+- egui/eframe 锁 0.35，勿随意升级（上游 API 变动快：0.35 已无 TopBottomPanel，面板用 Panel/手动分域；eframe::App 的入口方法是 `fn ui(&mut self, ui, frame)`）。
+- **托盘（M8）**：Linux ksni（纯 Rust SNI/D-Bus 直连，blocking+async-io 特性）；Win/mac tray-icon + winit 事件泵（winit 版本必须与 eframe 依赖一致）。**zbus 钉 =5.18.0**（5.19 上游打包缺陷自身编译失败），勿升。托盘动作全部 spawn 独立子进程（注意子命令名不能省——裸启动会递归驻留托盘）。
+- **配置（M8）**：`config.toml` 零配置不生成文件、缺失静默默认、损坏仅告警；托盘每秒轮询 mtime 热加载。默认热键 F1（Ctrl+Alt+A 与 Deepin 系统截图键冲突）。
 
 ## 环境注意事项
 

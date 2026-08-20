@@ -164,31 +164,47 @@ Snipaste 的招牌能力：截完把图钉在屏幕上置顶悬浮，方便对�
       --pos/--scale 校验前置；负坐标支持（`--pos=-1920,0` 或
       allow_hyphen_values 的空格写法）
 
-### M8 托盘 + 配置面板
+### M8 托盘 + 配置面板 ✅ 2026-08-19
 
 托盘是「小而美常驻」的主形态：一个空闲 < 30MB 的常驻体，负责热键监听与配置，
 截图/贴图/录屏窗口按需开、关掉即释放。CLI 子命令单次调用仍是即起即退，两种用法并存。
 
-- [ ] `lscreen tray` 子命令启动常驻托盘进程；不加参数的 `lscreen` 行为保持不变
-- [ ] 托盘选型：`tray-icon` crate（纯 Rust，Win/mac 原生 API；
-      Linux 走 libappindicator——**需评估是否引入动态库依赖**，若违反体积/静态
-      约束则 Linux 侧回退为 StatusNotifierItem 的 D-Bus 直连实现，或明确声明
-      Linux 托盘为可选特性 `--features tray`）
-- [ ] 托盘菜单：截图、取色、贴图、录屏、配置、退出
-- [ ] 配置面板（eframe 窗口）：
-      - 图片保存目录（替代当前硬编码的 `~/Pictures`）
-      - 文件名模板（默认 `lscreen_{YYYYMMDD}_{HHMMSS}`）
-      - 默认工具、默认颜色、默认线宽
-      - 复制后是否自动退出、保存后是否打开目录
-      - 全局快捷键绑定（截图/取色/贴图）
-- [ ] 全局快捷键：托盘模式下用 `global-hotkey` crate 自监听；
-      非托盘模式仍走系统/桌面环境绑定（§5 的原有对策不变）
-- [ ] 配置持久化：`~/.config/lscreen/config.toml`（Win `%APPDATA%`、
-      mac `~/Library/Application Support`）；解析用 `toml` + serde。
-      配置读取要向前兼容：未知字段忽略、缺失字段取默认值
-- [ ] 无配置文件时一切走默认值，不生成文件——保持零配置可用
-- [ ] 常驻内存回归：托盘空闲态 RSS ≤ 30MB，截图窗口关闭后回落到空闲水位
-      （验证纹理与 RGBA 真的被释放，而不是留在进程里）
+- [x] **默认行为变更（用户决策）**：裸 `lscreen` = 静默驻留后台托盘（分离子进程，
+      终端立即返回）；`lscreen gui` 直达交互截图；`lscreen tray --foreground` 前台
+      调试/自启动
+- [x] 托盘选型落地：**Linux 用 ksni**（纯 Rust 的 StatusNotifierItem/D-Bus 直连，
+      零动态库依赖——tray-icon 的 Linux 后端要链接 gtk/libappindicator，违反硬约束，
+      弃用）；Win/mac 用 tray-icon（系统原生 API），事件泵复用 eframe 已链接的
+      winit 0.30（macOS 要求托盘在主线程已运行的事件循环上创建）
+- [x] 托盘菜单：截图、取色、贴图（读剪贴板）、录屏（`record --select` 交互框选）、
+      配置、退出；菜单项带热键后缀；Linux 左键单击弹菜单（MENU_ON_ACTIVATE），
+      activate 兜底为直接截图
+- [x] 配置面板（`lscreen config`，settings_ui.rs）：保存目录、文件名模板、
+      默认工具/颜色/线宽、复制后自动退出、保存后打开目录、三个全局热键；
+      保存前全部校验（模板/热键/颜色/工具名），非法只提示不落盘
+- [x] 全局热键：`global-hotkey` crate（托盘进程内自监听）；**默认 F1 截图**
+      （Snipaste 惯例——实测 Ctrl+Alt+A 与 Deepin 系统截图键冲突）；注册失败/
+      Wayland 无 X11 时仅告警降级，托盘与菜单不受影响；裸键仅允许
+      PrintScreen/F1-F12（裸字母会全局抢占打字）
+- [x] 配置持久化：`~/.config/lscreen/config.toml`（Win `%APPDATA%`、
+      mac `~/Library/Application Support`）；`toml` + serde，未知字段忽略、
+      缺失字段取默认
+- [x] 零配置：无文件时静默全默认（不生成文件不告警），配置面板保存才落盘；
+      托盘每秒轮询 mtime，面板保存后 1 秒内热加载（热键重注册、菜单文案更新）
+- [x] 截图窗口接入配置：默认工具/颜色/线宽初始值、复制后是否自动退出
+      （关闭时不退只 toast）、保存目录与文件名模板、保存后打开目录
+- [x] 附带交付：`record --select`（框选即录，Esc 取消静默退出）
+- [x] 录屏状态窗口（2026-08-19 补）：录制在独立线程跑 `record_gif`，主线程跑
+      置顶状态窗口（已录时长/帧数/进度条 + 停止按钮），Esc 或按钮停止、关窗即停；
+      托盘 spawn 的录屏子进程脱离终端也能正常结束（此前只能等 --duration 超时）；
+      配置面板黑屏修复——egui 0.35 移除 TopBottomPanel 后改用 Panel::bottom +
+      CentralPanel 分域（原 allocate_rect 手动分域会把 ScrollArea 挤到底部 40px 条带）
+- [x] 常驻内存实测（Deepin 25 / X11）：托盘空闲 RSS ≈ 9MB（目标 ≤ 30MB）；
+      热键 F1/F2 唤起截图、菜单动作、托盘退出、配置热加载真机验证通过
+- [ ] Win/mac 托盘真机验证（tray-icon + winit 路径，CI 无桌面需手动确认）
+- [x] 依赖备注：ksni blocking 需 async 运行时，选 async-io（比 tokio 轻）；
+      **zbus 钉 =5.18.0**（5.19 在 default-features=false + blocking-api 组合下
+      自身编译失败，上游打包缺陷，修复后放开）
 
 ### 遗留 TODO（review 2026-08-17）
 
@@ -233,8 +249,8 @@ Snipaste 的招牌能力：截完把图钉在屏幕上置顶悬浮，方便对�
 | 风险 | 影响 | 对策 |
 |---|---|---|
 | Wayland 禁止直接抓屏 | Linux 部分桌面不可用 | 走 portal（M5）；X11 优先支持；边缘 compositor 明确声明不支持 |
-| 常驻进程内存膨胀 | 违反"小而美" | 常驻体不持有截图缓冲；截图/贴图窗口关闭即释放纹理与 RGBA；M8 加常驻内存回归检查 |
-| 全局热键被占用/注册失败 | 热键静默失效 | `global-hotkey` 注册返回值必须检查，失败时托盘菜单提示冲突并保留手动入口；仍支持退回桌面环境绑定 `lscreen` 命令 |
+| 常驻进程内存膨胀 | 违反"小而美" | 常驻体不持有截图缓冲；截图/贴图窗口关闭即释放纹理与 RGBA；✅ M8 实测托盘空闲 RSS ≈ 9MB |
+| 全局热键被占用/注册失败 | 热键静默失效 | ✅ 已实现：注册返回值逐条检查，失败告警（含默认 F1 与 Deepin 系统键冲突的实测经验）并保留托盘菜单手动入口；仍支持桌面环境绑定 `lscreen gui` 命令 |
 | X11 剪贴板随进程退出丢失 | 复制不可靠 | ✅ 已解决：分离守护子进程（arboard wait()）持有剪贴板，被覆盖后自动退出；遗留确认回执/僵尸收割见「遗留 TODO」 |
 | 混合 DPI 多显示器 | 覆盖层/坐标错位 | 单屏已自洽（View 比例映射）；多屏混合 DPI 在 M5 与 capture_all 一并处理 |
 | 纯 Rust 无 H.264 编码器 | MP4 依赖问题 | 系统编码器；GIF 先行（✅ 已完成） |

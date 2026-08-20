@@ -1,21 +1,27 @@
 //! lscreen: 跨平台截图标注工具。
 //!
-//! 当前形态：单次调用，进程只在截图/标注期间存活。全局唤起快捷键请在系统/桌面
-//! 环境中绑定到 `lscreen` 命令；托盘常驻模式见 `doc/PLAN.md` M8。
+//! 默认行为：无参数启动 = 静默驻留后台的托盘进程（截图等动作由全局热键
+//! 或托盘菜单按需唤起，子进程用完即退）。`lscreen gui` 直接进交互截图；
+//! 其余子命令单次调用即起即退。
 
+mod config;
 mod export;
 mod font;
 mod pin;
+mod record_ui;
+mod settings_ui;
+mod tray;
 mod ui;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use ui::SharedRegion;
 
 #[derive(Parser)]
 #[command(
     name = "lscreen",
     version,
-    about = "LaterScreen - 跨平台截图标注工具（截图/标注/取色/OCR）"
+    about = "LaterScreen - 跨平台截图标注工具（截图/标注/取色/OCR/录屏/贴图/托盘）"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -24,7 +30,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// 交互式截图（默认行为）
+    /// 常驻托盘（默认行为）：后台常驻，热键/菜单随时唤起各功能
+    Tray {
+        /// 前台运行（调试/自启动用；默认分离到后台，终端立即返回）
+        #[arg(long)]
+        foreground: bool,
+    },
+    /// 交互式截图（立即打开截图覆盖层）
     Gui,
     /// 屏幕取色器：放大镜取景，单击复制 HEX，Ctrl+R/H/K 复制 RGB/HEX/CMYK
     Pick,
@@ -54,6 +66,9 @@ enum Cmd {
         /// 录制区域，格式 X,Y,W,H（物理像素）；缺省为整个主屏
         #[arg(long, value_name = "X,Y,W,H", allow_hyphen_values = true)]
         region: Option<String>,
+        /// 先交互框选录制区域（框完立即开始录制）
+        #[arg(long)]
+        select: bool,
         /// 最长录制时长（秒）
         #[arg(long, default_value_t = 30.0)]
         duration: f32,
@@ -91,6 +106,8 @@ enum Cmd {
         #[arg(short, long)]
         clipboard: bool,
     },
+    /// 打开配置面板（保存后托盘进程自动热加载）
+    Config,
 }
 
 fn main() {
@@ -110,7 +127,10 @@ fn main() {
 
     let cli = Cli::parse();
     let result = match cli.cmd {
-        None | Some(Cmd::Gui) => run_gui(ui::Mode::Snip),
+        // 无参数 = 托盘静默驻留（用户明确要求的默认形态）
+        None => run_tray(false),
+        Some(Cmd::Tray { foreground }) => run_tray(foreground),
+        Some(Cmd::Gui) => run_gui(ui::Mode::Snip),
         Some(Cmd::Pick) => run_gui(ui::Mode::Pick),
         Some(Cmd::Qr { region, input }) => run_qr(region, input),
         Some(Cmd::Ocr {
@@ -120,22 +140,133 @@ fn main() {
         }) => run_ocr(region, input, languages),
         Some(Cmd::Record {
             region,
+            select,
             duration,
             fps,
             quality,
             output,
-        }) => run_record(region, duration, fps, quality, output),
+        }) => {
+            // --select 优先：先框选再录；取消框选则静默退出（非错误）
+            let region = if select {
+                match pick_region_interactive() {
+                    Ok(Some(r)) => Some(r),
+                    Ok(None) => return,
+                    Err(e) => {
+                        eprintln!("lscreen: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                region
+            };
+            run_record(region, duration, fps, quality, output)
+        }
         Some(Cmd::Shot {
             region,
             output,
             clipboard,
         }) => run_shot(region, output, clipboard),
         Some(Cmd::Pin { input, pos, scale }) => run_pin(input, pos, scale),
+        Some(Cmd::Config) => run_settings(),
     };
     if let Err(e) = result {
         eprintln!("lscreen: {e}");
         std::process::exit(1);
     }
+}
+
+/// 托盘入口：默认分离到后台（静默驻留），--foreground 保持前台便于调试。
+/// 分离方式 = 再拉起一个自身子进程（stdio 全断开 + 环境变量防递归），
+/// 父进程随即退出，终端立即返回；子进程被 init 收养，无僵尸问题。
+fn run_tray(foreground: bool) -> Result<(), String> {
+    use std::process::Stdio;
+    const CHILD_ENV: &str = "LSCREEN_TRAY_CHILD";
+    if !foreground && std::env::var_os(CHILD_ENV).is_none() {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        std::process::Command::new(exe)
+            .args(["tray", "--foreground"])
+            .env(CHILD_ENV, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("启动托盘进程失败: {e}"))?;
+        eprintln!("LaterScreen 已驻留后台：托盘菜单或全局热键唤起（lscreen tray --foreground 可前台运行）");
+        return Ok(());
+    }
+    tray::run()
+}
+
+/// 配置面板窗口。
+fn run_settings() -> Result<(), String> {
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_inner_size([440.0, 580.0])
+        .with_resizable(true);
+    let options = eframe::NativeOptions {
+        viewport,
+        ..Default::default()
+    };
+    eframe::run_native(
+        "lscreen 配置",
+        options,
+        Box::new(|cc| Ok(Box::new(settings_ui::SettingsApp::new(cc)))),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// 交互框选录制区域：复用截图覆盖层（Mode::Record），框完即关窗；
+/// 返回绝对物理坐标的 "X,Y,W,H"；用户 Esc 取消返回 None。
+fn pick_region_interactive() -> Result<Option<String>, String> {
+    let shot = match lscreen_capture::cursor_position() {
+        Some((x, y)) => {
+            lscreen_capture::capture_at(x, y).or_else(|_| lscreen_capture::capture_primary())
+        }
+        None => lscreen_capture::capture_primary(),
+    }
+    .map_err(|e| e.to_string())?;
+    let (ox, oy) = shot.origin;
+    let font = font::load_system_font();
+
+    let scale = if shot.scale > 0.0 { shot.scale } else { 1.0 };
+    let pos = eframe::egui::Pos2::new(ox as f32 / scale, oy as f32 / scale);
+    let size = eframe::egui::Vec2::new(shot.width as f32 / scale, shot.height as f32 / scale);
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_position(pos)
+        .with_inner_size(size)
+        .with_fullscreen(true)
+        .with_decorations(false)
+        .with_always_on_top();
+    let options = eframe::NativeOptions {
+        viewport,
+        ..Default::default()
+    };
+    let shared: SharedRegion = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let out = shared.clone();
+    eframe::run_native(
+        "lscreen-record",
+        options,
+        Box::new(move |cc| {
+            Ok(Box::new(ui::SnipApp::new(
+                cc,
+                shot,
+                font,
+                ui::Mode::Record,
+                config::Config::load(),
+                Some(shared),
+            )))
+        }),
+    )
+    .map_err(|e| e.to_string())?;
+    let region = (*out.lock().unwrap()).map(|r| {
+        format!(
+            "{},{},{},{}",
+            (ox as f32 + r.min.x) as i32,
+            (oy as f32 + r.min.y) as i32,
+            r.width() as u32,
+            r.height() as u32
+        )
+    });
+    Ok(region)
 }
 
 fn run_gui(mode: ui::Mode) -> Result<(), String> {
@@ -168,7 +299,16 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
     eframe::run_native(
         "lscreen",
         options,
-        Box::new(move |cc| Ok(Box::new(ui::SnipApp::new(cc, shot, font, mode)))),
+        Box::new(move |cc| {
+            Ok(Box::new(ui::SnipApp::new(
+                cc,
+                shot,
+                font,
+                mode,
+                config::Config::load(),
+                None,
+            )))
+        }),
     )
     .map_err(|e| e.to_string())
 }
@@ -266,7 +406,7 @@ fn run_record(
     output: Option<PathBuf>,
 ) -> Result<(), String> {
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     // 参数校验放在截屏之前：无头环境也能快速报错
     // NaN 会穿过 clamp，而 from_secs_f32 对 NaN/超范围值 panic
@@ -301,25 +441,74 @@ fn run_record(
 
     let path = output.unwrap_or_else(|| export::default_save_path("gif"));
     let stop = Arc::new(AtomicBool::new(false));
+    // ctrlc：交互终端里 Ctrl+C 与状态窗口 Esc 等效；非终端（托盘 spawn）下
+    // 收不到 SIGINT，靠状态窗口的停止按钮/Esc 结束
     {
         let stop = stop.clone();
-        ctrlc::set_handler(move || stop.store(true, Ordering::Relaxed))
-            .map_err(|e| e.to_string())?;
+        let _ = ctrlc::set_handler(move || stop.store(true, Ordering::Relaxed));
     }
 
-    eprintln!("录制中 {w}x{h}@{fps}fps，Ctrl+C 停止（最长 {secs} 秒）…");
-    let frames = lscreen_record::record_gif(
-        || {
-            lscreen_capture::capture_region(x, y, w, h)
-                .map(|s| (s.rgba, s.width, s.height))
-                .map_err(|e| lscreen_record::RecordError(e.to_string()))
-        },
-        &lscreen_record::GifOptions { fps, quality },
-        std::time::Duration::from_secs_f32(secs),
-        &stop,
-        &path,
+    let status = Arc::new(Mutex::new(record_ui::RecordStatus::default()));
+
+    // 录制线程：独立跑采帧+编码（X11 每次截屏新建连接，跨线程安全），
+    // 主线程跑状态窗口事件循环，两者互不阻塞。grab_frame 每采一帧就把
+    // 时长/帧数写进共享状态，状态窗口 0.5s 刷一次即读到实时值。
+    let (th_stop, th_status, th_path) = (stop.clone(), status.clone(), path.clone());
+    let th_duration = std::time::Duration::from_secs_f32(secs);
+    let recorder = std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        let mut frames = 0usize;
+        // 内层 grab 闭包 move 捕获，这里单独 clone 一份，外层结尾仍要用 th_status
+        let status_inner = th_status.clone();
+        let result = lscreen_record::record_gif(
+            move || {
+                let shot = lscreen_capture::capture_region(x, y, w, h)
+                    .map(|s| (s.rgba, s.width, s.height))
+                    .map_err(|e| lscreen_record::RecordError(e.to_string()))?;
+                frames += 1;
+                let mut st = status_inner.lock().unwrap();
+                st.elapsed = start.elapsed().as_secs_f32();
+                st.frames = frames;
+                Ok(shot)
+            },
+            &lscreen_record::GifOptions { fps, quality },
+            th_duration,
+            &th_stop,
+            &th_path,
+        );
+        // 无论成败，都让状态窗口知道录制已结束（自然到时/出错/被停止）
+        th_status.lock().unwrap().done = true;
+        (start.elapsed().as_secs_f32(), result)
+    });
+
+    // 状态窗口：停止按钮/Esc 置 stop；窗口被关（含 done 自动关）后收尾
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_inner_size([320.0, 150.0])
+        .with_resizable(false)
+        .with_always_on_top()
+        .with_title("lscreen 录制");
+    let options = eframe::NativeOptions {
+        viewport,
+        ..Default::default()
+    };
+    let app = record_ui::RecordApp {
+        stop: stop.clone(),
+        status: status.clone(),
+        max_duration: secs,
+    };
+    eframe::run_native(
+        "lscreen-record-status",
+        options,
+        Box::new(move |_cc| Ok(Box::new(app))),
     )
     .map_err(|e| e.to_string())?;
+
+    // 事件循环退出（用户停止/窗口关闭/录制完成自动关）：确保录制线程收尾
+    stop.store(true, Ordering::Relaxed);
+    let (_elapsed, result) = recorder
+        .join()
+        .map_err(|_| "录制线程异常退出".to_string())?;
+    let frames = result.map_err(|e| e.to_string())?;
     eprintln!("已录制 {frames} 帧");
     println!("{}", path.display());
     Ok(())

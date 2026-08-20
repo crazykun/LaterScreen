@@ -39,37 +39,46 @@ pub fn compose(
     crop_rgba(&full, w, h, region)
 }
 
-/// 默认保存路径：~/Pictures（存在时）或当前目录，文件名带时间戳。
-/// 同秒内多次保存自动追加序号，不覆盖既有文件。
-/// ext 为扩展名（"png" / "gif"）：查重必须针对最终写入的文件名，
+/// 默认保存路径（读取用户配置）：目录来自 config.save_dir（空则 ~/Pictures
+/// 存在时/否则家目录），文件名由模板渲染；同秒内多次保存自动追加序号，
+/// 不覆盖既有文件。ext 为扩展名（"png" / "gif"）：查重针对最终写入的文件名，
 /// 先查 png 再改后缀会让 GIF 路径的防覆盖检查失效。
 pub fn default_save_path(ext: &str) -> PathBuf {
-    let stamp = timestamp();
-    let name = format!("lscreen_{stamp}.{ext}");
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from);
-    let dir = match &home {
-        Some(home) if home.join("Pictures").is_dir() => home.join("Pictures"),
-        Some(home) => home.clone(),
-        None => PathBuf::from("."),
-    };
-    let mut path = dir.join(name);
+    save_path(&crate::config::Config::load(), ext)
+}
+
+/// 按配置生成保存路径。
+pub fn save_path(cfg: &crate::config::Config, ext: &str) -> PathBuf {
+    let name = crate::config::render_template(&cfg.filename_template, save_time());
+    let dir = cfg.save_dir_override().unwrap_or_else(default_dir);
+    let mut path = dir.join(format!("{name}.{ext}"));
     let mut n = 1;
     while path.exists() {
-        path = dir.join(format!("lscreen_{stamp}_{n}.{ext}"));
+        path = dir.join(format!("{name}_{n}.{ext}"));
         n += 1;
     }
     path
 }
 
-fn timestamp() -> String {
+/// 默认保存目录：~/Pictures（存在时）或家目录。
+pub fn default_dir() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    match &home {
+        Some(home) if home.join("Pictures").is_dir() => home.join("Pictures"),
+        Some(home) => home.clone(),
+        None => PathBuf::from("."),
+    }
+}
+
+/// 当前本地时间 (年,月,日,时,分,秒)。
+fn save_time() -> (i64, u32, u32, u32, u32, u32) {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0) as i64;
-    let (y, mo, d, h, mi, s) = local_civil(secs);
-    format!("{y:04}{mo:02}{d:02}_{h:02}{mi:02}{s:02}")
+    local_civil(secs)
 }
 
 /// unix 秒 → 本地时间 (年,月,日,时,分,秒)。
@@ -113,6 +122,7 @@ fn utc_civil(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
 
 /// 保存 PNG。无扩展名时补 `.png`；其他扩展名直接报错——
 /// `image::save` 按扩展名猜格式，RGBA→JPEG 之类的失败信息非常费解。
+/// 父目录不存在时自动创建（自定义保存目录首次使用）。
 /// 返回实际写入的路径（可能补过扩展名）。
 pub fn save_png(rgba: &[u8], w: u32, h: u32, path: &Path) -> Result<PathBuf, String> {
     let img = image::RgbaImage::from_raw(w, h, rgba.to_vec())
@@ -127,9 +137,33 @@ pub fn save_png(rgba: &[u8], w: u32, h: u32, path: &Path) -> Result<PathBuf, Str
     {
         return Err(format!("仅支持 PNG 输出: {}", out.display()));
     }
+    if let Some(dir) = out.parent() {
+        if !dir.as_os_str().is_empty() && !dir.is_dir() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("创建目录失败: {e}"))?;
+        }
+    }
     img.save_with_format(&out, image::ImageFormat::Png)
         .map_err(|e| e.to_string())?;
     Ok(out)
+}
+
+/// 在文件管理器中打开文件所在目录（尽力而为，失败不报错）。
+/// 平台命令：xdg-open / explorer / open；打开目录而非定位文件——
+/// 定位接口三平台不一致（org.freedesktop.FileManager2 等），保持简单。
+pub fn open_in_file_manager(dir: &Path) {
+    let prog = if cfg!(target_os = "windows") {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(prog)
+        .arg(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 pub fn copy_text_to_clipboard(text: &str) -> Result<(), String> {

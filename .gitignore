@@ -1,6 +1,6 @@
 /target
 **/*.rs.bk
 *.png
-!doc/**/*.png
+!docs/**/*.png
 /dist
 !packaging/icon.png

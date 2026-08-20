@@ -8,6 +8,8 @@
 **单文件、≤20MB、无动态库依赖、冷启动即用**，命令名 `lscreen`。
 目标对齐 Snipaste 级体验：截图、标注、取色、二维码、OCR、GIF 录屏、贴图。
 
+![主界面：框选 → 标注工具栏](docs/img/image.png)
+
 ## 特性
 
 **交互截图**（`lscreen`）
@@ -55,13 +57,17 @@ cargo install --path crates/app        # 装入 ~/.cargo/bin/lscreen
 ## 快速上手
 
 ```bash
-lscreen                                # 交互式截图（框选 → 标注 → 复制/保存）
+lscreen                                # 静默驻留后台（托盘 + 全局热键 F1 截图）
+lscreen gui                            # 直接进入交互式截图（框选 → 标注 → 复制/保存）
+lscreen tray --foreground              # 托盘前台运行（调试/自启动）
+lscreen config                         # 打开配置面板（热键/保存目录/默认工具等）
 lscreen pick                           # 屏幕取色器（单击复制 HEX 并退出）
 lscreen qr                             # 识别主屏上的二维码，输出到 stdout
 lscreen qr -i photo.png                # 识别图片文件中的二维码
 lscreen ocr --region 0,0,800,600       # 识别屏幕区域文字（自动选择引擎）
 lscreen ocr -i doc.png --lang chi_sim --lang eng          # 识别图片文字
-lscreen record --region 0,0,800,600 --fps 10 -o demo.gif  # 录屏 GIF，Ctrl+C 停止
+lscreen record --select --fps 10       # 交互框选区域录制 GIF，状态窗口内 Esc/停止按钮结束
+lscreen record --region 0,0,800,600 -o demo.gif           # 按区域直接录制（终端内 Ctrl+C 也可停）
 lscreen shot -o out.png                # 无界面截全屏
 lscreen shot --region 100,100,800,600 --clipboard         # 截区域进剪贴板
 ```
@@ -74,10 +80,14 @@ lscreen shot --region 100,100,800,600 --clipboard         # 截区域进剪贴�
 | | `-o, --output <路径>` | 输出 PNG 路径，缺省 `~/Pictures/lscreen_时间戳.png` |
 | | `-c, --clipboard` | 同时复制到剪贴板 |
 | `record` | `--region X,Y,W,H` | 录制区域，缺省整主屏 |
+| | `--select` | 先交互框选区域，框完立即开始录制（Esc 取消） |
 | | `--duration <秒>` | 最长录制时长，缺省 30 |
 | | `--fps <1-30>` | 帧率，缺省 10 |
 | | `--quality <1-100>` | GIF 编码质量，缺省 90 |
 | | `-o, --output <路径>` | 输出 `.gif` 路径，缺省 `~/Pictures` |
+
+录屏期间会弹出一个置顶状态窗口（已录时长/帧数 + 停止按钮），按 Esc 或点
+「停止录制」结束；终端内直接运行也可 Ctrl+C 停止。
 | `ocr` | `--region X,Y,W,H` | 识别区域，缺省整主屏 |
 | | `-i, --input <图片>` | 从图片识别（PNG/JPEG），指定时忽略 `--region` |
 | | `--lang <语言>` | 识别语言，可多次，如 `--lang chi_sim --lang eng` |
@@ -87,7 +97,9 @@ lscreen shot --region 100,100,800,600 --clipboard         # 截区域进剪贴�
 | `pin` | `-i, --input <图片>` | 贴图的图片文件；缺省从 stdin 读 PNG（覆盖层内部通道） |
 | | `--pos X,Y` | 窗口初始位置（逻辑点），支持负坐标 |
 | | `--scale <比例>` | 屏幕缩放比（物理像素/逻辑点），缺省 1.0 |
-| `gui` | — | 无选项，与不带子命令等价 |
+| `tray` | `--foreground` | 前台运行（缺省分离到后台，终端立即返回） |
+| `config` | — | 打开配置面板 |
+| `gui` | — | 交互式截图，与托盘模式的「截图」动作相同 |
 
 交互模式快捷键：
 
@@ -101,8 +113,22 @@ lscreen shot --region 100,100,800,600 --clipboard         # 截区域进剪贴�
 | Delete / Backspace | 删除选中元素 |
 | Esc | 关闭弹窗 / 取消选中 / 退出 |
 
-全局唤起快捷键请在系统/桌面环境的快捷键设置中绑定 `lscreen` 命令。
-托盘常驻模式（含内置热键与配置面板）规划中，见路线图。
+### 托盘常驻与全局热键
+
+不带参数的 `lscreen` 即托盘常驻模式：静默驻留后台（空闲内存 < 10MB），托盘菜单
+（截图/取色/贴图/录屏/配置/退出）与全局热键随时唤起功能，每个动作是独立子进程，
+用完即退。默认热键 **F1 截图**（Snipaste 惯例；可在配置面板修改，如
+`Ctrl+Alt+A`——注意 Deepin 等桌面已把该组合占用为系统截图键）。
+
+托盘实现：Linux 走 ksni（纯 Rust 的 StatusNotifierItem/D-Bus 直连，无动态库依赖）；
+Windows/macOS 走 tray-icon（系统原生 API）。全局热键在 Wayland 会话（无 X11）不可用，
+托盘与菜单不受影响。
+
+配置文件 `~/.config/lscreen/config.toml`（Win `%APPDATA%\lscreen`、mac
+`~/Library/Application Support/lscreen`）：保存目录、文件名模板
+（默认 `lscreen_{YYYYMMDD}_{HHMMSS}`）、默认工具/颜色/线宽、复制后是否自动退出、
+保存后是否打开目录、三个全局热键。零配置完全可用（无文件时全默认值且不生成文件）；
+`lscreen config` 面板保存后，运行中的托盘 1 秒内自动热加载。
 
 注意：所有 `--region X,Y,W,H` 参数使用**物理像素**坐标（截图/录屏的实际像素），
 HiDPI 缩放下与桌面环境显示的"逻辑分辨率"不同。多显示器时坐标基于虚拟桌面原点。
@@ -162,13 +188,13 @@ git tag v0.2.0 && git push --tags   # 自动构建全平台包并发布 GitHub R
 
 已完成：截图标注、取色器、二维码、OCR（Windows 系统 OCR / macOS Vision /
 Linux tesseract + 内置 ocrs 兜底）、GIF 录屏、图标化工具栏、CLI 无界面模式、
-贴图（Pin to screen）、Windows 自绘安装器、全平台打包发布。
+贴图（Pin to screen）、Windows 自绘安装器、全平台打包发布、
+托盘常驻 + 全局热键 + 配置面板。
 
 规划中（详见 [docs/PLAN.md](docs/PLAN.md)）：
 
 - MP4 录屏（系统编码器）、滚动长截图
 - Wayland 支持（xdg-desktop-portal）、混合 DPI 多显示器
-- 托盘常驻 + 内置全局热键 + 配置面板
 
 ## 架构
 

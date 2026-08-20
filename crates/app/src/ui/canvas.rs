@@ -257,6 +257,15 @@ fn selecting(
             if r.width() >= 4.0 && r.height() >= 4.0 {
                 app.region = r;
                 app.clamp_region();
+                // Mode::Record：框完即交付区域并关窗，不进标注阶段
+                if app.mode == super::Mode::Record {
+                    if let Some(shared) = &app.record_region {
+                        *shared.lock().unwrap() = Some(app.region);
+                    }
+                    app.request_close(ui.ctx());
+                    app.drag = None;
+                    return;
+                }
                 app.stage = Stage::Editing;
             }
         }
@@ -268,6 +277,13 @@ fn selecting(
             P2::new(0.0, 0.0),
             P2::new(app.shot.width as f32, app.shot.height as f32),
         );
+        if app.mode == super::Mode::Record {
+            if let Some(shared) = &app.record_region {
+                *shared.lock().unwrap() = Some(app.region);
+            }
+            app.request_close(ui.ctx());
+            return;
+        }
         app.stage = Stage::Editing;
     }
 }
