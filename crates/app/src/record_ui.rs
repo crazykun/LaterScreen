@@ -32,6 +32,27 @@ pub struct RecordApp {
 }
 
 impl RecordApp {
+    /// 独立窗口必须自己挂中文字体（否则中文显示为方块乱码——内置字体无 CJK
+    /// 字形）；先用 core Renderer 验证可解析（epaint 对坏字体是 panic 而非 Err）。
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        stop: Arc<AtomicBool>,
+        status: Arc<Mutex<RecordStatus>>,
+        max_duration: f32,
+    ) -> Self {
+        let font = crate::font::load_system_font();
+        if let Some(bytes) = font {
+            if lscreen_core::render::Renderer::new(Some(bytes.clone())).has_font() {
+                crate::font::setup_egui_fonts(&cc.egui_ctx, bytes);
+            }
+        }
+        Self {
+            stop,
+            status,
+            max_duration,
+        }
+    }
+
     /// 停止录屏（按钮点击或窗口关闭都走这里）。
     fn request_stop(&self, ctx: &egui::Context) {
         self.stop.store(true, Ordering::Relaxed);

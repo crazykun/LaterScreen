@@ -80,21 +80,26 @@ impl eframe::App for SettingsApp {
         }
 
         // 底部按钮条 + 上方可滚动表单。egui 0.35 移除了 TopBottomPanel，
-        // 用统一的 Panel::bottom + CentralPanel 分域：Panel 会收缩父 Ui 的
-        // 可用区域，CentralPanel 拿剩余空间——不再需要手动 allocate_rect 推进
-        // cursor（那会把 ScrollArea 挤到只剩底部一条，导致表单黑屏）。
-        egui::Panel::bottom(egui::Id::new("settings-bottom")).show(ui, |ui| {
-            ui.add_space(4.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("关闭 (Esc)").clicked() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-                if ui.button("保存").clicked() {
-                    self.save(&ctx);
-                }
+        // 用统一的 Panel::bottom + CentralPanel 分域。
+        // 关键：必须给固定高度。Panel::bottom 默认高度 = interact_size(≈36px)，
+        // 小于按钮行实际需要(≈44px)，内容会溢出面板矩形；溢出经
+        // expand_to_include_rect 撑大根 Ui 后被 PanelState 持久化，
+        // 每次重绘面板都自增一截，最终吃掉整个窗口（表现为表单消失、
+        // 只剩顶部一行按钮）。exact_size 让高度恒定、状态不再漂移。
+        egui::Panel::bottom(egui::Id::new("settings-bottom"))
+            .exact_size(48.0)
+            .show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("关闭 (Esc)").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    if ui.button("保存").clicked() {
+                        self.save(&ctx);
+                    }
+                });
+                ui.add_space(4.0);
             });
-            ui.add_space(4.0);
-        });
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add_space(6.0);

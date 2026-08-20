@@ -491,15 +491,16 @@ fn run_record(
         viewport,
         ..Default::default()
     };
-    let app = record_ui::RecordApp {
-        stop: stop.clone(),
-        status: status.clone(),
-        max_duration: secs,
-    };
+    let app_stop = stop.clone();
+    let app_status = status.clone();
     eframe::run_native(
         "lscreen-record-status",
         options,
-        Box::new(move |_cc| Ok(Box::new(app))),
+        Box::new(move |cc| {
+            Ok(Box::new(record_ui::RecordApp::new(
+                cc, app_stop, app_status, secs,
+            )))
+        }),
     )
     .map_err(|e| e.to_string())?;
 
