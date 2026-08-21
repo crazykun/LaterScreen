@@ -66,7 +66,7 @@ macOS 未签名应用会被 Gatekeeper 拦截（「已损坏 / 无法打开」�
 xattr -d com.apple.quarantine /Applications/LaterScreen.app
 ```
 
-或从源码安装（仅需 Rust 工具链，无 C 库依赖）：
+或从源码安装（需 Rust 工具链 + C/C++ 编译器，无开发库依赖）：
 
 ```bash
 git clone https://github.com/crazykun/LaterScreen && cd LaterScreen
@@ -198,7 +198,8 @@ cargo test --workspace       # 单元测试（无需显示器）
 ./target/release/lscreen --help        # 查看全部子命令
 ```
 
-Linux 构建仅需 Rust 工具链，无 C 库依赖。开发约定见 [AGENTS.md](AGENTS.md)。
+Linux 构建需 Rust 工具链 + C/C++ 编译器（MP4 用的 openh264 从 C++ 源静态编译，
+`build-essential` 即可），无需任何开发库头文件。开发约定见 [AGENTS.md](AGENTS.md)。
 
 ## 打包发布
 
@@ -215,9 +216,11 @@ scripts/package.sh              # 打包本机具备工具链的全部默认目�
 scripts/package.sh --list       # 查看默认目标集与本机可用性
 scripts/package.sh aarch64-unknown-linux-gnu   # 指定目标
 
-# Linux 交叉目标只需装对应交叉 gcc（项目链接期仅依赖 libc）：
-sudo apt install gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf \
-                 gcc-i686-linux-gnu gcc-mingw-w64-x86-64
+# Linux 交叉目标装对应交叉 gcc + g++（MP4 编码的 openh264 是 C++ 源）：
+sudo apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+                 gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf \
+                 gcc-i686-linux-gnu g++-i686-linux-gnu \
+                 gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
 # 原生包格式的工具（缺哪个就跳过哪种格式，不影响 tar.gz/zip）：
 sudo apt install rpm             # rpm 包（Windows 安装器由 cargo 自行构建）
 # AppImage: github.com/AppImage/appimagetool 下载放入 PATH

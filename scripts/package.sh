@@ -7,12 +7,12 @@
 #   scripts/package.sh --list          # 列出默认目标集与本机可用性
 #
 # 依赖说明：
-#   - 项目链接期仅依赖 libc（X11/GL 运行时 dlopen），Linux 交叉编译
-#     只需对应的 gcc 交叉链接器，无需 Docker/cross：
-#       aarch64:  sudo apt install gcc-aarch64-linux-gnu
-#       armv7:    sudo apt install gcc-arm-linux-gnueabihf
-#       i686:     sudo apt install gcc-i686-linux-gnu
-#       windows:  sudo apt install gcc-mingw-w64-x86-64
+#   - 项目链接期仅依赖 libc（X11/GL 运行时 dlopen），但 MP4 编码用的
+#     openh264 是 C++ 源，交叉编译需 gcc + g++ 两套，无需 Docker/cross：
+#       aarch64:  sudo apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+#       armv7:    sudo apt install gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+#       i686:     sudo apt install gcc-i686-linux-gnu g++-i686-linux-gnu
+#       windows:  sudo apt install gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
 #   - macOS 目标需要 Apple SDK，无法从 Linux 交叉编译：
 #     推 tag（git tag v0.1.0 && git push --tags）由 GitHub Actions
 #     release 工作流出全平台包，含 mac arm64/x64 与 Windows MSVC。
@@ -57,6 +57,11 @@ usable() {
     linker=$(linker_for "$t")
     if [[ -n $linker ]] && ! command -v "$linker" >/dev/null; then
         echo "  跳过 $t：缺少交叉链接器 $linker（见脚本头部安装提示）" >&2
+        return 1
+    fi
+    # openh264（MP4）要 C++ 交叉编译器，缺了会在编译到一半才失败，这里提前拦
+    if [[ -n $linker ]] && ! command -v "${linker%gcc}g++" >/dev/null; then
+        echo "  跳过 $t：缺少交叉 C++ 编译器 ${linker%gcc}g++（见脚本头部安装提示）" >&2
         return 1
     fi
     return 0

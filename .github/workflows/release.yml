@@ -29,9 +29,10 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-22.04,   target: aarch64-unknown-linux-gnu,     apt: gcc-aarch64-linux-gnu }
-          - { os: ubuntu-22.04,   target: armv7-unknown-linux-gnueabihf, apt: gcc-arm-linux-gnueabihf }
-          - { os: ubuntu-22.04,   target: i686-unknown-linux-gnu,        apt: gcc-i686-linux-gnu }
+          # openh264（MP4 编码）是 C++ 源，交叉编译除 gcc 还需对应的 g++
+          - { os: ubuntu-22.04,   target: aarch64-unknown-linux-gnu,     apt: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu }
+          - { os: ubuntu-22.04,   target: armv7-unknown-linux-gnueabihf, apt: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf }
+          - { os: ubuntu-22.04,   target: i686-unknown-linux-gnu,        apt: gcc-i686-linux-gnu g++-i686-linux-gnu }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
           - { os: macos-latest,   target: aarch64-apple-darwin }
           - { os: macos-latest,   target: x86_64-apple-darwin }
