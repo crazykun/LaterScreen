@@ -156,7 +156,7 @@ lscreen tray --foreground              # 托盘前台运行（调试/自启动�
 
 默认 **F1 截图**（Snipaste 惯例），可在配置面板改为其他组合。注意 `Ctrl+Alt+A` 在 Deepin 等桌面已被系统截图占用。
 
-托盘实现：Linux 走 ksni（纯 Rust 的 StatusNotifierItem/D-Bus 直连，无动态库依赖）；Windows/macOS 走 tray-icon（系统原生 API）。全局热键在 Wayland 会话（无 X11）不可用，托盘与菜单不受影响。
+托盘实现：Linux 走 ksni（纯 Rust 的 StatusNotifierItem/D-Bus 直连，无动态库依赖）；Windows/macOS 走 tray-icon（系统原生 API）。全局热键在 Wayland 会话（无 X11）不可用，托盘与菜单不受影响。窗口在 Linux 下显式设置 `WM_CLASS=lscreen` 并配 `StartupWMClass`，任务栏图标正确归属到 lscreen。
 
 ### 配置
 

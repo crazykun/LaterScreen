@@ -9,3 +9,4 @@ Icon=lscreen
 Terminal=false
 Categories=Utility;Graphics;
 Keywords=screenshot;capture;annotate;截图;
+StartupWMClass=lscreen

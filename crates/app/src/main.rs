@@ -17,6 +17,26 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use ui::SharedRegion;
 
+/// 让任务栏/启动器把本窗口关联到 lscreen.desktop（决定显示的图标）。
+///
+/// 根因：egui 的 `with_app_id` 只在 Wayland 生效；X11 下 winit 不设 WM_CLASS，
+/// 回落为窗口标题或 argv[0]，任务栏匹配不到 .desktop 文件就用了别的图标
+/// （实测显示成了启动来源的 VS Code 图标）。这里从原始窗口句柄取出 X11
+/// window id，显式把 WM_CLASS 设为 "lscreen"，与 .desktop 的 StartupWMClass 对齐。
+#[cfg(target_os = "linux")]
+pub(crate) fn apply_window_class(cc: &eframe::CreationContext<'_>) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    if let Ok(handle) = cc.window_handle() {
+        if let RawWindowHandle::Xlib(h) = handle.as_raw() {
+            // 失败不致命：图标归属只是体验问题，不影响功能
+            let _ = lscreen_capture::set_window_class(h.window as u32, "lscreen");
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn apply_window_class(_cc: &eframe::CreationContext<'_>) {}
+
 #[derive(Parser)]
 #[command(
     name = "lscreen",
@@ -256,6 +276,7 @@ fn run_tray(foreground: bool) -> Result<(), String> {
 /// 配置面板窗口。
 fn run_settings() -> Result<(), String> {
     let viewport = eframe::egui::ViewportBuilder::default()
+        .with_app_id("lscreen")
         .with_inner_size([480.0, 640.0])
         .with_min_inner_size([420.0, 520.0])
         .with_resizable(true);
@@ -290,6 +311,7 @@ fn pick_region_interactive() -> Result<Option<String>, String> {
     let pos = eframe::egui::Pos2::new(ox as f32 / scale, oy as f32 / scale);
     let size = eframe::egui::Vec2::new(shot.width as f32 / scale, shot.height as f32 / scale);
     let viewport = eframe::egui::ViewportBuilder::default()
+        .with_app_id("lscreen")
         .with_position(pos)
         .with_inner_size(size)
         .with_fullscreen(true)
@@ -355,6 +377,7 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
     let pos = eframe::egui::Pos2::new(shot.origin.0 as f32 / scale, shot.origin.1 as f32 / scale);
     let size = eframe::egui::Vec2::new(shot.width as f32 / scale, shot.height as f32 / scale);
     let viewport = eframe::egui::ViewportBuilder::default()
+        .with_app_id("lscreen")
         .with_position(pos)
         .with_inner_size(size)
         .with_fullscreen(true)
@@ -668,6 +691,7 @@ fn run_record(
 
     // 状态窗口：停止按钮/Esc 置 stop；窗口被关（含 done 自动关）后收尾
     let viewport = eframe::egui::ViewportBuilder::default()
+        .with_app_id("lscreen")
         .with_inner_size([320.0, 150.0])
         .with_resizable(false)
         .with_always_on_top()
@@ -825,6 +849,7 @@ fn run_scroll(
 
     // 状态窗口：停止按钮/Esc/关窗置 stop；拼接线程 done 后自动关
     let viewport = eframe::egui::ViewportBuilder::default()
+        .with_app_id("lscreen")
         .with_inner_size([320.0, 150.0])
         .with_resizable(false)
         .with_always_on_top()
@@ -884,6 +909,7 @@ fn run_scroll(
                 (ih as f32 * 0.5).clamp(420.0, 720.0),
             );
             let viewport = eframe::egui::ViewportBuilder::default()
+        .with_app_id("lscreen")
                 .with_inner_size([vw, vh])
                 .with_min_inner_size([640.0, 360.0])
                 .with_title("lscreen 滚动截图 - 标注");
@@ -957,6 +983,7 @@ fn run_pin(input: Option<PathBuf>, pos: Option<String>, scale: f32) -> Result<()
         return Err("空图片".into());
     }
     let viewport = eframe::egui::ViewportBuilder::default()
+        .with_app_id("lscreen")
         .with_position(pos)
         // 窗口高度含底部工具条条带（pin::BAR_H）
         .with_inner_size(pin::window_size(w, h, scale))

@@ -33,6 +33,8 @@ ksni = { version = "0.3", default-features = false, features = ["blocking", "asy
 # zbus 5.19 在 default-features=false + blocking-api 组合下自身编译失败
 # （上游打包缺陷），钉回 5.18；仅作为版本约束，不直接使用该 crate
 zbus = "=5.18.0"
+# 从 eframe::CreationContext 取原始窗口句柄，设 X11 WM_CLASS（任务栏图标归属）
+raw-window-handle = "0.6"
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 tray-icon = "0.24"

@@ -250,6 +250,14 @@ Snipaste 的招牌能力：截完把图钉在屏幕上置顶悬浮，方便对�
 - [x] 依赖备注：ksni blocking 需 async 运行时，选 async-io（比 tokio 轻）；
       **zbus 钉 =5.18.0**（5.19 在 default-features=false + blocking-api 组合下
       自身编译失败，上游打包缺陷，修复后放开）
+- [x] 任务栏图标归属修复（2026-08-21）：egui 的 `with_app_id` 只在 Wayland 生效，
+      X11 下 winit 不设 WM_CLASS、回落到窗口标题（实测 `WM_CLASS="" 标题`），
+      任务栏匹配不到 lscreen.desktop 就用错图标（显示成启动来源的 VS Code）。
+      修复：app 各窗口构造时经 raw-window-handle 取 X11 window id → capture
+      新增 `set_window_class`（x11rb change_property8 显式写 `WM_CLASS="lscreen"`）；
+      desktop 补 `StartupWMClass=lscreen`；所有 ViewportBuilder 补
+      `with_app_id("lscreen")`（Wayland 侧对齐）。X11 实测 pin 窗口 WM_CLASS
+      已变为 `("lscreen","lscreen")`
 
 ### M9 窗口截图（选中最前窗口，默认截当前窗口）✅ 2026-08-20
 

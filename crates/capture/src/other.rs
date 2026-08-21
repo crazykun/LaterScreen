@@ -148,3 +148,7 @@ pub fn scroll_wheel(_clicks: i32) -> Result<()> {
 pub fn warp_pointer(_x: i32, _y: i32) -> Result<()> {
     Err(CaptureError("当前平台暂不支持指针移动".into()))
 }
+
+pub fn set_window_class(_window_id: u32, _class: &str) -> Result<()> {
+    Err(CaptureError("当前平台无 X11 WM_CLASS 语义".into()))
+}

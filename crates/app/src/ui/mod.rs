@@ -182,6 +182,7 @@ pub struct SnipApp {
 
 impl SnipApp {
     pub fn new(cc: &eframe::CreationContext<'_>, init: OverlayInit) -> Self {
+        crate::apply_window_class(cc);
         let OverlayInit {
             shot,
             font,

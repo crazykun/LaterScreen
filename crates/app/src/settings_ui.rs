@@ -99,6 +99,7 @@ pub struct SettingsApp {
 
 impl SettingsApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        crate::apply_window_class(cc);
         apply_theme(&cc.egui_ctx);
         // 独立窗口必须自己挂中文字体；先用 core Renderer 验证可解析
         // （epaint 对坏字体是 panic 而非 Err）

@@ -45,6 +45,7 @@ impl RecordApp {
         max_duration: f32,
         scroll_mode: bool,
     ) -> Self {
+        crate::apply_window_class(cc);
         let font = crate::font::load_system_font();
         if let Some(bytes) = font {
             if lscreen_core::render::Renderer::new(Some(bytes.clone())).has_font() {

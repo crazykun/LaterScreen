@@ -92,6 +92,13 @@ pub fn warp_pointer(x: i32, y: i32) -> Result<()> {
     platform::warp_pointer(x, y)
 }
 
+/// 设置 X11 窗口的 WM_CLASS（instance 与 class 均为 `class`）。
+/// 任务栏/启动器据此把窗口关联到 .desktop 文件；仅 Linux X11 有意义，
+/// 其余平台返回 Err。窗口创建后即可调用。
+pub fn set_window_class(window_id: u32, class: &str) -> Result<()> {
+    platform::set_window_class(window_id, class)
+}
+
 // ---------------------------------------------------------------- 窗口枚举（M9）
 
 /// 一个可交互的顶层窗口。坐标语义与 `Screenshot::origin` 同一坐标系同一单位

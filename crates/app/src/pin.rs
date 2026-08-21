@@ -79,6 +79,7 @@ impl PinApp {
         scale: f32,
         font: Option<Vec<u8>>,
     ) -> Self {
+        crate::apply_window_class(cc);
         // 贴图是独立进程，必须自己挂中文字体，否则按钮/菜单/toast 的中文
         // 会因 egui 内置字体无 CJK 而显示为方框。先用 core Renderer 验证
         // 字节可解析（epaint 对坏字体是 panic 而非 Err）。

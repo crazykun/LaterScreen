@@ -546,3 +546,26 @@ pub fn warp_pointer(x: i32, y: i32) -> Result<()> {
         conn.sync().map_err(err)
     })
 }
+
+/// 设置指定窗口的 WM_CLASS（instance=class=传入值）。
+/// 任务栏靠 WM_CLASS 匹配 .desktop 文件来决定图标；egui/winit 在 X11 下
+/// 不设置 WM_CLASS（回落为窗口标题或 argv[0]），导致图标对不上。
+/// 独立开连接设置（窗口可能由 winit 用另一连接创建，属性不挑连接）。
+pub fn set_window_class(window_id: u32, class: &str) -> Result<()> {
+    use x11rb::protocol::xproto::{AtomEnum, PropMode};
+    use x11rb::wrapper::ConnectionExt as _;
+    with_conn(|conn, _| {
+        let atom = AtomEnum::WM_CLASS;
+        // X11 WM_CLASS 是 "\0" 分隔的 instance\0class\0，两段同值即可
+        let value = format!("{class}\0{class}\0");
+        conn.change_property8(
+            PropMode::REPLACE,
+            window_id,
+            atom,
+            AtomEnum::STRING,
+            value.as_bytes(),
+        )
+        .map_err(err)?;
+        conn.sync().map_err(err)
+    })
+}
