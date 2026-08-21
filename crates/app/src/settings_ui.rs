@@ -7,6 +7,7 @@
 //! 默认"工具感"样式区分；仅作用于本窗口的 egui Context。
 
 use crate::config::{self, Config};
+use crate::export;
 use eframe::egui;
 
 // ---------------------------------------------------------------- 设计令牌
@@ -441,11 +442,29 @@ impl SettingsApp {
                 ))
                 .color(MUTED),
             );
-            ui.add_space(6.0);
-            ui.checkbox(
-                &mut self.cfg.open_dir_after_save,
-                egui::RichText::new("保存后打开所在目录").color(TEXT),
-            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.checkbox(
+                    &mut self.cfg.open_dir_after_save,
+                    egui::RichText::new("保存后自动打开所在目录").color(TEXT),
+                );
+                ui.add_space(8.0);
+                // 必须用 link：Label（ui.small）默认 Sense::hover，clicked() 永远不触发
+                if ui
+                    .link(egui::RichText::new("打开目录").small().color(ACCENT))
+                    .on_hover_text("调用系统文件管理器打开当前保存目录")
+                    .clicked()
+                {
+                    // 面板内存中的目录（未保存的编辑也生效）；未设置或不存在
+                    // 则退回默认目录（~/Pictures 或家目录）
+                    let dir = self
+                        .cfg
+                        .save_dir_override()
+                        .filter(|p| p.is_dir())
+                        .unwrap_or_else(export::default_dir);
+                    export::open_in_file_manager(&dir);
+                }
+            });
         });
 
         card(ui, "默认绘制", |ui| {
