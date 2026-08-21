@@ -342,14 +342,20 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
         panic 都要销毁，绝不留残影窗口在屏幕上
       - Win/mac 与 Wayland：先不做，同滚动截图的平台策略（Wayland portal 无法
         创建 override-redirect 覆盖窗）；缺失时录制行为不变，仅无边框
-- [ ] **识别结果面板可拖动 + 可缩放**：QR / OCR 结果窗口（ui/mod.rs:688 `show_results`）
-      当前 `.anchor(Align2::CENTER_CENTER)` + `.resizable(false)`。
-      **anchor 是拖不动的根因**——egui 对锚定窗口每帧强制写回位置，拖拽位移当帧即被
-      覆盖。而结果框恰好盖在选区中央，挡住的正是刚识别的那段原文，无法对照校对
-      - 改法：去掉 `.anchor()`，改 `.default_pos()`（首帧居中，之后由 egui 记忆
-        用户拖到的位置）+ `.resizable(true)` + `.min_width` 兜底 + `.constrain(true)`
-        防止拖出屏幕外再也抓不回来
-      - 长文本 OCR 结果值得能拉高：现在 `max_height(320)` 固定，改为随窗口高度自适应
+- [x] **识别结果面板可拖动 + 可缩放**（✅ 2026-08-21）：QR / OCR 结果窗口
+      （ui/mod.rs:683 `show_results`）原先 `.anchor(Align2::CENTER_CENTER)` +
+      `.resizable(false)`。**anchor 就是拖不动的根因**——egui 对锚定窗口每帧强制
+      写回位置，拖拽位移当帧即被覆盖；而结果框恰好盖在选区中央，挡住的正是刚识别
+      的那段原文，无法对照校对
+      - anchor 换成 `.default_pos(viewport_rect().center())` + `.pivot(CENTER_CENTER)`：
+        pivot 让 default_pos 仍按窗口中心解释，保住首帧居中的观感，之后位置交给
+        egui 记忆。注意 egui 0.35 的入口是 `InputState::viewport_rect()`，
+        `screen_rect()` 已改名
+      - `.resizable(true)` + `.min_width(260)` + `.constrain(true)`（防拖出屏幕外
+        再也抓不回来）；`default_width` 460 / `default_height` 340 给初始观感
+      - 高度改为随窗口走：`ScrollArea::auto_shrink([false, false])` 撑满，去掉固定
+        `max_height(320)`（原先拉大窗口也看不到更多内容）。文本上限 600 → 4000 字，
+        仍留上限是因为 egui 会为不可见文本做布局；「复制内容」始终复制完整原文
       - 覆盖层是全屏窗口，拖动在其内部完成，不涉及系统窗口移动；结果面板打开期间
         的按键屏蔽逻辑（ui/mod.rs:496，只留 Esc）保持不变
       - 滚动截图预览复用同一个 SnipApp 会话，自动同步受益

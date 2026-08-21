@@ -685,21 +685,33 @@ impl SnipApp {
             return;
         };
         let mut open = true;
+        // 可拖动 + 可缩放：结果框默认落在选区中央，挡住的正是刚识别的那段原文。
+        // 首帧居中用 default_pos + pivot 而非 anchor——anchor 会每帧把位置写回，
+        // 拖拽位移当帧即被覆盖（等于拖不动）；constrain 防止拖出屏幕外再抓不回来。
         egui::Window::new(title)
             .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .resizable(true)
+            .constrain(true)
+            .default_pos(ctx.input(|i| i.viewport_rect()).center())
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_width(460.0)
+            .min_width(260.0)
+            .default_height(340.0)
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.set_max_width(460.0);
+                // 撑满窗口而非收缩到内容：高度随用户拉伸走（原先固定 320 上限，
+                // 长文本 OCR 结果拉大窗口也看不到更多）
                 egui::ScrollArea::vertical()
-                    .max_height(320.0)
+                    .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for (i, content) in items.iter().enumerate() {
                             if i > 0 {
                                 ui.separator();
                             }
-                            ui.label(egui::RichText::new(truncate(content, 600)).monospace());
+                            // 上限放宽到 4000 字：窗口可拉伸后 600 字反倒成了瓶颈
+                            // （egui 会为不可见文本也做布局，故仍留上限防大段文本卡顿）。
+                            // 「复制内容」始终复制完整原文，不受此显示上限影响
+                            ui.label(egui::RichText::new(truncate(content, 4000)).monospace());
                             if ui.button("复制内容").clicked() {
                                 match export::copy_text_to_clipboard(content) {
                                     Ok(()) => self.toast(ctx, "已复制"),

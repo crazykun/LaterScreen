@@ -247,7 +247,7 @@ git tag v0.4.0 && git push --tags   # 自动构建全平台包并发布 GitHub R
 - [x] 全平台打包发布（deb / rpm / AppImage / Windows 安装器 / dmg）
 - [x] Wayland 整屏截图（xdg-desktop-portal；区域采帧/录屏仍 X11）
 - [ ] 录制期间常显选区边框（边框画在选区外侧，不进成品）
-- [ ] 识别结果面板可拖动、可缩放（现居中锚定，挡住原文无法对照）
+- [x] 识别结果面板可拖动、可缩放（挡住原文时挪开对照，长文本可拉高）
 - [ ] 混合 DPI 多显示器
 
 详见 [docs/PLAN.md](docs/PLAN.md)。
