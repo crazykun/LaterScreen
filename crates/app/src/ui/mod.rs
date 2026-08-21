@@ -699,6 +699,24 @@ impl SnipApp {
             .default_height(340.0)
             .open(&mut open)
             .show(ctx, |ui| {
+                // 复制按钮钉在滚动区**外**的顶栏：放文本下方时，OCR 长文本会把按钮
+                // 推到滚动区最底部，想复制得先滚到底；钉在顶栏则滚到哪都点得到。
+                let multi = items.len() > 1;
+                ui.horizontal(|ui| {
+                    let label = if multi { "复制全部" } else { "复制内容" };
+                    if ui.button(label).clicked() {
+                        // 多条结果用换行拼接（QR 一次可识出多个码）
+                        let all = items.join("\n");
+                        match export::copy_text_to_clipboard(&all) {
+                            Ok(()) => self.toast(ctx, "已复制"),
+                            Err(e) => self.toast(ctx, format!("复制失败: {e}")),
+                        }
+                    }
+                    if multi {
+                        ui.label(format!("{} 条结果", items.len()));
+                    }
+                });
+                ui.separator();
                 // 撑满窗口而非收缩到内容：高度随用户拉伸走（原先固定 320 上限，
                 // 长文本 OCR 结果拉大窗口也看不到更多）
                 egui::ScrollArea::vertical()
@@ -708,16 +726,23 @@ impl SnipApp {
                             if i > 0 {
                                 ui.separator();
                             }
+                            // 单条时顶栏那个按钮就够了，不再重复；多条才需要逐条复制，
+                            // 按钮同样放在该条文本**上方**，长文本不必滚过去找
+                            if multi {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("#{}", i + 1));
+                                    if ui.button("复制").clicked() {
+                                        match export::copy_text_to_clipboard(content) {
+                                            Ok(()) => self.toast(ctx, "已复制"),
+                                            Err(e) => self.toast(ctx, format!("复制失败: {e}")),
+                                        }
+                                    }
+                                });
+                            }
                             // 上限放宽到 4000 字：窗口可拉伸后 600 字反倒成了瓶颈
                             // （egui 会为不可见文本也做布局，故仍留上限防大段文本卡顿）。
-                            // 「复制内容」始终复制完整原文，不受此显示上限影响
+                            // 复制走的是原始 content，不受此显示上限影响
                             ui.label(egui::RichText::new(truncate(content, 4000)).monospace());
-                            if ui.button("复制内容").clicked() {
-                                match export::copy_text_to_clipboard(content) {
-                                    Ok(()) => self.toast(ctx, "已复制"),
-                                    Err(e) => self.toast(ctx, format!("复制失败: {e}")),
-                                }
-                            }
                         }
                     });
             });
