@@ -740,7 +740,11 @@ impl SnipApp {
                 // 矩形定位，故窗口拖动/缩放都跟着走；画在滚动内容之后 → 叠在其上，
                 // 且同层后绘者优先命中，不会被滚动区的拖拽滚动抢掉点击。
                 let anchor = scroll.inner_rect.max - FLOAT_BTN - egui::vec2(8.0, 8.0);
-                let label = if multi { "复制全部" } else { "复制内容" };
+                let label = if multi {
+                    "复制全部"
+                } else {
+                    "复制内容"
+                };
                 if ui
                     .put(
                         egui::Rect::from_min_size(anchor, FLOAT_BTN),
