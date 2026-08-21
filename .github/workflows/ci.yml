@@ -44,8 +44,9 @@ jobs:
           test "$SIZE" -le $((20 * 1024 * 1024))
       - name: No forbidden dynamic deps
         run: |
-          # 只允许 libc/libm/libgcc/ld/vdso；出现 X11/GTK/pipewire 等即失败
-          BAD=$(ldd target/release/lscreen | grep -vE 'linux-vdso|libgcc_s|libm\.so|libc\.so|ld-linux' || true)
+          # 只允许 libc/libm/libgcc/libstdc++/ld/vdso；出现 X11/GTK/pipewire 等即失败
+          # libstdc++ 由 openh264（C++ 源码静态链接进 MP4 编码器）带来，属预期
+          BAD=$(ldd target/release/lscreen | grep -vE 'linux-vdso|libgcc_s|libm\.so|libc\.so|libstdc\+\+\.so|ld-linux' || true)
           if [ -n "$BAD" ]; then echo "unexpected dynamic deps:"; echo "$BAD"; exit 1; fi
 
   # Windows / macOS：编译验证（xcap 系统 API 路径此前从未被验证过）

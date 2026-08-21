@@ -512,7 +512,10 @@ mod tests {
     }
 
     /// 合成帧 → MP4 全链路：验证产物可被 mp4 解析器读回、轨道为 H.264、
-    /// 帧数与时长正确（openh264 无 asm 下编码 64×48 小图，测试秒级完成）
+    /// 帧数与时长正确（openh264 无 asm 下编码 64×48 小图，测试秒级完成）。
+    /// 仅 Linux 运行：MP4 编码路径定位 Linux（Win/mac 系统编码器待实现），
+    /// 且 openh264 无 asm 在 mac CI 上太慢，wall-clock 断言会误报。
+    #[cfg(target_os = "linux")]
     #[test]
     fn synthetic_frames_to_mp4() {
         let dir = std::env::temp_dir().join("lscreen-record-test.mp4");
