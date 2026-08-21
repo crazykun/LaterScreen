@@ -226,7 +226,7 @@ sudo apt install rpm             # rpm 包（Windows 安装器由 cargo 自行�
 全平台出包（含 macOS、Windows MSVC）走 GitHub Actions：
 
 ```bash
-git tag v0.3.0 && git push --tags   # 自动构建全平台包并发布 GitHub Release
+git tag v0.4.0 && git push --tags   # 自动构建全平台包并发布 GitHub Release
 ```
 
 ## 路线图
