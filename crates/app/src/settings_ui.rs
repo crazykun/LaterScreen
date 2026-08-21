@@ -451,7 +451,7 @@ impl SettingsApp {
                 ui.add_space(8.0);
                 // 必须用 link：Label（ui.small）默认 Sense::hover，clicked() 永远不触发
                 if ui
-                    .link(egui::RichText::new("打开目录").small().color(ACCENT))
+                    .link(egui::RichText::new("打开目录").color(ACCENT))
                     .on_hover_text("调用系统文件管理器打开当前保存目录")
                     .clicked()
                 {
