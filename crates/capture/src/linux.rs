@@ -134,9 +134,15 @@ fn grab(conn: &impl Connection, screen: &Screen, m: &MonitorInfo) -> Result<Scre
     }
 
     // ZPixmap depth24/32 每像素 4 字节。LSB 序为 BGRX，MSB 序为 XRGB。
+    // data 可能因扫描线填充略长于 expected，先裁到 expected（w*h*4，必为 4 倍数）
     let lsb = conn.setup().image_byte_order == ImageOrder::LSB_FIRST;
     let mut rgba = vec![0u8; expected];
-    for (dst, src) in rgba.chunks_exact_mut(4).zip(data.chunks_exact(4)) {
+    for (dst, src) in rgba
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(data[..expected].as_chunks::<4>().0.iter())
+    {
         let (r, g, b) = if lsb {
             (src[2], src[1], src[0])
         } else {

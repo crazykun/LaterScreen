@@ -81,7 +81,7 @@ mod win_ocr;
 #[cfg(any(target_os = "windows", test))]
 pub(crate) fn rgba_to_bgra(rgba: &[u8]) -> Vec<u8> {
     let mut bgra = rgba.to_vec();
-    for px in bgra.chunks_exact_mut(4) {
+    for px in bgra.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
     bgra

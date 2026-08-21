@@ -36,7 +36,7 @@ fn frame_signature(rgba: &[u8], w: u32, h: u32) -> Vec<Vec<u8>> {
     let mut rows = Vec::with_capacity(h as usize);
     for row_px in rgba.chunks_exact(w * 4) {
         let mut row = Vec::with_capacity(cols);
-        for px in row_px.chunks_exact(4).step_by(COL_STRIDE) {
+        for px in row_px.as_chunks::<4>().0.iter().step_by(COL_STRIDE) {
             let y = (px[0] as u32 * 3 + px[1] as u32 * 6 + px[2] as u32) / 10;
             row.push(y as u8);
         }

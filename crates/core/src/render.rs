@@ -390,7 +390,7 @@ fn lerp_u8(dst: u8, src: u8, a: f32) -> u8 {
 }
 
 fn force_opaque(rgba: &mut [u8]) {
-    for px in rgba.chunks_exact_mut(4) {
+    for px in rgba.as_chunks_mut::<4>().0 {
         px[3] = 255;
     }
 }

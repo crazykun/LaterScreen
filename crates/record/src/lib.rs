@@ -107,7 +107,9 @@ pub fn record_gif(
                     _ => {}
                 }
                 let pixels: Vec<RGBA8> = rgba
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|p| RGBA8::new(p[0], p[1], p[2], 255))
                     .collect();
                 let pts = start.elapsed().as_secs_f64();
