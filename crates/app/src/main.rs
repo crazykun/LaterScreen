@@ -909,7 +909,7 @@ fn run_scroll(
                 (ih as f32 * 0.5).clamp(420.0, 720.0),
             );
             let viewport = eframe::egui::ViewportBuilder::default()
-        .with_app_id("lscreen")
+                .with_app_id("lscreen")
                 .with_inner_size([vw, vh])
                 .with_min_inner_size([640.0, 360.0])
                 .with_title("lscreen 滚动截图 - 标注");

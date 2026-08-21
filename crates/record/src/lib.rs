@@ -201,7 +201,11 @@ fn find_start_code(data: &[u8], from: usize) -> Option<(usize, usize)> {
     let mut i = from;
     while i + 3 < data.len() {
         if data[i..].starts_with(&[0, 0, 1]) {
-            let sc = if i > from && data[i - 1] == 0 { i - 1 } else { i };
+            let sc = if i > from && data[i - 1] == 0 {
+                i - 1
+            } else {
+                i
+            };
             return Some((sc, i + 3));
         }
         i += 1;
