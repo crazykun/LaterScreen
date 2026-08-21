@@ -878,13 +878,14 @@ fn run_scroll(
         // 默认：打开标注预览窗口（复用截图标注会话：全工具标注 +
         // 保存/复制/贴图/OCR/二维码，Esc 退出）
         false => {
+            // 宽度下限要容得下底部标注工具栏（预览模式约 560 逻辑点）
             let (vw, vh) = (
-                (iw as f32 * 0.6).clamp(560.0, 960.0),
+                (iw as f32 * 0.6).clamp(640.0, 960.0),
                 (ih as f32 * 0.5).clamp(420.0, 720.0),
             );
             let viewport = eframe::egui::ViewportBuilder::default()
                 .with_inner_size([vw, vh])
-                .with_min_inner_size([520.0, 360.0])
+                .with_min_inner_size([640.0, 360.0])
                 .with_title("lscreen 滚动截图 - 标注");
             let options = eframe::NativeOptions {
                 viewport,

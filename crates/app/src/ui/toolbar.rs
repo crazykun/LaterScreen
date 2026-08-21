@@ -47,10 +47,11 @@ pub fn show(app: &mut SnipApp, ctx: &egui::Context) {
     let region_pt = view.rect_pt(app.region);
 
     const BAR_H: f32 = 36.0;
-    // 预览模式（滚动长截图标注）：工具栏常驻窗口底部居中
+    // 预览模式（滚动长截图标注）：工具栏常驻窗口底部居中；
+    // 窗口比工具栏窄时靠左钳住，保证第一批按钮可达（右侧溢出可拉宽窗口）
     let (x, y) = if app.preview {
         (
-            screen.center().x - BAR_W / 2.0,
+            (screen.center().x - BAR_W / 2.0).max(screen.min.x + 4.0),
             (screen.max.y - BAR_H - 6.0).max(screen.min.y),
         )
     } else {

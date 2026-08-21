@@ -48,18 +48,54 @@ pub fn show(app: &mut SnipApp, ui: &mut egui::Ui, texture: &TextureHandle) {
 /// ScrollArea 内容坐标 == 屏幕坐标系（egui 每帧按滚动偏移重排内容），
 /// 因此 show_in 的 View 映射、命中检测、绘制无需任何平移换算。
 pub fn show_scrolled(app: &mut SnipApp, ui: &mut egui::Ui, texture: &TextureHandle) {
+    let fit_width = |app: &SnipApp, ui: &egui::Ui| {
+        let avail = (ui.available_width() - 12.0).max(50.0);
+        (avail / app.shot.width as f32).clamp(0.05, 1.0)
+    };
     // 首帧按窗口宽度自适应缩放（长图主形态；不放大超过 100%）
     if app.preview_zoom <= 0.0 {
-        let avail = (ui.available_width() - 12.0).max(50.0);
-        app.preview_zoom = (avail / app.shot.width as f32).clamp(0.05, 1.0);
+        app.preview_zoom = fit_width(app, ui);
     }
+
+    // 缩放：Ctrl+滚轮 / 触摸板捏合（zoom_delta 已合并两者），
+    // Ctrl+= / Ctrl+- 步进，Ctrl+0 回到适应窗口宽度
+    let (mut factor, reset) = ui.ctx().input_mut(|i| {
+        let mut f = i.zoom_delta();
+        if i.consume_key(egui::Modifiers::COMMAND, egui::Key::Equals)
+            || i.consume_key(egui::Modifiers::COMMAND, egui::Key::Plus)
+        {
+            f *= 1.25;
+        }
+        if i.consume_key(egui::Modifiers::COMMAND, egui::Key::Minus) {
+            f /= 1.25;
+        }
+        (f, i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num0))
+    });
+    if reset {
+        app.preview_zoom = fit_width(app, ui);
+        factor = 1.0;
+    }
+    let new_zoom = (app.preview_zoom * factor).clamp(0.05, 4.0);
+    factor = new_zoom / app.preview_zoom; // clamp 后的实际生效倍率
+    app.preview_zoom = new_zoom;
+
     let size = Vec2::new(app.shot.width as f32, app.shot.height as f32) * app.preview_zoom;
     egui::ScrollArea::both()
         .id_salt("preview-canvas")
         .auto_shrink([false, false])
         .show_viewport(ui, |ui, _viewport| {
-            // 内容比视口窄时水平居中
             let cursor = ui.cursor().min;
+            // 缩放锚定：调整滚动偏移让指针（无指针时视口中心）下的
+            // 内容点保持不动，而不是从图顶开始重新对齐
+            if factor != 1.0 {
+                let anchor = ui
+                    .ctx()
+                    .pointer_latest_pos()
+                    .unwrap_or_else(|| ui.clip_rect().center());
+                let rel = anchor - cursor; // 锚点相对内容原点
+                ui.scroll_with_delta(rel * (1.0 - factor));
+            }
+            // 内容比视口窄时水平居中
             let extra = ((ui.available_width() - size.x) / 2.0).max(0.0);
             let rect = Rect::from_min_size(Pos2::new(cursor.x + extra, cursor.y), size);
             ui.allocate_rect(rect, Sense::click_and_drag());
