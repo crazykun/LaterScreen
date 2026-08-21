@@ -55,8 +55,8 @@
 | Fedora / RHEL / openSUSE | `lscreen-*.rpm` | `sudo rpm -i lscreen-*.rpm` |
 | 任意 Linux 发行版 | `*.AppImage` | `chmod +x` 后直接运行 |
 | 任意 Linux 发行版 | `*.tar.gz` | 解压后将 `lscreen` 放入 PATH |
-| Windows | `*-setup.exe` | 自绘安装器：单用户安装免 UAC，含快捷方式与卸载器 |
-| Windows（免安装） | `*.zip` | 解压即用 |
+| Windows | `*-setup.exe` | 自绘安装器：单用户安装免 UAC，含快捷方式与卸载器（Windows 10 及以上） |
+| Windows（免安装） | `*.zip` | 解压即用（Windows 10 及以上） |
 | macOS | `*.dmg` | 拖入 Applications；未签名，首次需右键 → 打开 |
 
 macOS 未签名应用会被 Gatekeeper 拦截（「已损坏 / 无法打开」），除右键 → 打开外，
@@ -175,7 +175,8 @@ lscreen tray --foreground              # 托盘前台运行（调试/自启动�
 | 平台 | 说明 |
 |---|---|
 | Linux | 交互模式需 X11 桌面（`DISPLAY`），Wayland 会话暂不支持（规划中）；截屏为纯 Rust X11 协议实现，运行时无需任何额外库 |
-| Windows / macOS | 走系统 API（xcap），无外部依赖 |
+| Windows | **Windows 10 及以上**（OCR 走 WinRT `Windows.Media.Ocr`，且 Rust 工具链已不支持 Win7——Win7 上会报缺少 combase.dll）；走系统 API（xcap），无外部依赖 |
+| macOS | 走系统 API（xcap），无外部依赖 |
 
 `ocr` 按平台自动选择引擎，无需配置：
 
