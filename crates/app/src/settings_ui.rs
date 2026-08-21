@@ -133,6 +133,8 @@ impl SettingsApp {
             ("截图热键", self.cfg.hotkey_screenshot.clone()),
             ("取色热键", self.cfg.hotkey_picker.clone()),
             ("贴图热键", self.cfg.hotkey_pin.clone()),
+            ("录屏热键", self.cfg.hotkey_record.clone()),
+            ("滚动截图热键", self.cfg.hotkey_scroll.clone()),
         ];
         for (name, raw) in hotkeys {
             if raw.trim().is_empty() {
@@ -220,7 +222,9 @@ impl SettingsApp {
         match idx {
             0 => &mut self.cfg.hotkey_screenshot,
             1 => &mut self.cfg.hotkey_picker,
-            _ => &mut self.cfg.hotkey_pin,
+            2 => &mut self.cfg.hotkey_pin,
+            3 => &mut self.cfg.hotkey_record,
+            _ => &mut self.cfg.hotkey_scroll,
         }
     }
 
@@ -578,6 +582,12 @@ impl SettingsApp {
                     ui.end_row();
                     row_label(ui, "贴图");
                     self.hotkey_capture(ui, 2, &self.cfg.hotkey_pin.clone());
+                    ui.end_row();
+                    row_label(ui, "录屏");
+                    self.hotkey_capture(ui, 3, &self.cfg.hotkey_record.clone());
+                    ui.end_row();
+                    row_label(ui, "滚动截图");
+                    self.hotkey_capture(ui, 4, &self.cfg.hotkey_scroll.clone());
                     ui.end_row();
                 });
             ui.add_space(2.0);

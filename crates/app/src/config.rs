@@ -40,6 +40,8 @@ pub struct Config {
     pub hotkey_screenshot: String,
     pub hotkey_picker: String,
     pub hotkey_pin: String,
+    pub hotkey_record: String,
+    pub hotkey_scroll: String,
 }
 
 impl Default for Config {
@@ -56,6 +58,8 @@ impl Default for Config {
             hotkey_screenshot: "F1".to_string(),
             hotkey_picker: String::new(),
             hotkey_pin: String::new(),
+            hotkey_record: String::new(),
+            hotkey_scroll: String::new(),
         }
     }
 }

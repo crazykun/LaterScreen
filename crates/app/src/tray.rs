@@ -342,6 +342,8 @@ impl Hotkeys {
             ),
             ("hotkey_picker", &cfg.hotkey_picker, Action::Picker),
             ("hotkey_pin", &cfg.hotkey_pin, Action::Pin),
+            ("hotkey_record", &cfg.hotkey_record, Action::Record),
+            ("hotkey_scroll", &cfg.hotkey_scroll, Action::Scroll),
         ] {
             let _ = field;
             if raw.trim().is_empty() {
@@ -371,6 +373,8 @@ fn menu_label(cfg: &Config, a: Action) -> String {
         Action::Screenshot => &cfg.hotkey_screenshot,
         Action::Picker => &cfg.hotkey_picker,
         Action::Pin => &cfg.hotkey_pin,
+        Action::Record => &cfg.hotkey_record,
+        Action::Scroll => &cfg.hotkey_scroll,
         _ => "",
     };
     if hk.trim().is_empty() {
