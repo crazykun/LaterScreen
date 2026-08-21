@@ -258,6 +258,11 @@ Snipaste 的招牌能力：截完把图钉在屏幕上置顶悬浮，方便对�
       desktop 补 `StartupWMClass=lscreen`；所有 ViewportBuilder 补
       `with_app_id("lscreen")`（Wayland 侧对齐）。X11 实测 pin 窗口 WM_CLASS
       已变为 `("lscreen","lscreen")`
+- [x] 窗口图标兜底（2026-08-21）：任务栏图标走 `.desktop` 的 `Icon=lscreen` 依赖
+      hicolor 缓存，目录尺寸不符（997×977 放在 256x256）或缓存未刷新会回退旧图。
+      补 capture `set_window_icon`（`_NET_WM_ICON`，CARDINAL 数组 ARGB），窗口构造
+      时直接给任务栏/alt-tab 图标，不依赖缓存；源图统一 resize 为 256×256 正方形
+      （build.rs ICO 要求正方形）。实测窗口 `_NET_WM_ICON` = 64×64 已生效
 
 ### M9 窗口截图（选中最前窗口，默认截当前窗口）✅ 2026-08-20
 

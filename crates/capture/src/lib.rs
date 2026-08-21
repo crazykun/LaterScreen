@@ -99,6 +99,12 @@ pub fn set_window_class(window_id: u32, class: &str) -> Result<()> {
     platform::set_window_class(window_id, class)
 }
 
+/// 设置 X11 窗口的 `_NET_WM_ICON`（RGBA8）。任务栏/alt-tab 直接显示此图标，
+/// 不依赖 .desktop 图标缓存。仅 Linux X11 有意义，其余平台返回 Err。
+pub fn set_window_icon(window_id: u32, rgba: &[u8], w: u32, h: u32) -> Result<()> {
+    platform::set_window_icon(window_id, rgba, w, h)
+}
+
 // ---------------------------------------------------------------- 窗口枚举（M9）
 
 /// 一个可交互的顶层窗口。坐标语义与 `Screenshot::origin` 同一坐标系同一单位

@@ -152,3 +152,7 @@ pub fn warp_pointer(_x: i32, _y: i32) -> Result<()> {
 pub fn set_window_class(_window_id: u32, _class: &str) -> Result<()> {
     Err(CaptureError("当前平台无 X11 WM_CLASS 语义".into()))
 }
+
+pub fn set_window_icon(_window_id: u32, _rgba: &[u8], _w: u32, _h: u32) -> Result<()> {
+    Err(CaptureError("当前平台无 X11 窗口图标语义".into()))
+}

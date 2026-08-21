@@ -28,8 +28,18 @@ pub(crate) fn apply_window_class(cc: &eframe::CreationContext<'_>) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     if let Ok(handle) = cc.window_handle() {
         if let RawWindowHandle::Xlib(h) = handle.as_raw() {
+            let wid = h.window as u32;
             // 失败不致命：图标归属只是体验问题，不影响功能
-            let _ = lscreen_capture::set_window_class(h.window as u32, "lscreen");
+            let _ = lscreen_capture::set_window_class(wid, "lscreen");
+            // _NET_WM_ICON 直接给任务栏/alt-tab 图标，不依赖 .desktop 缓存
+            if let Some(icon) = tray::window_icon() {
+                let _ = lscreen_capture::set_window_icon(
+                    wid,
+                    icon.as_raw(),
+                    icon.width(),
+                    icon.height(),
+                );
+            }
         }
     }
 }

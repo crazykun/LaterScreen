@@ -575,3 +575,33 @@ pub fn set_window_class(window_id: u32, class: &str) -> Result<()> {
         conn.sync().map_err(err)
     })
 }
+
+/// 设置 `_NET_WM_ICON`：EWMH 规定数据为 CARDINAL 数组，第一项 = 宽、第二项 = 高，
+/// 之后每像素一个 ARGB（0xAARRGGBB）。任务栏/alt-tab 用，不走 .desktop 缓存。
+pub fn set_window_icon(window_id: u32, rgba: &[u8], w: u32, h: u32) -> Result<()> {
+    use x11rb::protocol::xproto::PropMode;
+    use x11rb::wrapper::ConnectionExt as _;
+    with_conn(|conn, _| {
+        let expected = (w as usize) * (h as usize) * 4;
+        if rgba.len() != expected {
+            return Err(CaptureError("图标数据长度与尺寸不符".into()));
+        }
+        let mut data = Vec::with_capacity(2 + w as usize * h as usize);
+        data.push(w);
+        data.push(h);
+        for px in rgba.as_chunks::<4>().0 {
+            // RGBA → ARGB（alpha 前置）
+            data.push(
+                ((px[3] as u32) << 24)
+                    | ((px[0] as u32) << 16)
+                    | ((px[1] as u32) << 8)
+                    | px[2] as u32,
+            );
+        }
+        let net_wm_icon = intern(conn, "_NET_WM_ICON");
+        let cardinal = intern(conn, "CARDINAL");
+        conn.change_property32(PropMode::REPLACE, window_id, net_wm_icon, cardinal, &data)
+            .map_err(err)?;
+        conn.sync().map_err(err)
+    })
+}
