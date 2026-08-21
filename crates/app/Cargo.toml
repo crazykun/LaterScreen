@@ -40,6 +40,10 @@ raw-window-handle = "0.6"
 tray-icon = "0.24"
 winit = "0.30"
 
+# GUI 子系统下附回父控制台（AttachConsole），保证终端里 CLI 输出可见
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+
 # build.rs：packaging/icon.png → 多尺寸 ICO 嵌入 Windows exe
 [build-dependencies]
 winresource = "0.1"

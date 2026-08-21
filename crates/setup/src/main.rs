@@ -8,6 +8,9 @@
 //! 不弹 UAC、无需管理员。卸载程序 = 本二进制副本（uninstall.exe），
 //! 以 `--uninstall` 运行进入卸载流程。
 
+// GUI 子系统：双击安装器不再带出控制台黑框
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 #[cfg(target_os = "windows")]
 mod app;
 #[cfg(target_os = "windows")]

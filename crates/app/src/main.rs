@@ -4,6 +4,10 @@
 //! 或托盘菜单按需唤起，子进程用完即退）。`lscreen gui` 直接进交互截图；
 //! 其余子命令单次调用即起即退。
 
+// Windows 用 GUI 子系统：双击/快捷方式/托盘 spawn 子进程都不再弹控制台黑框。
+// CLI 场景由 main() 里的 attach_parent_console 兜底。
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod config;
 mod export;
 mod font;
@@ -173,6 +177,15 @@ enum Cmd {
 }
 
 fn main() {
+    // GUI 子系统下从终端启动时附回父控制台：--help/qr/ocr 输出与报错仍可见。
+    // 双击/快捷方式启动没有父控制台，调用失败即静默——正是想要的行为。
+    // （已知取舍：cmd 不等待 GUI 进程，输出会与下一个提示符交错）
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+
     // 剪贴板守护进程（内部机制，见 export::clipd_main）：在 clap 之前拦截，
     // 不出现在 --help 中
     #[cfg(target_os = "linux")]
