@@ -46,23 +46,33 @@ pub fn show(app: &mut SnipApp, ctx: &egui::Context) {
     };
     let region_pt = view.rect_pt(app.region);
 
-    // 默认放选区下方；空间不足放上方；再不足贴屏幕底部
     const BAR_H: f32 = 36.0;
-    let y = if region_pt.max.y + BAR_H + 12.0 < screen.max.y {
-        region_pt.max.y + 8.0
-    } else if region_pt.min.y - BAR_H - 12.0 > screen.min.y {
-        region_pt.min.y - BAR_H - 8.0
+    // 预览模式（滚动长截图标注）：工具栏常驻窗口底部居中
+    let (x, y) = if app.preview {
+        (
+            screen.center().x - BAR_W / 2.0,
+            (screen.max.y - BAR_H - 6.0).max(screen.min.y),
+        )
     } else {
-        screen.max.y - BAR_H - 8.0
+        // 默认放选区下方；空间不足放上方；再不足贴屏幕底部
+        let y = if region_pt.max.y + BAR_H + 12.0 < screen.max.y {
+            region_pt.max.y + 8.0
+        } else if region_pt.min.y - BAR_H - 12.0 > screen.min.y {
+            region_pt.min.y - BAR_H - 8.0
+        } else {
+            screen.max.y - BAR_H - 8.0
+        };
+        let x = region_pt
+            .min
+            .x
+            .max(screen.min.x + 4.0)
+            .min((screen.max.x - BAR_W).max(screen.min.x + 4.0));
+        (x, y)
     };
-    let x = region_pt
-        .min
-        .x
-        .max(screen.min.x + 4.0)
-        .min((screen.max.x - BAR_W).max(screen.min.x + 4.0));
 
     egui::Area::new(egui::Id::new("toolbar"))
         .fixed_pos(Pos2::new(x, y))
+        .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -74,8 +84,11 @@ pub fn show(app: &mut SnipApp, ctx: &egui::Context) {
 }
 
 fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
-    size_edit(app, ui);
-    ui.separator();
+    // 预览模式选区固定整图，尺寸编辑不适用
+    if !app.preview {
+        size_edit(app, ui);
+        ui.separator();
+    }
 
     for (tool, tip) in TOOLS {
         let active = app.tool == *tool;
@@ -493,7 +506,7 @@ pub(crate) fn draw_check(p: &egui::Painter, r: Rect, _c: Color32) {
 }
 
 /// 图钉（地图钉样式）：圆头 + 两侧汇聚线到针尖。
-fn draw_pin(p: &egui::Painter, r: Rect, c: Color32) {
+pub(crate) fn draw_pin(p: &egui::Painter, r: Rect, c: Color32) {
     let s = Stroke::new(1.4, c);
     let w = r.width();
     let head = Pos2::new(r.center().x, r.min.y + w * 0.36);

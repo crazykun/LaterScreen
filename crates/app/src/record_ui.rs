@@ -18,6 +18,8 @@ pub struct RecordStatus {
     pub elapsed: f32,
     /// 已采集帧数
     pub frames: usize,
+    /// 滚动截图模式：已拼接图像高度（px）；GIF 模式恒 0
+    pub height: u32,
     /// 录制已结束（自然到达时长 / 出错 / 被停止），UI 见到即自动关窗
     pub done: bool,
 }
@@ -27,8 +29,10 @@ pub struct RecordApp {
     pub stop: Arc<AtomicBool>,
     /// 共享状态：录屏线程写入，UI 读取
     pub status: Arc<Mutex<RecordStatus>>,
-    /// 显示时长（与 --duration 一致，用于进度条）
+    /// 显示时长（与 --duration 一致，用于进度条）；滚动模式传最大步数
     pub max_duration: f32,
+    /// 滚动截图模式：文案与进度条语义不同（高度/步数 vs 秒/时长）
+    pub scroll_mode: bool,
 }
 
 impl RecordApp {
@@ -39,6 +43,7 @@ impl RecordApp {
         stop: Arc<AtomicBool>,
         status: Arc<Mutex<RecordStatus>>,
         max_duration: f32,
+        scroll_mode: bool,
     ) -> Self {
         let font = crate::font::load_system_font();
         if let Some(bytes) = font {
@@ -50,6 +55,7 @@ impl RecordApp {
             stop,
             status,
             max_duration,
+            scroll_mode,
         }
     }
 
@@ -73,31 +79,52 @@ impl eframe::App for RecordApp {
 
         egui::CentralPanel::default().show(ui, |ui| {
             ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("● 录制中")
-                        .color(egui::Color32::RED)
-                        .strong(),
-                );
-                ui.add_space(6.0);
-                ui.label(format!("{:.0} 秒 / {} 帧", status.elapsed, status.frames));
-            });
+            if self.scroll_mode {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("● 滚动拼接中")
+                            .color(egui::Color32::from_rgb(0x21, 0x96, 0xf3))
+                            .strong(),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(format!("高度 {} px / {} 步", status.height, status.frames));
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("● 录制中")
+                            .color(egui::Color32::RED)
+                            .strong(),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(format!("{:.0} 秒 / {} 帧", status.elapsed, status.frames));
+                });
+            }
             ui.add_space(6.0);
 
-            // 进度条：已录时长 / 最大时长
+            // 进度条：录制 = 已录时长/最大时长；滚动 = 已滚步数/最大步数
             let frac = if self.max_duration > 0.0 {
-                (status.elapsed / self.max_duration).clamp(0.0, 1.0)
+                let cur = if self.scroll_mode {
+                    status.frames as f32
+                } else {
+                    status.elapsed
+                };
+                (cur / self.max_duration).clamp(0.0, 1.0)
             } else {
                 0.0
             };
             ui.add(egui::ProgressBar::new(frac).animate(false));
 
             ui.add_space(8.0);
-            if ui.button("停止录制 (Esc)").clicked() {
+            if ui.button("停止 (Esc)").clicked() {
                 self.request_stop(&ctx);
             }
             ui.add_space(6.0);
-            ui.small("停止后 GIF 会保存到 Pictures 目录；也可按 Esc 结束");
+            ui.small(if self.scroll_mode {
+                "停止后长图会保存到 Pictures 目录；也可按 Esc 结束。请保持窗口不再操作"
+            } else {
+                "停止后录屏文件会保存到 Pictures 目录；也可按 Esc 结束"
+            });
         });
 
         // 每秒刷新一次（帧数/时长不是逐帧变化，避免空转烧 CPU）

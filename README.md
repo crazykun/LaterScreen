@@ -91,7 +91,9 @@ lscreen qr -i photo.png                # 识别图片文件中的二维码
 lscreen ocr --region 0,0,800,600       # 识别屏幕区域文字
 lscreen ocr -i doc.png --lang chi_sim --lang eng          # 识别图片文字
 lscreen record --select --fps 10       # 框选区域录制 GIF，Esc / 停止按钮结束
+lscreen record --select --mp4          # 录制 MP4/H.264（Linux）
 lscreen record --region 0,0,800,600 -o demo.gif           # 按区域直接录制
+lscreen scroll                         # 滚动长截图：框选 → 自动滚动拼接 → 标注预览（Linux X11）
 lscreen shot -o out.png                # 无界面截全屏
 lscreen shot --region 100,100,800,600 --clipboard         # 截区域进剪贴板
 lscreen pin -i img.png                 # 把图片钉在屏幕上
@@ -112,10 +114,16 @@ lscreen tray --foreground              # 托盘前台运行（调试/自启动�
 | | `-c, --clipboard` | 同时复制到剪贴板 |
 | `record` | `--region X,Y,W,H` | 录制区域，缺省整主屏 |
 | | `--select` | 先交互框选区域，框完立即开始录制（Esc 取消） |
+| | `--mp4` | 编码为 MP4/H.264（缺省 GIF；目前 Linux 可用） |
 | | `--duration <秒>` | 最长录制时长，缺省 30 |
 | | `--fps <1-30>` | 帧率，缺省 10 |
-| | `--quality <1-100>` | GIF 编码质量，缺省 90 |
-| | `-o, --output <路径>` | 输出 `.gif` 路径，缺省 `~/Pictures` |
+| | `--quality <值>` | GIF 编码质量 1-100（缺省 90）；`--mp4` 时为目标码率 kbps 200-50000（缺省 4000） |
+| | `-o, --output <路径>` | 输出 `.gif`/`.mp4` 路径，缺省 `~/Pictures` |
+| `scroll` | `--region X,Y,W,H` | 截取区域，缺省交互框选（Esc 取消）；仅 Linux X11 |
+| | `--steps <1-1000>` | 最大滚动步数，缺省 60 |
+| | `--clicks <1-9>` | 每步滚轮格数，缺省 2 |
+| | `--pause-ms <50-2000>` | 每步等待内容稳定的毫秒数，缺省 200 |
+| | `-o, --output <路径>` | 输出 PNG 路径；缺省打开标注预览窗口（保存/复制/贴图） |
 | `ocr` | `--region X,Y,W,H` | 识别区域，缺省整主屏 |
 | | `-i, --input <图片>` | 从图片识别（PNG/JPEG），指定时忽略 `--region` |
 | | `--lang <语言>` | 识别语言，可多次，如 `--lang chi_sim --lang eng` |
@@ -227,13 +235,13 @@ git tag v0.3.0 && git push --tags   # 自动构建全平台包并发布 GitHub R
 - [x] 取色器、二维码识别
 - [x] OCR（Windows 系统 OCR / macOS Vision / Linux tesseract，内置 ocrs 兜底）
 - [x] GIF 录屏
+- [x] MP4 录屏（Linux openh264 静态链接；Win/mac 系统编码器待实现）
+- [x] 滚动长截图（Linux X11：自动滚动 + 帧间拼接 + 标注预览）
 - [x] 贴图（Pin to screen）
 - [x] CLI 无界面模式
 - [x] 托盘常驻 + 全局热键 + 配置面板
 - [x] 全平台打包发布（deb / rpm / AppImage / Windows 安装器 / dmg）
-- [ ] MP4 录屏（系统编码器）
-- [ ] 滚动长截图
-- [ ] Wayland 支持（xdg-desktop-portal）
+- [x] Wayland 整屏截图（xdg-desktop-portal；区域采帧/录屏仍 X11）
 - [ ] 混合 DPI 多显示器
 
 详见 [docs/PLAN.md](docs/PLAN.md)。

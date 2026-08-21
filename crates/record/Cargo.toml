@@ -7,4 +7,9 @@ license.workspace = true
 [dependencies]
 gifski = { version = "1.34.0", default-features = false }
 imgref = "1.12.2"
+mp4 = "0.14.0"
+bytes = "1"
+# 无 asm 构建（CI 无 nasm 也能编译）；发布可开 asm 提升编码速度。
+# 静态链接 vendored C++ 源码，保持「无动态库依赖」
+openh264 = { version = "0.9.8", default-features = false, features = ["source"] }
 rgb = "0.8.53"

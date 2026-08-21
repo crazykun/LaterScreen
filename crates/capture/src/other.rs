@@ -139,3 +139,12 @@ pub fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<Screenshot> {
         is_primary: false,
     })
 }
+
+/// Win/mac 的滚轮合成（SendInput / CGEvent）随 M4 系统编码器一并实现
+pub fn scroll_wheel(_clicks: i32) -> Result<()> {
+    Err(CaptureError("当前平台暂不支持滚动截图".into()))
+}
+
+pub fn warp_pointer(_x: i32, _y: i32) -> Result<()> {
+    Err(CaptureError("当前平台暂不支持指针移动".into()))
+}

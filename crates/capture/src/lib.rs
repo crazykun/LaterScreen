@@ -81,6 +81,17 @@ pub fn cursor_position() -> Option<(i32, i32)> {
     platform::cursor_position()
 }
 
+/// 在指针当前位置发送滚轮事件（clicks > 0 向上，< 0 向下）。
+/// 平台不支持（Win/mac 未实现）返回 Err。
+pub fn scroll_wheel(clicks: i32) -> Result<()> {
+    platform::scroll_wheel(clicks)
+}
+
+/// 把指针移动到虚拟桌面坐标 (x, y)。平台不支持返回 Err。
+pub fn warp_pointer(x: i32, y: i32) -> Result<()> {
+    platform::warp_pointer(x, y)
+}
+
 // ---------------------------------------------------------------- 窗口枚举（M9）
 
 /// 一个可交互的顶层窗口。坐标语义与 `Screenshot::origin` 同一坐标系同一单位

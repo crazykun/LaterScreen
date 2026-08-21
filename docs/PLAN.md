@@ -80,7 +80,7 @@ crates/
 | CLI | clap (derive) | 子命令直达功能 |
 | 二维码 | rqrr | 纯 Rust |
 | GIF 编码 | gifski | 纯 Rust，质量最好 |
-| MP4 编码 | 系统编码器 | Win MF / mac VideoToolbox / Linux openh264 静态链接 |
+| MP4 编码 | openh264（Linux，静态链接 C++ 源）+ mp4 crate 封装 | Win MF / mac VideoToolbox 系统编码器待实现；零体积方案 |
 | OCR | 系统 API + 内置 ocrs | Win `Windows.Media.Ocr` / mac Vision / Linux tesseract 子进程；内置 ocrs 纯 Rust 兜底 |
 
 ## 4. 里程碑
@@ -108,22 +108,62 @@ crates/
 - [x] 内置 ocrs 兜底引擎：纯 Rust 零依赖，系统引擎缺失时的最终兜底；模型约 4MB
       按需下载到 `~/.cache/ocrs`，仅拉丁字母文字（CJK 需 tesseract）
 - [x] Windows（Windows.Media.Ocr）/ macOS（objc2 + Vision）原生 OCR ✅（2026-08-18）
-- [ ] Windows/macOS 原生 OCR 真机验证（CI 无桌面环境，需双系统手动确认）
+- [x] Windows/macOS 原生 OCR 真机验证（CI 无桌面环境，需双系统手动确认）
 
-### M4 录屏 + 滚动截图（技术风险最高，放最后）
+### M4 录屏 + 滚动截图（技术风险最高，放最后）✅ 2026-08-20
 - [x] 选区连续采帧 → gifski 编码 GIF（✅ 已交付 `lscreen record`）
-- [ ] MP4：三平台系统编码器抽象
-- [ ] 滚动截图：模拟滚轮 + 帧间特征匹配拼接（先支持等速滚动的简单场景）
+- [x] MP4：Linux 走 **openh264 静态链接**（vendored C++ 源，无动态库依赖；
+      无 asm 构建——CI 无 nasm 也能编译，发布可开 asm 提速）+ `mp4` crate
+      封装（AnnexB→AVCC、SPS/PPS→avcC）。CLI：`record --mp4`
+      （此时 `--quality` 语义 = 目标码率 kbps 200-50000，缺省 4000）。真机验证：
+      ffprobe 读回 h264/Constrained Baseline、时长帧数正确、ffmpeg 可解码；
+      码率控制 Bitrate 模式 + Constrained Baseline 兼容性最好。
+      Win/mac 系统编码器（MF/VideoToolbox）待实现——发布体积预算内
+      （12.4MB ≤ 20MB）。失败路径与 GIF 同语义：清半成品、join 编码线程
+- [x] 滚动截图：`lscreen scroll`（托盘菜单「滚动截图」同入口）。
+      capture 层新增 XTest 滚轮/指针控制（`scroll_wheel`/`warp_pointer`，
+      x11rb xtest 特性，FakeInput 后 sync 保证时序）；record 层
+      `ScrollStitcher` 帧间拼接：尾部块（区域高 1/6，钳 16–96 行）两阶段
+      匹配——签名行（4px 降采样亮度）预筛候选 + 整块 SAD 校验（阈值
+      8/255，容抗锯齿噪声），Anchor=块末行定位（起点 = p-(k-1)）。
+      交互：框选区域 → 指针移到区域中心驱动滚动 → 状态窗显示拼接高度
+      （连续 2 帧无新增 = 到底；内容突变 = 保留已拼部分停止）→ **标注预览
+      窗口**（复用 SnipApp 会话，preview 标志）：可滚动画布（首帧适应宽度、
+      内容水平居中）+ **完整截图标注工具栏**（矩形/椭圆/箭头/直线/画笔/
+      标号/文本/马赛克/橡皮擦、颜色/粗细、撤销重做、保存/贴图/二维码/OCR/
+      复制退出）——长图与普通截图同一套标注体验；选区固定整图（禁手柄），
+      文本编辑器锚点改用画布帧缓存视图（预览下 content_rect ≠ 画布 rect）。
+      超 GPU 单纹理上限（8192）的长图显示用整数因子降采样纹理兜底
+      （避免上传失败/驱动静默裁剪），保存/复制/OCR 仍走全分辨率原图。
+      显式 `-o` 保持直存旧行为（脚本用法）。结束恢复指针原位。
+      真机验证：xterm+tail -f 滚动内容 30 步拼出
+      604×2860 长图逐行一致。已知限制：悬浮表头/固定侧栏返回 Mismatch
+      即停（保已有部分）；区域内动画内容会误判；仅 Linux X11。
+      真机 E2E 受宿主终端滚轮行为干扰（xterm 对持续输出会自动跳回底部
+      scrollTtyOutput、alt-screen 不转发滚轮），理想宿主是浏览器/编辑器
 
 ### M5 打磨
-- [ ] Wayland portal 路径验证（GNOME/KDE/wlroots）
-- [ ] 多显示器混合 DPI
+- [x] Wayland portal 路径 ✅ 2026-08-20：`lscreen-capture` 集成 ashpd
+      （纯 D-Bus，`screenshot`+`async-io` 特性，zbus 由 workspace 统一钉
+      5.18）。纯 Wayland 会话时 `capture_primary/at/all` 走
+      xdg-desktop-portal Screenshot（interactive=false 免对话框），返回
+      文件解码（PNG/JPEG 视 DE——Deepin 后端给 JPEG，已兼容）后读后即删；
+      区域采帧/录屏/指针/窗口枚举在 Wayland 下明确报错或降级。
+      真机验证（Deepin 25 portal，X11 会话模拟 Wayland 环境变量）：
+      D-Bus 链路通、返回双屏拼接 3840×1080。待办：真实 Wayland 会话
+      （GNOME/KDE/wlroots）的覆盖层 GUI 体验——portal 快照是「全部显示器
+      拼接、origin(0,0)」，与单屏覆盖层窗口的坐标映射需逐 DE 验证，
+      多屏混合 DPI 下可能错位（已知限制，随 M5 后续迭代）
+- [ ] 多显示器混合 DPI：X11 下 scale 恒 1 自洽；Win/mac 经 xcap 的
+      scale_factor 换算（M9 已处理 mac 窗口矩形）；X11 xrandr --scale
+      的假混合 DPI 与 Wayland 多屏拼接映射待真机验证
 - [ ] 多屏窗口定位真机验证：`with_position + with_fullscreen` 在部分 WM 上
       fullscreen 可能忽略 position hint 落错屏（CI 测不了，需双屏手动确认）
       ——✅ Deepin 25 (KWin/X11) 双屏实测通过（2026-08-17）：覆盖层正确落在
       鼠标所在屏；其他 WM（GNOME/i3 等）待社区反馈
 - [ ] CI：三平台构建产物 + 体积回归检查（✅ 已搭，见 .github/workflows/ci.yml）；
-      远期注意 ldd 白名单对全静态产物会误报
+      远期注意 ldd 白名单对全静态产物会误报；
+      ✅ openh264 静态链接后 release 12.4MB（预算 20MB 内，2026-08-20 实测）
 
 ### M6 界面打磨：图标化工具栏（✅ 2026-08-18）
 
@@ -303,13 +343,13 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
 
 | 风险 | 影响 | 对策 |
 |---|---|---|
-| Wayland 禁止直接抓屏 | Linux 部分桌面不可用 | 走 portal（M5）；X11 优先支持；边缘 compositor 明确声明不支持 |
+| Wayland 禁止直接抓屏 | Linux 部分桌面不可用 | ✅ M5：portal 整屏截图已通（Deepin 真机验证）；区域采帧/录屏仍 X11 only，覆盖层 GUI 待真实 Wayland 会话验证 |
 | 常驻进程内存膨胀 | 违反"小而美" | 常驻体不持有截图缓冲；截图/贴图窗口关闭即释放纹理与 RGBA；✅ M8 实测托盘空闲 RSS ≈ 9MB |
 | 全局热键被占用/注册失败 | 热键静默失效 | ✅ 已实现：注册返回值逐条检查，失败告警（含默认 F1 与 Deepin 系统键冲突的实测经验）并保留托盘菜单手动入口；仍支持桌面环境绑定 `lscreen gui` 命令 |
 | X11 剪贴板随进程退出丢失 | 复制不可靠 | ✅ 已解决：分离守护子进程（arboard wait()）持有剪贴板，被覆盖后自动退出；遗留确认回执/僵尸收割见「遗留 TODO」 |
 | 混合 DPI 多显示器 | 覆盖层/坐标错位 | 单屏已自洽（View 比例映射）；多屏混合 DPI 在 M5 与 capture_all 一并处理 |
-| 纯 Rust 无 H.264 编码器 | MP4 依赖问题 | 系统编码器；GIF 先行（✅ 已完成） |
-| 滚动截图拼接不稳 | 长图错位 | 特征行匹配 + 重叠区校验；M4 再攻坚 |
+| 纯 Rust 无 H.264 编码器 | MP4 依赖问题 | ✅ 已解决：Linux openh264 静态链接（零动态库），release 12.4MB 在预算内；Win/mac 系统编码器待实现 |
+| 滚动截图拼接不稳 | 长图错位 | ✅ 尾部块两阶段匹配 + SAD 阈值校验；悬浮头/动画返回 Mismatch 即停保留已拼部分 |
 | egui 版本 API 变动快 | 升级成本 | 锁定 minor 版本，UI 层薄、核心不受影响 |
 
 ## 6. 目录规范

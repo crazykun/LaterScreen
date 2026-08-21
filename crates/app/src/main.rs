@@ -61,7 +61,7 @@ enum Cmd {
         #[arg(long = "lang")]
         languages: Vec<String>,
     },
-    /// 录制屏幕为 GIF（Ctrl+C 或时长到达后停止）
+    /// 录制屏幕为 GIF/MP4（Ctrl+C 或时长到达后停止）
     Record {
         /// 录制区域，格式 X,Y,W,H（物理像素）；缺省为整个主屏
         #[arg(long, value_name = "X,Y,W,H", allow_hyphen_values = true)]
@@ -69,16 +69,19 @@ enum Cmd {
         /// 先交互框选录制区域（框完立即开始录制）
         #[arg(long)]
         select: bool,
+        /// 编码为 MP4/H.264（缺省 GIF；MP4 目前 Linux 可用）
+        #[arg(long)]
+        mp4: bool,
         /// 最长录制时长（秒）
         #[arg(long, default_value_t = 30.0)]
         duration: f32,
         /// 帧率 1-30
         #[arg(long, default_value_t = 10)]
         fps: u32,
-        /// 编码质量 1-100
-        #[arg(long, default_value_t = 90)]
-        quality: u8,
-        /// 输出文件路径（.gif）；缺省输出到 ~/Pictures
+        /// 编码质量 1-100（GIF，缺省 90）；MP4 为目标码率 kbps 200-50000（缺省 4000）
+        #[arg(long)]
+        quality: Option<u64>,
+        /// 输出文件路径（.gif/.mp4）；缺省输出到 ~/Pictures
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
@@ -93,6 +96,24 @@ enum Cmd {
         /// 屏幕缩放比（物理像素/逻辑点），用于换算窗口初始尺寸；缺省 1.0
         #[arg(long, default_value_t = 1.0, allow_hyphen_values = true)]
         scale: f32,
+    },
+    /// 滚动长截图：框选区域后自动滚动内容并拼接为长图（Linux X11）
+    Scroll {
+        /// 截取区域，格式 X,Y,W,H（物理像素）；缺省为交互框选
+        #[arg(long, value_name = "X,Y,W,H", allow_hyphen_values = true)]
+        region: Option<String>,
+        /// 最大滚动步数（每步滚动一次滚轮）
+        #[arg(long, default_value_t = 60)]
+        steps: u32,
+        /// 每步滚轮格数
+        #[arg(long, default_value_t = 2)]
+        clicks: u32,
+        /// 每步等待内容稳定的毫秒数
+        #[arg(long, default_value_t = 200)]
+        pause_ms: u64,
+        /// 输出文件路径（PNG）；缺省 = 拼接后打开预览窗口（保存/复制/贴图）
+        #[arg(short, long)]
+        output: Option<PathBuf>,
     },
     /// 无界面截屏：立即截取并保存/复制
     Shot {
@@ -152,6 +173,7 @@ fn main() {
         Some(Cmd::Record {
             region,
             select,
+            mp4,
             duration,
             fps,
             quality,
@@ -170,7 +192,7 @@ fn main() {
             } else {
                 region
             };
-            run_record(region, duration, fps, quality, output)
+            run_record(region, mp4, duration, fps, quality, output)
         }
         Some(Cmd::Shot {
             region,
@@ -179,6 +201,27 @@ fn main() {
             output,
             clipboard,
         }) => run_shot(region, window, window_at, output, clipboard),
+        Some(Cmd::Scroll {
+            region,
+            steps,
+            clicks,
+            pause_ms,
+            output,
+        }) => {
+            // 交互框选优先（与 record --select 同体验）；取消则静默退出
+            let region = match region {
+                Some(r) => Some(r),
+                None => match pick_region_interactive() {
+                    Ok(Some(r)) => Some(r),
+                    Ok(None) => return,
+                    Err(e) => {
+                        eprintln!("lscreen: {e}");
+                        std::process::exit(1);
+                    }
+                },
+            };
+            run_scroll(region, steps, clicks, pause_ms, output)
+        }
         Some(Cmd::Pin { input, pos, scale }) => run_pin(input, pos, scale),
         Some(Cmd::Config) => run_settings(),
     };
@@ -272,6 +315,7 @@ fn pick_region_interactive() -> Result<Option<String>, String> {
                     record_region: Some(shared),
                     windows,
                     initial_region: initial,
+                    preview: false,
                 },
             )))
         }),
@@ -334,6 +378,7 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
                     record_region: None,
                     windows,
                     initial_region: initial,
+                    preview: false,
                 },
             )))
         }),
@@ -498,9 +543,10 @@ fn run_shot(
 
 fn run_record(
     region: Option<String>,
+    mp4_out: bool,
     duration: f32,
     fps: u32,
-    quality: u8,
+    quality: Option<u64>,
     output: Option<PathBuf>,
 ) -> Result<(), String> {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -516,7 +562,14 @@ fn run_record(
     if !(1..=30).contains(&fps) {
         return Err("无效的 --fps（应为 1-30）".into());
     }
-    if !(1..=100).contains(&quality) {
+    // quality 两模式含义不同（缺省值也不同）：
+    // GIF = 质量 1-100（缺省 90）；MP4 = 目标码率 kbps 200-50000（缺省 4000）
+    let quality = quality.unwrap_or(if mp4_out { 4000 } else { 90 });
+    if mp4_out {
+        if !(200..=50_000).contains(&quality) {
+            return Err("MP4 模式 --quality 为目标码率 kbps（200-50000）".into());
+        }
+    } else if !(1..=100).contains(&quality) {
         return Err("无效的 --quality（应为 1-100）".into());
     }
 
@@ -537,7 +590,16 @@ fn run_record(
         }
     };
 
-    let path = output.unwrap_or_else(|| export::default_save_path("gif"));
+    let ext = if mp4_out { "mp4" } else { "gif" };
+    let path = output.unwrap_or_else(|| export::default_save_path(ext));
+    if mp4_out {
+        // 扩展名提醒（不强制改写：用户可能故意用别的名字）
+        if path.extension().is_some_and(|e| e != "mp4") {
+            eprintln!("提示: --mp4 输出建议使用 .mp4 扩展名");
+        }
+    } else if path.extension().is_some_and(|e| e != "gif") {
+        eprintln!("提示: GIF 输出建议使用 .gif 扩展名");
+    }
     let stop = Arc::new(AtomicBool::new(false));
     // ctrlc：交互终端里 Ctrl+C 与状态窗口 Esc 等效；非终端（托盘 spawn）下
     // 收不到 SIGINT，靠状态窗口的停止按钮/Esc 结束
@@ -558,22 +620,47 @@ fn run_record(
         let mut frames = 0usize;
         // 内层 grab 闭包 move 捕获，这里单独 clone 一份，外层结尾仍要用 th_status
         let status_inner = th_status.clone();
-        let result = lscreen_record::record_gif(
-            move || {
-                let shot = lscreen_capture::capture_region(x, y, w, h)
-                    .map(|s| (s.rgba, s.width, s.height))
-                    .map_err(|e| lscreen_record::RecordError(e.to_string()))?;
-                frames += 1;
-                let mut st = status_inner.lock().unwrap();
-                st.elapsed = start.elapsed().as_secs_f32();
-                st.frames = frames;
-                Ok(shot)
-            },
-            &lscreen_record::GifOptions { fps, quality },
-            th_duration,
-            &th_stop,
-            &th_path,
-        );
+        let result = if mp4_out {
+            lscreen_record::record_mp4(
+                move || {
+                    let shot = lscreen_capture::capture_region(x, y, w, h)
+                        .map(|s| (s.rgba, s.width, s.height))
+                        .map_err(|e| lscreen_record::RecordError(e.to_string()))?;
+                    frames += 1;
+                    let mut st = status_inner.lock().unwrap();
+                    st.elapsed = start.elapsed().as_secs_f32();
+                    st.frames = frames;
+                    Ok(shot)
+                },
+                &lscreen_record::Mp4Options {
+                    fps,
+                    bitrate_kbps: quality as u32,
+                },
+                th_duration,
+                &th_stop,
+                &th_path,
+            )
+        } else {
+            lscreen_record::record_gif(
+                move || {
+                    let shot = lscreen_capture::capture_region(x, y, w, h)
+                        .map(|s| (s.rgba, s.width, s.height))
+                        .map_err(|e| lscreen_record::RecordError(e.to_string()))?;
+                    frames += 1;
+                    let mut st = status_inner.lock().unwrap();
+                    st.elapsed = start.elapsed().as_secs_f32();
+                    st.frames = frames;
+                    Ok(shot)
+                },
+                &lscreen_record::GifOptions {
+                    fps,
+                    quality: quality as u8,
+                },
+                th_duration,
+                &th_stop,
+                &th_path,
+            )
+        };
         // 无论成败，都让状态窗口知道录制已结束（自然到时/出错/被停止）
         th_status.lock().unwrap().done = true;
         (start.elapsed().as_secs_f32(), result)
@@ -596,7 +683,7 @@ fn run_record(
         options,
         Box::new(move |cc| {
             Ok(Box::new(record_ui::RecordApp::new(
-                cc, app_stop, app_status, secs,
+                cc, app_stop, app_status, secs, false,
             )))
         }),
     )
@@ -611,6 +698,229 @@ fn run_record(
     eprintln!("已录制 {frames} 帧");
     println!("{}", path.display());
     Ok(())
+}
+
+/// 滚动长截图（M4）：框选区域 → 自动滚动 → 帧间拼接 → 长图 PNG。
+/// 指针被移到区域中心驱动窗口滚动（XTest 滚轮事件落在指针下的窗口），
+/// 结束后恢复原位置。停止条件：连续两帧无变化（滚到底）/内容匹配失败
+/// （悬浮头等）/步数用尽/用户停止。
+fn run_scroll(
+    region: Option<String>,
+    steps: u32,
+    clicks: u32,
+    pause_ms: u64,
+    output: Option<PathBuf>,
+) -> Result<(), String> {
+    if !(1..=1000).contains(&steps) {
+        return Err("无效的 --steps（应为 1-1000）".into());
+    }
+    if !(1..=9).contains(&clicks) {
+        return Err("无效的 --clicks（应为 1-9）".into());
+    }
+    if !(50..=2000).contains(&pause_ms) {
+        return Err("无效的 --pause-ms（应为 50-2000）".into());
+    }
+    let (x, y, w, h) = match region {
+        Some(s) => {
+            let r = parse_region(&s)?;
+            (
+                r.min.x as i32,
+                r.min.y as i32,
+                r.width() as u32,
+                r.height() as u32,
+            )
+        }
+        None => {
+            // 无区域时已被上游交互框选填充；防御性兜底：主屏
+            let shot = lscreen_capture::capture_primary().map_err(|e| e.to_string())?;
+            (shot.origin.0, shot.origin.1, shot.width, shot.height)
+        }
+    };
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = stop.clone();
+        let _ = ctrlc::set_handler(move || stop.store(true, Ordering::Relaxed));
+    }
+    let status = Arc::new(Mutex::new(record_ui::RecordStatus::default()));
+    let explicit_out = output.is_some();
+    let path = output.unwrap_or_else(|| export::default_save_path("png"));
+
+    // 拼接线程：滚动 + 采帧 + 匹配；状态窗口显示进度
+    let (th_stop, th_status, th_path) = (stop.clone(), status.clone(), path.clone());
+    let pause = std::time::Duration::from_millis(pause_ms);
+    let stitcher = std::thread::spawn(
+        move || -> std::result::Result<lscreen_record::scroll::ScrollStitcher, String> {
+            // 指针移到区域中心驱动滚动，结束恢复原位（尽量不打扰用户）。
+            // 主体收进闭包：任何错误路径都必须走到收尾（恢复指针 + 置 done
+            // 让状态窗口自动关），提前 return 会让窗口挂死等用户手关
+            let orig_pos = lscreen_capture::cursor_position();
+            let result = (|| {
+                let first =
+                    lscreen_capture::capture_region(x, y, w, h).map_err(|e| e.to_string())?;
+                let mut st = lscreen_record::scroll::ScrollStitcher::new(
+                    &first.rgba,
+                    first.width,
+                    first.height,
+                )
+                .map_err(|e| e.to_string())?;
+                {
+                    let mut s = th_status.lock().unwrap();
+                    s.height = st.height();
+                    s.frames = 0;
+                }
+                let _ = lscreen_capture::warp_pointer(x + w as i32 / 2, y + h as i32 / 2);
+                // 给 WM 一点时间完成指针移动与焦点切换
+                std::thread::sleep(std::time::Duration::from_millis(150));
+
+                let mut no_change = 0u32;
+                let mut scrolled = false;
+                for step in 1..=steps {
+                    if th_stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    lscreen_capture::scroll_wheel(-(clicks as i32)).map_err(|e| e.to_string())?;
+                    std::thread::sleep(pause);
+                    let frame =
+                        lscreen_capture::capture_region(x, y, w, h).map_err(|e| e.to_string())?;
+                    let outcome = st
+                        .push(&frame.rgba, frame.width, frame.height)
+                        .map_err(|e| e.to_string())?;
+                    {
+                        let mut s = th_status.lock().unwrap();
+                        s.frames = step as usize;
+                        s.height = st.height();
+                    }
+                    match outcome {
+                        lscreen_record::scroll::ScrollOutcome::Appended(_) => {
+                            no_change = 0;
+                            scrolled = true;
+                        }
+                        lscreen_record::scroll::ScrollOutcome::NoChange => {
+                            no_change += 1;
+                            // 连续两帧无新增 = 已滚到底（或窗口不滚动）
+                            if no_change >= 2 {
+                                break;
+                            }
+                        }
+                        // 内容突变（悬浮表头/动画/弹窗）：保留已有结果停止
+                        lscreen_record::scroll::ScrollOutcome::Mismatch => break,
+                    }
+                }
+                if !scrolled {
+                    return Err("未检测到滚动（窗口可能不支持滚轮或已在底部）".into());
+                }
+                Ok(st)
+            })();
+            if let Some((px, py)) = orig_pos {
+                let _ = lscreen_capture::warp_pointer(px, py);
+            }
+            // 无论成败都让状态窗口自动关（对齐 run_record 的收尾语义）
+            th_status.lock().unwrap().done = true;
+            result
+        },
+    );
+
+    // 状态窗口：停止按钮/Esc/关窗置 stop；拼接线程 done 后自动关
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_inner_size([320.0, 150.0])
+        .with_resizable(false)
+        .with_always_on_top()
+        .with_title("lscreen 滚动截图");
+    let options = eframe::NativeOptions {
+        viewport,
+        ..Default::default()
+    };
+    let app_stop = stop.clone();
+    let app_status = status.clone();
+    eframe::run_native(
+        "lscreen-scroll-status",
+        options,
+        Box::new(move |cc| {
+            Ok(Box::new(record_ui::RecordApp::new(
+                cc,
+                app_stop,
+                app_status,
+                steps as f32,
+                true,
+            )))
+        }),
+    )
+    .map_err(|e| e.to_string())?;
+
+    // 事件循环退出（用户停止/窗口关闭）：收尾拼接线程
+    stop.store(true, Ordering::Relaxed);
+    let result = stitcher
+        .join()
+        .map_err(|_| "拼接线程异常退出".to_string())?;
+    let st = result?;
+    let (mut img, mut ih) = (st.image().to_vec(), st.height());
+    let iw = st.width();
+    // GPU 单纹理高度上限普遍 8192/16384：超限截断保预览可用（纹理被驱动
+    // 静默裁剪更糟），不静默——stderr 明示
+    const MAX_H: u32 = 8192;
+    if ih > MAX_H {
+        img.truncate((iw * MAX_H) as usize * 4);
+        ih = MAX_H;
+        eprintln!("lscreen: 长图超过 {MAX_H}px，已截断（建议分多次滚动截图）");
+    }
+
+    match explicit_out {
+        // 显式 -o：脚本用法，直接落盘（保持旧行为）
+        true => {
+            let saved = export::save_png(&img, iw, ih, &th_path)?;
+            eprintln!("已拼接长图 {iw}×{ih}");
+            println!("{}", saved.display());
+            Ok(())
+        }
+        // 默认：打开标注预览窗口（复用截图标注会话：全工具标注 +
+        // 保存/复制/贴图/OCR/二维码，Esc 退出）
+        false => {
+            let (vw, vh) = (
+                (iw as f32 * 0.6).clamp(560.0, 960.0),
+                (ih as f32 * 0.5).clamp(420.0, 720.0),
+            );
+            let viewport = eframe::egui::ViewportBuilder::default()
+                .with_inner_size([vw, vh])
+                .with_min_inner_size([520.0, 360.0])
+                .with_title("lscreen 滚动截图 - 标注");
+            let options = eframe::NativeOptions {
+                viewport,
+                ..Default::default()
+            };
+            let config = config::Config::load();
+            let shot = lscreen_capture::Screenshot {
+                rgba: img,
+                width: iw,
+                height: ih,
+                origin: (0, 0),
+                scale: 1.0,
+                is_primary: true,
+            };
+            eframe::run_native(
+                "lscreen-scroll-preview",
+                options,
+                Box::new(move |cc| {
+                    Ok(Box::new(ui::SnipApp::new(
+                        cc,
+                        ui::OverlayInit {
+                            shot,
+                            font: font::load_system_font(),
+                            mode: ui::Mode::Snip,
+                            config,
+                            record_region: None,
+                            windows: Vec::new(),
+                            initial_region: None,
+                            preview: true,
+                        },
+                    )))
+                }),
+            )
+            .map_err(|e| e.to_string())
+        }
+    }
 }
 
 /// 贴图入口：读图（文件或 stdin）→ 置顶无边框窗口。

@@ -127,6 +127,9 @@ pub struct OverlayInit {
     pub windows: Vec<WinRect>,
     /// 初始预选窗口（仅配置为「最前窗口」时由调用方算好传入）
     pub initial_region: Option<WinRect>,
+    /// 标注预览模式（滚动长截图收尾）：普通窗口 + 可滚动画布 + 底部
+    /// 标注工具栏，直接进 Editing、选区 = 整图
+    pub preview: bool,
 }
 
 pub struct SnipApp {
@@ -168,6 +171,13 @@ pub struct SnipApp {
     pub config: Config,
     /// Mode::Record 专用：框选完成后的输出通道
     pub record_region: Option<SharedRegion>,
+    /// 标注预览模式（滚动长截图）：窗口非全屏、画布可滚动、工具栏锚窗口底部
+    pub preview: bool,
+    /// 预览画布缩放；0.0 = 首帧按窗口宽自适应（≤100%）
+    pub preview_zoom: f32,
+    /// 最近一帧画布的视图映射（文本编辑器定位用——预览模式下
+    /// ctx.content_rect 与画布 rect 不再相等）
+    pub last_view: View,
 }
 
 impl SnipApp {
@@ -180,6 +190,7 @@ impl SnipApp {
             record_region,
             windows,
             initial_region,
+            preview,
         } = init;
         // 先用 Renderer 解析一遍：epaint 内部同样用 ab_glyph，且解析失败是 panic!
         // 而非 Err。这里只把已确认可解析的字节交给 egui，坏字体退回内置字体。
@@ -208,14 +219,26 @@ impl SnipApp {
                 crate::config::InitialSelection::None => None,
             }
         };
+        // 预览模式直接进标注：选区 = 整图（保存/复制/OCR 都作用于全图）
+        let (stage, region) = if preview {
+            (
+                Stage::Editing,
+                RectF::from_points(
+                    P2::new(0.0, 0.0),
+                    P2::new(shot.width as f32, shot.height as f32),
+                ),
+            )
+        } else {
+            (Stage::Selecting, RectF::default())
+        };
         Self {
             shot,
             texture: None,
             doc: Document::default(),
             renderer,
             mode,
-            stage: Stage::Selecting,
-            region: RectF::default(),
+            stage,
+            region,
             sel_window,
             windows,
             tool,
@@ -234,15 +257,40 @@ impl SnipApp {
             close_requested: false,
             config,
             record_region,
+            preview,
+            preview_zoom: 0.0,
+            last_view: View {
+                origin: Pos2::ZERO,
+                scale: 1.0,
+            },
         }
     }
 
     fn texture(&mut self, ctx: &egui::Context) -> TextureHandle {
         if self.texture.is_none() {
-            let img = egui::ColorImage::from_rgba_unmultiplied(
-                [self.shot.width as usize, self.shot.height as usize],
-                &self.shot.rgba,
-            );
+            // GPU 单纹理有尺寸上限（常见 8192/16384），滚动长截图可能超高——
+            // 超限纹理会上传失败或被驱动静默裁剪。超限时显示用整数因子降采样
+            // 兜底（画布把纹理拉伸到目标 rect，坐标映射不受影响）；
+            // 保存/复制/OCR 仍走全分辨率 shot.rgba
+            const MAX_TEX: usize = 8192;
+            let (w, h) = (self.shot.width as usize, self.shot.height as usize);
+            let factor = w.max(h).div_ceil(MAX_TEX).max(1);
+            let img = if factor == 1 {
+                egui::ColorImage::from_rgba_unmultiplied([w, h], &self.shot.rgba)
+            } else {
+                let (dw, dh) = (w.div_ceil(factor), h.div_ceil(factor));
+                let mut pixels = Vec::with_capacity(dw * dh);
+                for y in (0..h).step_by(factor) {
+                    for x in (0..w).step_by(factor) {
+                        let i = (y * w + x) * 4;
+                        let p = &self.shot.rgba[i..i + 4];
+                        pixels.push(egui::Color32::from_rgba_unmultiplied(
+                            p[0], p[1], p[2], p[3],
+                        ));
+                    }
+                }
+                egui::ColorImage::new([dw, dh], pixels)
+            };
             // 放大用最近邻（放大镜像素格清晰），常规显示用线性
             let options = egui::TextureOptions {
                 magnification: egui::TextureFilter::Nearest,
@@ -697,7 +745,11 @@ impl eframe::App for SnipApp {
         self.poll_scan(&ctx);
 
         let texture = self.texture(&ctx);
-        canvas::show(self, ui, &texture);
+        if self.preview {
+            canvas::show_scrolled(self, ui, &texture);
+        } else {
+            canvas::show(self, ui, &texture);
+        }
 
         if self.mode == Mode::Snip && matches!(self.stage, Stage::Editing) {
             toolbar::show(self, &ctx);
@@ -731,7 +783,7 @@ pub type MosaicCache = HashMap<u64, (u64, Vec<MosaicCell>)>;
 
 /// 拉起独立的贴图进程：stdin 写入 PNG 后即返回（不 wait——
 /// 贴图进程独立存活，父进程退出后被 init 收养）。
-fn spawn_pin(png: &[u8], x: f32, y: f32, scale: f32) -> Result<(), String> {
+pub(crate) fn spawn_pin(png: &[u8], x: f32, y: f32, scale: f32) -> Result<(), String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
 

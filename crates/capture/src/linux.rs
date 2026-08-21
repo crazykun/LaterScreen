@@ -1,5 +1,6 @@
 //! Linux X11 截屏：x11rb 纯 Rust 实现。
-//! Wayland 会话暂不支持（M5 走 xdg-desktop-portal），检测到时给出明确报错。
+//! Wayland 会话走 xdg-desktop-portal（M5，纯 D-Bus，只支持整屏快照——
+//! 区域采帧/录屏/指针查询在 Wayland 下明确报错降级）。
 
 use crate::{CaptureError, Result, Screenshot};
 
@@ -19,17 +20,62 @@ fn err<E: std::fmt::Display>(e: E) -> CaptureError {
     CaptureError(e.to_string())
 }
 
-fn ensure_x11() -> Result<()> {
-    // 会话类型为 wayland，或无 DISPLAY 的纯 Wayland 会话（XDG_SESSION_TYPE
-    // 并不总是被设置）都直接给明确报错，而不是让 x11rb 报底层连接错误
+/// 当前会话是否纯 Wayland（无 X11 可用）
+fn is_wayland() -> bool {
     let session_wayland = std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland");
     let no_x11 = std::env::var_os("DISPLAY").is_none();
-    if session_wayland || (no_x11 && std::env::var_os("WAYLAND_DISPLAY").is_some()) {
+    session_wayland || (no_x11 && std::env::var_os("WAYLAND_DISPLAY").is_some())
+}
+
+/// X11 直连前置检查（区域采帧/录屏/指针路径仍走 X11）
+fn ensure_x11() -> Result<()> {
+    if is_wayland() {
         return Err(CaptureError(
-            "Wayland 会话暂不支持（X11 抓屏抓不到原生 Wayland 窗口），敬请期待".into(),
+            "Wayland 会话仅支持整屏截图（portal），区域采帧/录屏暂不支持".into(),
         ));
     }
     Ok(())
+}
+
+/// 经 xdg-desktop-portal 截整屏（M5 Wayland 路径）。
+/// portal 只回整幅 PNG 文件（可能是全部显示器的拼接，视 DE 而定），
+/// origin 固定 (0,0)。首次调用可能触发权限确认（视 DE 的 portal 后端策略）。
+fn portal_screenshot() -> Result<Screenshot> {
+    async_io::block_on(async {
+        use ashpd::desktop::screenshot::{ScreenshotOptions, ScreenshotProxy};
+
+        let proxy = ScreenshotProxy::new()
+            .await
+            .map_err(|e| CaptureError(format!("连接 xdg-desktop-portal 失败: {e}")))?;
+        // request() 内部已 await Response 信号；response() 同步取结果
+        let opts = ScreenshotOptions::default()
+            .set_interactive(false)
+            .set_modal(true);
+        let request = proxy
+            .screenshot(None, opts)
+            .await
+            .map_err(|e| CaptureError(format!("portal 请求失败: {e}")))?;
+        let response = request
+            .response()
+            .map_err(|e| CaptureError(format!("portal 响应失败（未授权？）: {e}")))?;
+        let uri = response.uri().as_str();
+        let path = uri.strip_prefix("file://").unwrap_or(uri);
+        let data = std::fs::read(path)
+            .map_err(|e| CaptureError(format!("读取 portal 截图失败: {e}（{path}）")))?;
+        let _ = std::fs::remove_file(path); // portal 产物在临时目录，读后即清
+        let img = image::load_from_memory(&data)
+            .map_err(|e| CaptureError(format!("portal 截图解码失败: {e}")))?
+            .into_rgba8();
+        let (width, height) = (img.width(), img.height());
+        Ok(Screenshot {
+            rgba: img.into_raw(),
+            width,
+            height,
+            origin: (0, 0),
+            scale: 1.0,
+            is_primary: true,
+        })
+    })
 }
 
 fn monitors(conn: &impl Connection, screen: &Screen) -> Result<Vec<MonitorInfo>> {
@@ -122,6 +168,9 @@ fn with_conn<T>(
 }
 
 pub fn capture_primary() -> Result<Screenshot> {
+    if is_wayland() {
+        return portal_screenshot();
+    }
     with_conn(|conn, screen| {
         let mons = monitors(conn, screen)?;
         let m = mons
@@ -134,6 +183,10 @@ pub fn capture_primary() -> Result<Screenshot> {
 }
 
 pub fn capture_at(x: i32, y: i32) -> Result<Screenshot> {
+    // portal 无显示器区分：Wayland 下任何坐标都给整幅快照
+    if is_wayland() {
+        return portal_screenshot();
+    }
     with_conn(|conn, screen| {
         let mons = monitors(conn, screen)?;
         let m = mons
@@ -146,6 +199,9 @@ pub fn capture_at(x: i32, y: i32) -> Result<Screenshot> {
 }
 
 pub fn capture_all() -> Result<Vec<Screenshot>> {
+    if is_wayland() {
+        return Ok(vec![portal_screenshot()?]);
+    }
     with_conn(|conn, screen| {
         monitors(conn, screen)?
             .iter()
@@ -450,5 +506,43 @@ pub fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<Screenshot> {
                 primary: false,
             },
         )
+    })
+}
+
+// ------------------------------------------------- 指针控制（M4 滚动截图）
+
+/// 在指针当前位置发送滚轮事件（XTest FakeInput，root=0 即指针所在屏，
+/// 事件天然落在指针下的窗口上）。clicks > 0 向上，< 0 向下。
+pub fn scroll_wheel(clicks: i32) -> Result<()> {
+    use x11rb::protocol::xproto::ButtonIndex;
+    use x11rb::protocol::xtest::ConnectionExt as _;
+    use x11rb::wrapper::ConnectionExt as _;
+    const PRESS: u8 = 4; // ButtonPress
+    const RELEASE: u8 = 5; // ButtonRelease
+    let button: u8 = if clicks > 0 {
+        ButtonIndex::M4.into()
+    } else {
+        ButtonIndex::M5.into()
+    };
+    with_conn(|conn, _| {
+        for _ in 0..clicks.unsigned_abs() {
+            conn.xtest_fake_input(PRESS, button, 0, x11rb::NONE, 0, 0, 0)
+                .map_err(err)?;
+            conn.xtest_fake_input(RELEASE, button, 0, x11rb::NONE, 0, 0, 0)
+                .map_err(err)?;
+        }
+        // FakeInput 是 Void 请求：sync 确保服务器已处理完再返回，
+        // 否则紧随其后的截屏可能发生在滚动生效之前
+        conn.sync().map_err(err)
+    })
+}
+
+/// 把指针移动到虚拟桌面坐标 (x, y)。
+pub fn warp_pointer(x: i32, y: i32) -> Result<()> {
+    use x11rb::wrapper::ConnectionExt as _;
+    with_conn(|conn, screen| {
+        conn.warp_pointer(x11rb::NONE, screen.root, 0, 0, 0, 0, x as i16, y as i16)
+            .map_err(err)?;
+        conn.sync().map_err(err)
     })
 }

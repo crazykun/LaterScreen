@@ -34,6 +34,7 @@ pub enum Action {
     Picker,
     Pin,
     Record,
+    Scroll,
     Config,
     Quit,
 }
@@ -43,6 +44,7 @@ const MENU_ACTIONS: &[(Action, &str)] = &[
     (Action::Picker, "取色"),
     (Action::Pin, "贴图"),
     (Action::Record, "录屏"),
+    (Action::Scroll, "滚动截图"),
     (Action::Config, "配置"),
     (Action::Quit, "退出"),
 ];
@@ -55,6 +57,7 @@ fn dispatch(a: Action) -> bool {
         Action::Screenshot => spawn_detached(&["gui"]),
         Action::Picker => spawn_detached(&["pick"]),
         Action::Record => spawn_detached(&["record", "--select"]),
+        Action::Scroll => spawn_detached(&["scroll"]),
         Action::Config => spawn_detached(&["config"]),
         Action::Pin => {
             if let Err(e) = pin_from_clipboard() {
@@ -601,6 +604,7 @@ mod native_impl {
                     "pick" => Some(Action::Picker),
                     "pin" => Some(Action::Pin),
                     "record" => Some(Action::Record),
+                    "scroll" => Some(Action::Scroll),
                     "config" => Some(Action::Config),
                     "quit" => Some(Action::Quit),
                     _ => None,
@@ -647,6 +651,7 @@ mod native_impl {
             Action::Picker => "pick",
             Action::Pin => "pin",
             Action::Record => "record",
+            Action::Scroll => "scroll",
             Action::Config => "config",
             Action::Quit => "quit",
         }

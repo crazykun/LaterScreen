@@ -41,11 +41,38 @@ const CORNER_GRAB_PT: f32 = 12.0;
 const EDGE_GRAB_PT: f32 = 8.0;
 
 pub fn show(app: &mut SnipApp, ui: &mut egui::Ui, texture: &TextureHandle) {
-    let rect = ui.max_rect();
+    show_in(app, ui, ui.max_rect(), texture);
+}
+
+/// 预览模式（滚动长截图标注）：可滚动画布。
+/// ScrollArea 内容坐标 == 屏幕坐标系（egui 每帧按滚动偏移重排内容），
+/// 因此 show_in 的 View 映射、命中检测、绘制无需任何平移换算。
+pub fn show_scrolled(app: &mut SnipApp, ui: &mut egui::Ui, texture: &TextureHandle) {
+    // 首帧按窗口宽度自适应缩放（长图主形态；不放大超过 100%）
+    if app.preview_zoom <= 0.0 {
+        let avail = (ui.available_width() - 12.0).max(50.0);
+        app.preview_zoom = (avail / app.shot.width as f32).clamp(0.05, 1.0);
+    }
+    let size = Vec2::new(app.shot.width as f32, app.shot.height as f32) * app.preview_zoom;
+    egui::ScrollArea::both()
+        .id_salt("preview-canvas")
+        .auto_shrink([false, false])
+        .show_viewport(ui, |ui, _viewport| {
+            // 内容比视口窄时水平居中
+            let cursor = ui.cursor().min;
+            let extra = ((ui.available_width() - size.x) / 2.0).max(0.0);
+            let rect = Rect::from_min_size(Pos2::new(cursor.x + extra, cursor.y), size);
+            ui.allocate_rect(rect, Sense::click_and_drag());
+            show_in(app, ui, rect, texture);
+        });
+}
+
+fn show_in(app: &mut SnipApp, ui: &mut egui::Ui, rect: Rect, texture: &TextureHandle) {
     let view = View {
         origin: rect.min,
         scale: app.shot.width as f32 / rect.width().max(1.0),
     };
+    app.last_view = view;
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
     let painter = ui.painter().clone();
 
@@ -447,6 +474,16 @@ fn editing(
     }
     draw_highlights(app, painter, view);
 
+    // 预览模式选区固定整图：画一圈淡边即可，不画 8 个拖拽手柄
+    if app.preview {
+        painter.rect_stroke(
+            region_pt,
+            0.0,
+            Stroke::new(1.0, Color32::from_black_alpha(90)),
+            StrokeKind::Inside,
+        );
+        return;
+    }
     painter.rect_stroke(
         region_pt,
         0.0,
@@ -478,8 +515,11 @@ fn editing(
     }
 }
 
-/// 命中选区角点：返回 (角点下标, 对角点)。
+/// 命中选区角点：返回 (角点下标, 对角点)。预览模式选区固定整图，不可调。
 fn hit_corner(app: &SnipApp, view: View, pos_pt: Pos2) -> Option<(usize, P2)> {
+    if app.preview {
+        return None;
+    }
     let corners = app.region.corners();
     for (i, c) in corners.iter().enumerate() {
         if view.to_pt(*c).distance(pos_pt) <= CORNER_GRAB_PT {
@@ -490,8 +530,11 @@ fn hit_corner(app: &SnipApp, view: View, pos_pt: Pos2) -> Option<(usize, P2)> {
 }
 
 /// 命中选区边（整条边可拖）：返回边下标（0=左 1=上 2=右 3=下）。
-/// 角点优先级更高，调用方需先测角点。
+/// 角点优先级更高，调用方需先测角点。预览模式不可调。
 fn hit_edge(app: &SnipApp, view: View, pos_pt: Pos2) -> Option<usize> {
+    if app.preview {
+        return None;
+    }
     let r = view.rect_pt(app.region);
     let tol = EDGE_GRAB_PT;
     let in_x = pos_pt.x >= r.min.x - tol && pos_pt.x <= r.max.x + tol;
@@ -1027,11 +1070,8 @@ pub fn show_text_editor(app: &mut SnipApp, ctx: &egui::Context) {
             return;
         }
     };
-    let screen = ctx.content_rect();
-    let view = View {
-        origin: screen.min,
-        scale: app.shot.width as f32 / screen.width().max(1.0),
-    };
+    // 预览模式画布 rect ≠ ctx.content_rect，用画布帧缓存的 last_view
+    let view = app.last_view;
     let anchor = view.to_pt(pos);
     let font_pt = view.len_pt(style.font_size);
 
