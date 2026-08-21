@@ -681,6 +681,9 @@ impl SnipApp {
     }
 
     fn show_results(&mut self, ctx: &egui::Context) {
+        /// 结果面板右下角悬浮复制按钮的尺寸（固定，因需先算位置再放控件）
+        const FLOAT_BTN: egui::Vec2 = egui::vec2(88.0, 26.0);
+
         let Some((title, items)) = self.results_panel.clone() else {
             return;
         };
@@ -699,35 +702,18 @@ impl SnipApp {
             .default_height(340.0)
             .open(&mut open)
             .show(ctx, |ui| {
-                // 复制按钮钉在滚动区**外**的顶栏：放文本下方时，OCR 长文本会把按钮
-                // 推到滚动区最底部，想复制得先滚到底；钉在顶栏则滚到哪都点得到。
                 let multi = items.len() > 1;
-                ui.horizontal(|ui| {
-                    let label = if multi { "复制全部" } else { "复制内容" };
-                    if ui.button(label).clicked() {
-                        // 多条结果用换行拼接（QR 一次可识出多个码）
-                        let all = items.join("\n");
-                        match export::copy_text_to_clipboard(&all) {
-                            Ok(()) => self.toast(ctx, "已复制"),
-                            Err(e) => self.toast(ctx, format!("复制失败: {e}")),
-                        }
-                    }
-                    if multi {
-                        ui.label(format!("{} 条结果", items.len()));
-                    }
-                });
-                ui.separator();
                 // 撑满窗口而非收缩到内容：高度随用户拉伸走（原先固定 320 上限，
                 // 长文本 OCR 结果拉大窗口也看不到更多）
-                egui::ScrollArea::vertical()
+                let scroll = egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for (i, content) in items.iter().enumerate() {
                             if i > 0 {
                                 ui.separator();
                             }
-                            // 单条时顶栏那个按钮就够了，不再重复；多条才需要逐条复制，
-                            // 按钮同样放在该条文本**上方**，长文本不必滚过去找
+                            // 多条（QR 可一次识出多个码）才需要逐条复制，按钮放各条
+                            // 文本上方；单条由右下角悬浮按钮负责，不再重复
                             if multi {
                                 ui.horizontal(|ui| {
                                     ui.label(format!("#{}", i + 1));
@@ -743,8 +729,32 @@ impl SnipApp {
                             // （egui 会为不可见文本也做布局，故仍留上限防大段文本卡顿）。
                             // 复制走的是原始 content，不受此显示上限影响
                             ui.label(egui::RichText::new(truncate(content, 4000)).monospace());
+                            // 末条留出悬浮按钮的高度，避免尾行被按钮压住
+                            if i + 1 == items.len() {
+                                ui.add_space(FLOAT_BTN.y + 6.0);
+                            }
                         }
                     });
+                // 复制按钮悬浮在文本区右下角：跟在文本后面时会被长文本推到滚动区
+                // 最底部（要滚到底才点得到），钉顶栏又太抢眼。这里按帧取滚动区实际
+                // 矩形定位，故窗口拖动/缩放都跟着走；画在滚动内容之后 → 叠在其上，
+                // 且同层后绘者优先命中，不会被滚动区的拖拽滚动抢掉点击。
+                let anchor = scroll.inner_rect.max - FLOAT_BTN - egui::vec2(8.0, 8.0);
+                let label = if multi { "复制全部" } else { "复制内容" };
+                if ui
+                    .put(
+                        egui::Rect::from_min_size(anchor, FLOAT_BTN),
+                        egui::Button::new(label),
+                    )
+                    .clicked()
+                {
+                    // 多条结果按换行拼接，直接粘贴即为逐行
+                    let all = items.join("\n");
+                    match export::copy_text_to_clipboard(&all) {
+                        Ok(()) => self.toast(ctx, "已复制"),
+                        Err(e) => self.toast(ctx, format!("复制失败: {e}")),
+                    }
+                }
             });
         if !open {
             self.results_panel = None;
