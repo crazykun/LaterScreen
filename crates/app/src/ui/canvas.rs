@@ -445,7 +445,8 @@ fn editing(
             app.commit_text_edit();
         }
     } else {
-        if response.drag_started() {
+        // 绘制/编辑只认左键：中键留给预览平移，误触右键拖不产生图元
+        if response.drag_started_by(egui::PointerButton::Primary) {
             // 命中测试用按下原点：drag_started 触发时指针已越过拖动阈值（约 6px），
             // 在角点/边上按下后快速拖动，指针可能已滑出容差圈，
             // 用当前位置测会出现「光标显示可拖、实际拖不动」
@@ -453,12 +454,12 @@ fn editing(
             if let Some(pos) = origin.or_else(|| response.interact_pointer_pos()) {
                 on_press(app, view, view.to_px(pos), pos, shift);
             }
-        } else if response.dragged() {
+        } else if response.dragged_by(egui::PointerButton::Primary) {
             if let Some(pos) = response.interact_pointer_pos() {
                 on_drag(app, view.to_px(pos), shift);
             }
         }
-        if response.drag_stopped() {
+        if response.drag_stopped_by(egui::PointerButton::Primary) {
             on_release(app);
         }
         // 原地单击：egui 的 drag_started 需要越过拖动阈值（约 6px），静止点击不会触发。
@@ -484,6 +485,22 @@ fn editing(
         }
     }
     update_cursor(app, ui, view, pointer_px);
+
+    // ---- 预览模式平移 ----
+    // 中键拖动任意处；「选择」工具左键拖空白（未命中元素、无进行中的
+    // 元素拖拽）也平移。画图工具的左键拖拽仍归画图，互不抢
+    if app.preview {
+        let pan = response.dragged_by(egui::PointerButton::Middle)
+            || (app.tool == Tool::Select
+                && response.dragged_by(egui::PointerButton::Primary)
+                && app.drag.is_none()
+                && app.text_edit.is_none());
+        if pan {
+            // 正 delta = 内容随指针同向移动（scroll_with_delta 语义）
+            ui.scroll_with_delta(response.drag_delta());
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
+    }
 
     // ---- 绘制 ----
     dim_outside(painter, view, screen, app.region);
