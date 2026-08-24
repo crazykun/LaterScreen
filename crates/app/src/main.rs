@@ -321,14 +321,22 @@ fn run_settings() -> Result<(), String> {
 
 /// 截图历史面板（M11）：无边框置顶浮窗，缩略图网格展示最近截图/贴图/录屏。
 /// 单击按类型分动作（截图/贴图=复制，录屏=打开目录并选中）；右键贴图/打开/删除。
+/// 摆放靠近托盘：主屏右下角、桌面底部上方几个像素（Deepin 托盘在右下）。
 fn run_history() -> Result<(), String> {
-    let viewport = eframe::egui::ViewportBuilder::default()
+    let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_app_id("lscreen")
         .with_inner_size([320.0, 440.0])
         .with_min_inner_size([260.0, 200.0])
         .with_resizable(true)
         .with_decorations(false)
         .with_always_on_top();
+    // 主屏右下、贴托盘上方；X11 下逻辑点=物理像素（scale=1），无需换算
+    if let Some((dx, dy, dw, dh)) = lscreen_capture::monitor_bounds() {
+        let (pw, ph) = (320.0, 440.0);
+        let x = (dx as f32 + dw as f32 - pw - 8.0).max(dx as f32);
+        let y = (dy as f32 + dh as f32 - ph - 8.0).max(dy as f32);
+        viewport = viewport.with_position(eframe::egui::Pos2::new(x, y));
+    }
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()

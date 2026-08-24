@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
+use egui::{Pos2, Rect, Vec2};
 use serde::{Deserialize, Serialize};
 
 use crate::export;
@@ -288,23 +289,74 @@ impl eframe::App for HistoryApp {
         self.refresh_if_changed();
         let ctx = ui.ctx().clone();
 
-        // 顶栏：标题 + 计数 + 关闭
+        // 顶栏：标题 + 计数（左）· 关闭（右，Painter 手绘 X——✕ 字符在 egui 内置
+        // 字体里无字形会渲染成方框，和 CJK 缺失同源）。整条可拖动（无系统标题栏）。
         egui::Panel::top(egui::Id::new("history-top"))
             .exact_size(30.0)
             .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(10, 0)))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!("历史 · {} 张", self.items.len()))
-                            .strong()
-                            .size(14.0),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(egui::RichText::new("✕").size(14.0)).clicked() {
-                            self.close = true;
-                        }
-                    });
-                });
+                let avail = ui.available_width();
+                let btn = Rect::from_center_size(
+                    Pos2::new(ui.max_rect().right() - 12.0, ui.max_rect().center().y),
+                    Vec2::splat(24.0),
+                );
+                let btn_resp =
+                    ui.interact(btn, egui::Id::new("history-close"), egui::Sense::click());
+                let hovered = btn_resp.hovered();
+                let p = ui.painter();
+                p.rect_filled(
+                    btn,
+                    6.0,
+                    if hovered {
+                        egui::Color32::from_rgb(0x3a, 0x3a, 0x44)
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    },
+                );
+                // 手绘 X：两条对角线
+                let c = if hovered {
+                    egui::Color32::WHITE
+                } else {
+                    egui::Color32::from_rgb(0x9e, 0x9e, 0xaa)
+                };
+                let (x0, x1) = (
+                    btn.center() - Vec2::splat(4.0),
+                    btn.center() + Vec2::splat(4.0),
+                );
+                p.line_segment([x0, x1], egui::Stroke::new(1.6, c));
+                p.line_segment(
+                    [Pos2::new(x0.x, x1.y), Pos2::new(x1.x, x0.y)],
+                    egui::Stroke::new(1.6, c),
+                );
+                if btn_resp.clicked() {
+                    self.close = true;
+                }
+                // 标题 + 计数（左对齐，避开右侧关闭按钮）
+                p.text(
+                    Pos2::new(ui.min_rect().left(), ui.max_rect().center().y),
+                    egui::Align2::LEFT_CENTER,
+                    format!("历史 · {} 张", self.items.len()),
+                    egui::FontId::proportional(14.0),
+                    egui::Color32::from_rgb(0xec, 0xec, 0xf0),
+                );
+                // 其余区域拖动 = 移窗。只在 drag_started 帧发一次 StartDrag，
+                // 否则 WM 交互式移动反复被重启，窗口停不下来（见 record_ui 同款坑）
+                let drag_area = Rect::from_min_size(
+                    ui.min_rect().left_top(),
+                    Vec2::new((avail - 28.0).max(0.0), 30.0),
+                );
+                let drag_resp = ui.interact(
+                    drag_area,
+                    egui::Id::new("history-drag"),
+                    egui::Sense::drag(),
+                );
+                if drag_resp
+                    .clone()
+                    .drag_started_by(egui::PointerButton::Primary)
+                {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+                drag_resp.on_hover_cursor(egui::CursorIcon::Grab);
             });
 
         egui::CentralPanel::default()
