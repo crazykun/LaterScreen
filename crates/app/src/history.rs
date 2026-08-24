@@ -87,7 +87,7 @@ fn save_index(index: &Index) {
 /// 读回全部历史条目，按时间倒序（最新在前）。
 pub fn list() -> Vec<Item> {
     let mut items = load_index().items;
-    items.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    items.sort_by_key(|a| std::cmp::Reverse(a.timestamp));
     items
 }
 
@@ -173,7 +173,7 @@ fn trim(index: &mut Index) {
     if index.items.len() <= max {
         return;
     }
-    index.items.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    index.items.sort_by_key(|a| std::cmp::Reverse(a.timestamp));
     let removed = index.items.split_off(max);
     let dir = history_dir();
     for item in removed {
