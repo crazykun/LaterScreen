@@ -13,6 +13,7 @@ use lscreen_core::{Document, ElementKind, RectF, Rgba, Style, Tool, P2};
 
 use crate::config::Config;
 use crate::export;
+use crate::history;
 use std::sync::{Arc, Mutex};
 
 /// 交互框选出的区域（`record --select` 用）：覆盖层写入，主流程读取。
@@ -385,6 +386,7 @@ impl SnipApp {
         match export::save_png(&rgba, w, h, &path) {
             Ok(saved) => {
                 println!("{}", saved.display());
+                history::record_file(&saved, history::Kind::Shot, Some(&saved));
                 if self.config.open_dir_after_save {
                     if let Some(dir) = saved.parent() {
                         export::open_in_file_manager(dir);
@@ -404,6 +406,9 @@ impl SnipApp {
             self.toast(ctx, "选区为空");
             return;
         };
+        // 贴图自动入历史（M11 用户定稿）：贴图本来不落盘，这条是「贴图历史」
+        // 的唯一来源，在 spawn 贴图进程之前记录（即便贴图失败也保留历史）
+        history::record_rgba(&rgba, w, h, history::Kind::Pin, None);
         let img = image::RgbaImage::from_raw(w, h, rgba)
             .ok_or_else(|| "invalid image buffer".to_string());
         let mut png = Vec::new();

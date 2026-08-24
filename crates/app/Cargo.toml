@@ -31,8 +31,9 @@ libc = "0.2"
 # blocking API 内部仍需一个 async 运行时驱动 D-Bus：async-io 比 tokio 轻
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
 # zbus 5.19 在 default-features=false + blocking-api 组合下自身编译失败
-# （上游打包缺陷），钉回 5.18；仅作为版本约束，不直接使用该 crate
-zbus = "=5.18.0"
+# （上游打包缺陷），钉回 5.18；app 用于 FileManager1 ShowItems 定位文件
+# （export::open_and_select），blocking + async-io 与 capture 的 ashpd 同款
+zbus = { version = "=5.18.0", default-features = false, features = ["blocking-api", "async-io"] }
 # 从 eframe::CreationContext 取原始窗口句柄，设 X11 WM_CLASS（任务栏图标归属）
 raw-window-handle = "0.6"
 

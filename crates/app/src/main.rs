@@ -11,6 +11,7 @@
 mod config;
 mod export;
 mod font;
+mod history;
 mod pin;
 mod record_ui;
 mod settings_ui;
@@ -174,6 +175,8 @@ enum Cmd {
     },
     /// 打开配置面板（保存后托盘进程自动热加载）
     Config,
+    /// 打开截图历史窗口（最近保存的截图/贴图/录屏，单击复制或定位文件）
+    History,
 }
 
 fn main() {
@@ -267,6 +270,7 @@ fn main() {
         }
         Some(Cmd::Pin { input, pos, scale }) => run_pin(input, pos, scale),
         Some(Cmd::Config) => run_settings(),
+        Some(Cmd::History) => run_history(),
     };
     if let Err(e) = result {
         eprintln!("lscreen: {e}");
@@ -311,6 +315,27 @@ fn run_settings() -> Result<(), String> {
         "lscreen 配置",
         options,
         Box::new(|cc| Ok(Box::new(settings_ui::SettingsApp::new(cc)))),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// 截图历史窗口（M11）：最近保存的截图/贴图/录屏，网格缩略图展示。
+/// 单击按类型分动作（截图/贴图=复制，录屏=打开目录并选中），右键菜单贴图/
+/// 打开/删除。有边框、可缩放、非置顶——与托盘/贴图/结果面板都不同。
+fn run_history() -> Result<(), String> {
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_app_id("lscreen")
+        .with_inner_size([560.0, 420.0])
+        .with_min_inner_size([360.0, 280.0])
+        .with_resizable(true);
+    let options = eframe::NativeOptions {
+        viewport,
+        ..Default::default()
+    };
+    eframe::run_native(
+        "lscreen 历史",
+        options,
+        Box::new(|cc| Ok(Box::new(history::HistoryApp::new(cc)))),
     )
     .map_err(|e| e.to_string())
 }
@@ -582,9 +607,37 @@ fn run_shot(
     if output.is_some() || !clipboard {
         let path = output.unwrap_or_else(|| export::default_save_path("png"));
         let saved = export::save_png(&rgba, w, h, &path)?;
+        history::record_file(&saved, history::Kind::Shot, Some(&saved));
         println!("{}", saved.display());
     }
     Ok(())
+}
+
+/// 为录制状态窗找一个不与选区重叠的虚拟桌面角落（右下优先，逆时针）。
+/// 四角都放不下（如全屏录制）时取右下并返回 overlap=true——上层提示用户
+/// 状态窗已入镜。窗口尺寸不含 WM 装饰，误差几个像素可接受。
+fn status_window_pos(
+    sel: (f32, f32, f32, f32),
+    desk: (f32, f32, f32, f32),
+    win: (f32, f32),
+) -> ((f32, f32), bool) {
+    const MARGIN: f32 = 12.0;
+    let (sx, sy, sw, sh) = sel;
+    let (dx, dy, dw, dh) = desk;
+    let (ww, wh) = win;
+    // 状态窗可能比角落空间大（小屏）：max 保证贴边而不越出桌面
+    let right = dx + dw - ww - MARGIN;
+    let bottom = dy + dh - wh - MARGIN;
+    let left = dx + MARGIN;
+    let top = dy + MARGIN;
+    let candidates = [(right, bottom), (right, top), (left, bottom), (left, top)];
+    for &(cx, cy) in &candidates {
+        let overlap = cx < sx + sw && cx + ww > sx && cy < sy + sh && cy + wh > sy;
+        if !overlap {
+            return ((cx.max(dx), cy.max(dy)), false);
+        }
+    }
+    ((right.max(dx), bottom.max(dy)), true)
 }
 
 fn run_record(
@@ -608,15 +661,18 @@ fn run_record(
     if !(1..=30).contains(&fps) {
         return Err("无效的 --fps（应为 1-30）".into());
     }
-    // quality 两模式含义不同（缺省值也不同）：
-    // GIF = 质量 1-100（缺省 90）；MP4 = 目标码率 kbps 200-50000（缺省 4000）
-    let quality = quality.unwrap_or(if mp4_out { 4000 } else { 90 });
-    if mp4_out {
-        if !(200..=50_000).contains(&quality) {
-            return Err("MP4 模式 --quality 为目标码率 kbps（200-50000）".into());
+    // 预估格式（仅用于区域取整与快速失败）：最终格式在 armed 确认后重读
+    // 配置定案（状态窗齿轮可在 armed 阶段改格式/目录，对本次录制生效）
+    let mp4_guess = mp4_out || config::Config::load().record_mp4();
+    if let Some(q) = quality {
+        let ok = if mp4_guess {
+            (200..=50_000).contains(&q)
+        } else {
+            (1..=100).contains(&q)
+        };
+        if !ok {
+            return Err("无效的 --quality（GIF 应为 1-100；MP4 为目标码率 kbps 200-50000）".into());
         }
-    } else if !(1..=100).contains(&quality) {
-        return Err("无效的 --quality（应为 1-100）".into());
     }
 
     // 录制区域：指定值或整个主屏
@@ -635,17 +691,38 @@ fn run_record(
             (shot.origin.0, shot.origin.1, shot.width, shot.height)
         }
     };
-
-    let ext = if mp4_out { "mp4" } else { "gif" };
-    let path = output.unwrap_or_else(|| export::default_save_path(ext));
-    if mp4_out {
-        // 扩展名提醒（不强制改写：用户可能故意用别的名字）
-        if path.extension().is_some_and(|e| e != "mp4") {
-            eprintln!("提示: --mp4 输出建议使用 .mp4 扩展名");
-        }
-    } else if path.extension().is_some_and(|e| e != "gif") {
-        eprintln!("提示: GIF 输出建议使用 .gif 扩展名");
+    // MP4/H.264 宏块要求偶数尺寸：区域在此取整（右/下各裁 1px），
+    // 边框标出的就是实际录制的区域。record 层对帧还有一道防御性裁偶
+    if mp4_guess && (w < 2 || h < 2) {
+        return Err("MP4 录制区域过小（至少 2×2 像素）".into());
     }
+    let (x, y, w, h) = if mp4_guess {
+        (x, y, w & !1, h & !1)
+    } else {
+        (x, y, w, h)
+    };
+
+    // M10 录制边框 + 闪烁：armed 阶段静态红边标出选区；开始录制后红/蓝交替
+    // （每 400ms 换色）提示"正在录制"。guard move 进闪烁线程，线程退出（stop）
+    // 时销毁窗口——绝不留残影。平台不支持时 None，录制行为不变。
+    let started = Arc::new(AtomicBool::new(false));
+    let blink_stop = Arc::new(AtomicBool::new(false));
+    let blink_handle = lscreen_capture::record_border(x, y, w, h).map(|border| {
+        let (bs, started_c) = (blink_stop.clone(), started.clone());
+        std::thread::spawn(move || {
+            const RED: u32 = 0xE5_39_35;
+            const BLUE: u32 = 0x21_96_F3;
+            let mut red = true;
+            while !bs.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                if started_c.load(Ordering::Relaxed) && !bs.load(Ordering::Relaxed) {
+                    red = !red;
+                    border.set_color(if red { RED } else { BLUE });
+                }
+            }
+        })
+    });
+
     let stop = Arc::new(AtomicBool::new(false));
     // ctrlc：交互终端里 Ctrl+C 与状态窗口 Esc 等效；非终端（托盘 spawn）下
     // 收不到 SIGINT，靠状态窗口的停止按钮/Esc 结束
@@ -659,20 +736,72 @@ fn run_record(
     // 录制线程：独立跑采帧+编码（X11 每次截屏新建连接，跨线程安全），
     // 主线程跑状态窗口事件循环，两者互不阻塞。grab_frame 每采一帧就把
     // 时长/帧数写进共享状态，状态窗口 0.5s 刷一次即读到实时值。
-    let (th_stop, th_status, th_path) = (stop.clone(), status.clone(), path.clone());
+    let (th_stop, th_status) = (stop.clone(), status.clone());
     let th_duration = std::time::Duration::from_secs_f32(secs);
+    let th_started = started.clone();
+    // 首帧 poster（M11 历史缩略图）：GIF/MP4 都无法事后解码，录制时留首帧
+    let poster = Arc::new(Mutex::new(None::<(Vec<u8>, u32, u32)>));
+    let th_poster = poster.clone();
     let recorder = std::thread::spawn(move || {
+        // armed：等待用户点「开始」/按 Enter；stop 先到（Esc/关窗/Ctrl+C）= 取消
+        while !th_started.load(Ordering::Relaxed) && !th_stop.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if !th_started.load(Ordering::Relaxed) {
+            th_status.lock().unwrap().done = true;
+            return (
+                0.0,
+                Err(lscreen_record::RecordError("已取消".into())),
+                PathBuf::new(),
+                false,
+            );
+        }
+        // 格式/路径在 armed 确认后才定案：状态窗的齿轮可打开配置面板，
+        // armed 阶段改的录制格式/保存目录对本次录制生效（CLI --mp4 仍优先）
+        let cfg = config::Config::load();
+        let mp4_final = mp4_out || cfg.record_mp4();
+        let quality = quality.unwrap_or(if mp4_final { 4000 } else { 90 });
+        let bad_quality = if mp4_final {
+            !(200..=50_000).contains(&quality)
+        } else {
+            !(1..=100).contains(&quality)
+        };
+        if bad_quality {
+            th_status.lock().unwrap().done = true;
+            return (
+                0.0,
+                Err(lscreen_record::RecordError(
+                    "无效的 --quality（GIF 应为 1-100；MP4 为目标码率 kbps 200-50000）".into(),
+                )),
+                PathBuf::new(),
+                false,
+            );
+        }
+        let ext = if mp4_final { "mp4" } else { "gif" };
+        let path = output.unwrap_or_else(|| export::default_save_path(ext));
+        if mp4_final {
+            // 扩展名提醒（不强制改写：用户可能故意用别的名字）
+            if path.extension().is_some_and(|e| e != "mp4") {
+                eprintln!("提示: --mp4 输出建议使用 .mp4 扩展名");
+            }
+        } else if path.extension().is_some_and(|e| e != "gif") {
+            eprintln!("提示: GIF 输出建议使用 .gif 扩展名");
+        }
         let start = std::time::Instant::now();
         let mut frames = 0usize;
         // 内层 grab 闭包 move 捕获，这里单独 clone 一份，外层结尾仍要用 th_status
         let status_inner = th_status.clone();
-        let result = if mp4_out {
+        let poster_inner = th_poster.clone();
+        let result = if mp4_final {
             lscreen_record::record_mp4(
                 move || {
                     let shot = lscreen_capture::capture_region(x, y, w, h)
                         .map(|s| (s.rgba, s.width, s.height))
                         .map_err(|e| lscreen_record::RecordError(e.to_string()))?;
                     frames += 1;
+                    if frames == 1 {
+                        *poster_inner.lock().unwrap() = Some((shot.0.clone(), shot.1, shot.2));
+                    }
                     let mut st = status_inner.lock().unwrap();
                     st.elapsed = start.elapsed().as_secs_f32();
                     st.frames = frames;
@@ -684,7 +813,7 @@ fn run_record(
                 },
                 th_duration,
                 &th_stop,
-                &th_path,
+                &path,
             )
         } else {
             lscreen_record::record_gif(
@@ -693,6 +822,9 @@ fn run_record(
                         .map(|s| (s.rgba, s.width, s.height))
                         .map_err(|e| lscreen_record::RecordError(e.to_string()))?;
                     frames += 1;
+                    if frames == 1 {
+                        *poster_inner.lock().unwrap() = Some((shot.0.clone(), shot.1, shot.2));
+                    }
                     let mut st = status_inner.lock().unwrap();
                     st.elapsed = start.elapsed().as_secs_f32();
                     st.frames = frames;
@@ -704,33 +836,64 @@ fn run_record(
                 },
                 th_duration,
                 &th_stop,
-                &th_path,
+                &path,
             )
         };
         // 无论成败，都让状态窗口知道录制已结束（自然到时/出错/被停止）
         th_status.lock().unwrap().done = true;
-        (start.elapsed().as_secs_f32(), result)
+        (
+            start.elapsed().as_secs_f32(),
+            result,
+            path,
+            cfg.open_dir_after_save,
+        )
     });
 
-    // 状态窗口：停止按钮/Esc 置 stop；窗口被关（含 done 自动关）后收尾
-    let viewport = eframe::egui::ViewportBuilder::default()
+    // 状态窗口：停止按钮/Esc 置 stop；窗口被关（含 done 自动关）后收尾。
+    // 无边框 + 暗色自绘面板（record_ui）：无系统标题栏的一块小黑板，
+    // 头部区域可拖动移动；位置避让选区（状态窗若压在选区上会被录进成品，M10）
+    let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_app_id("lscreen")
         .with_inner_size([320.0, 150.0])
         .with_resizable(false)
+        .with_decorations(false)
+        .with_transparent(false)
         .with_always_on_top()
         .with_title("lscreen 录制");
+    let mut overlap_hint = false;
+    // 仅 Linux X11 用显式坐标摆放：egui/winit 的窗口位置是逻辑点，X11 下
+    // 恒等于根窗口物理像素（本仓库 Screenshot.scale 亦按 1.0 处理）；
+    // Win/mac 多屏 DPI 换算不可靠，维持 WM 默认摆放
+    if cfg!(target_os = "linux") {
+        if let Some((dx, dy, dw, dh)) = lscreen_capture::monitor_bounds() {
+            let ((px, py), overlap) = status_window_pos(
+                (x as f32, y as f32, w as f32, h as f32),
+                (dx as f32, dy as f32, dw as f32, dh as f32),
+                (320.0, 150.0),
+            );
+            viewport = viewport.with_position(eframe::egui::Pos2::new(px, py));
+            overlap_hint = overlap;
+        }
+    }
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
     };
     let app_stop = stop.clone();
+    let app_start = started.clone();
     let app_status = status.clone();
     eframe::run_native(
         "lscreen-record-status",
         options,
         Box::new(move |cc| {
             Ok(Box::new(record_ui::RecordApp::new(
-                cc, app_stop, app_status, secs, false,
+                cc,
+                app_stop,
+                app_start,
+                app_status,
+                secs,
+                false,
+                overlap_hint,
             )))
         }),
     )
@@ -738,13 +901,51 @@ fn run_record(
 
     // 事件循环退出（用户停止/窗口关闭/录制完成自动关）：确保录制线程收尾
     stop.store(true, Ordering::Relaxed);
-    let (_elapsed, result) = recorder
+    let cancelled = !started.load(Ordering::Relaxed);
+    let (_elapsed, result, path, open_dir) = recorder
         .join()
         .map_err(|_| "录制线程异常退出".to_string())?;
-    let frames = result.map_err(|e| e.to_string())?;
+    // 边框闪烁线程收尾（join 保证边条窗口在进程退出前销毁）
+    blink_stop.store(true, Ordering::Relaxed);
+    if let Some(h) = blink_handle {
+        let _ = h.join();
+    }
+    let frames = match result {
+        Ok(f) => f,
+        // armed 阶段取消（Esc/关窗/Ctrl+C）：静默退出，不是错误
+        Err(_) if cancelled => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    };
     eprintln!("已录制 {frames} 帧");
     println!("{}", path.display());
+    // 保存后自动打开所在目录（配置项，截图 GUI 保存路径同款行为）。
+    // open_dir 取自 armed 后的配置快照，与本次产物目录一致
+    if open_dir {
+        if let Some(dir) = path.parent() {
+            export::open_in_file_manager(dir);
+        }
+    }
+    // 录屏入历史（M11）：把首帧 poster 另存 PNG 并记一条，source 指向实际
+    // GIF/MP4 文件供「打开目录并选中」定位
+    if let Some((rgba, w, h)) = poster.lock().unwrap().take() {
+        let poster_path = poster_path(&path);
+        if let Ok(saved) = export::save_png(&rgba, w, h, &poster_path) {
+            history::record_file(&saved, history::Kind::Record, Some(&path));
+        }
+    }
     Ok(())
+}
+
+/// 录屏首帧 poster 路径：与产物同目录、同名、`_poster.png` 后缀。
+fn poster_path(video: &std::path::Path) -> PathBuf {
+    let stem = video
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "lscreen_poster".to_string());
+    video
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(format!("{stem}_poster.png"))
 }
 
 /// 滚动长截图（M4）：框选区域 → 自动滚动 → 帧间拼接 → 长图 PNG。
@@ -890,9 +1091,11 @@ fn run_scroll(
             Ok(Box::new(record_ui::RecordApp::new(
                 cc,
                 app_stop,
+                Arc::new(AtomicBool::new(true)), // 滚动模式无 armed 阶段
                 app_status,
                 steps as f32,
                 true,
+                false,
             )))
         }),
     )
@@ -921,6 +1124,13 @@ fn run_scroll(
             let saved = export::save_png(&img, iw, ih, &th_path)?;
             eprintln!("已拼接长图 {iw}×{ih}");
             println!("{}", saved.display());
+            history::record_file(&saved, history::Kind::Shot, Some(&saved));
+            // 保存后自动打开所在目录（与截图/录屏保存同款配置行为）
+            if config::Config::load().open_dir_after_save {
+                if let Some(dir) = saved.parent() {
+                    export::open_in_file_manager(dir);
+                }
+            }
             Ok(())
         }
         // 默认：打开标注预览窗口（复用截图标注会话：全工具标注 +
@@ -986,6 +1196,8 @@ fn run_pin(input: Option<PathBuf>, pos: Option<String>, scale: f32) -> Result<()
     if input.is_none() && is_stdin_tty() {
         return Err("缺少图片：用 -i 指定 PNG 文件，或经管道传入（覆盖层自动走此通道）".into());
     }
+    // 源文件路径（-i 传入时）：保存时记历史 source，供「打开目录并选中」
+    let source = input.clone();
     let img = match input {
         Some(path) => image::open(&path)
             .map_err(|e| format!("无法读取 {}: {e}", path.display()))?
@@ -1022,7 +1234,9 @@ fn run_pin(input: Option<PathBuf>, pos: Option<String>, scale: f32) -> Result<()
         options,
         Box::new(move |cc| {
             let font = font::load_system_font();
-            Ok(Box::new(pin::PinApp::new(cc, rgba, w, h, scale, font)))
+            Ok(Box::new(pin::PinApp::new(
+                cc, rgba, w, h, scale, font, source,
+            )))
         }),
     )
     .map_err(|e| e.to_string())
@@ -1083,7 +1297,7 @@ fn parse_region(s: &str) -> Result<lscreen_core::RectF, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_pos, parse_xy};
+    use super::{parse_pos, parse_xy, status_window_pos};
 
     #[test]
     fn pos_parsing() {
@@ -1104,5 +1318,40 @@ mod tests {
         assert!(parse_xy("100").is_err());
         assert!(parse_xy("1,2,3").is_err());
         assert!(parse_xy("a,b").is_err());
+    }
+
+    #[test]
+    fn status_pos_avoids_selection() {
+        let desk = (0.0, 0.0, 1920.0, 1080.0);
+        let win = (320.0, 150.0);
+        // 选区在屏幕中央：右下角可用
+        let ((x, y), overlap) = status_window_pos((760.0, 440.0, 400.0, 200.0), desk, win);
+        assert!(!overlap);
+        assert_eq!((x, y), (1920.0 - 320.0 - 12.0, 1080.0 - 150.0 - 12.0));
+        // 右下被选区占住（选区贴右下角）：退到右上
+        let ((x, y), overlap) = status_window_pos((1600.0, 900.0, 320.0, 180.0), desk, win);
+        assert!(!overlap);
+        assert_eq!((x, y), (1920.0 - 320.0 - 12.0, 12.0));
+        // 全屏录制：四角都重叠，取右下并标记
+        let ((x, y), overlap) = status_window_pos((0.0, 0.0, 1920.0, 1080.0), desk, win);
+        assert!(overlap);
+        assert_eq!((x, y), (1920.0 - 320.0 - 12.0, 1080.0 - 150.0 - 12.0));
+    }
+
+    #[test]
+    fn status_pos_negative_desktop() {
+        // 显示器在主屏左侧（虚拟桌面原点为负）
+        let desk = (-1920.0, 0.0, 3840.0, 1080.0);
+        let win = (320.0, 150.0);
+        // 全屏主屏录制（1920,0 起）：右侧副屏角落可用
+        let ((x, y), overlap) = status_window_pos((1920.0, 0.0, 1920.0, 1080.0), desk, win);
+        assert!(!overlap);
+        assert_eq!(
+            (x, y),
+            (-1920.0 + 3840.0 - 320.0 - 12.0, 1080.0 - 150.0 - 12.0)
+        );
+        // 两屏全被选区盖住：右下 + overlap
+        let (_, overlap) = status_window_pos((-1920.0, 0.0, 3840.0, 1080.0), desk, win);
+        assert!(overlap);
     }
 }

@@ -169,7 +169,7 @@ lscreen tray --foreground              # 托盘前台运行（调试/自启动�
 | Windows | `%APPDATA%\lscreen\config.toml` |
 | macOS | `~/Library/Application Support/lscreen/config.toml` |
 
-可配置项：保存目录、文件名模板（默认 `lscreen_{YYYYMMDD}_{HHMMSS}`）、默认工具/颜色/线宽、复制后是否自动退出、保存后是否打开目录、五个全局热键（截图 / 取色 / 贴图 / 录屏 / 滚动截图）。
+可配置项：保存目录、文件名模板（默认 `lscreen_{YYYYMMDD}_{HHMMSS}`）、默认工具/颜色/线宽、复制后是否自动退出、保存后是否打开目录、历史保留条数（默认 10，1–50）、五个全局热键（截图 / 取色 / 贴图 / 录屏 / 滚动截图）。
 
 ## 运行环境
 

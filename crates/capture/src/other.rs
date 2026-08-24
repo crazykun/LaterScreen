@@ -156,3 +156,34 @@ pub fn set_window_class(_window_id: u32, _class: &str) -> Result<()> {
 pub fn set_window_icon(_window_id: u32, _rgba: &[u8], _w: u32, _h: u32) -> Result<()> {
     Err(CaptureError("当前平台无 X11 窗口图标语义".into()))
 }
+
+// --------------------------------------------- 录制选区边框（M10）
+
+/// Win/mac 暂无录制边框（与滚动截图同平台策略）：仅占位使 API 跨平台可用
+pub struct RecordBorder;
+
+impl RecordBorder {
+    pub fn set_color(&self, _pixel: u32) {}
+}
+
+/// 虚拟桌面（全部显示器并集）的 (x, y, w, h)，物理像素。
+pub fn monitor_bounds() -> Result<(i32, i32, u32, u32)> {
+    let monitors = Monitor::all().map_err(err)?;
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for m in &monitors {
+        let (x, y) = (m.x().map_err(err)?, m.y().map_err(err)?);
+        let (w, h) = (m.width().map_err(err)?, m.height().map_err(err)?);
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x.saturating_add(w.min(i32::MAX as u32) as i32));
+        max_y = max_y.max(y.saturating_add(h.min(i32::MAX as u32) as i32));
+    }
+    if max_x <= min_x || max_y <= min_y {
+        return Err(CaptureError("no monitor found".into()));
+    }
+    Ok((min_x, min_y, (max_x - min_x) as u32, (max_y - min_y) as u32))
+}
+
+pub fn record_border(_x: i32, _y: i32, _w: u32, _h: u32) -> Option<RecordBorder> {
+    None
+}

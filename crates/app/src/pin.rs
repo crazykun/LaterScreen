@@ -10,6 +10,8 @@ use eframe::egui;
 use egui::{Color32, Pos2, Rect, Stroke, Vec2, ViewportCommand};
 
 use crate::export;
+use crate::history;
+use std::path::PathBuf;
 
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 4.0;
@@ -52,6 +54,9 @@ pub struct PinApp {
     /// 坐标」重算会踩「窗口移动后静止指针局部坐标陈旧」的同一坑
     /// （见 drag 注释），表现为缩放时窗口位置抖动
     zoom_anchor: Option<ZoomAnchor>,
+    /// 原始图片文件路径（`-i` 传入时）；stdin 传入为 None。保存时据此记
+    /// 历史源文件（M11），供「打开目录并选中」定位
+    source: Option<PathBuf>,
 }
 
 struct ZoomAnchor {
@@ -78,6 +83,7 @@ impl PinApp {
         h: u32,
         scale: f32,
         font: Option<Vec<u8>>,
+        source: Option<PathBuf>,
     ) -> Self {
         crate::apply_window_class(cc);
         // 贴图是独立进程，必须自己挂中文字体，否则按钮/菜单/toast 的中文
@@ -108,6 +114,7 @@ impl PinApp {
             scale,
             topmost: true,
             zoom_anchor: None,
+            source,
         }
     }
 
@@ -121,7 +128,10 @@ impl PinApp {
     fn do_save(&mut self, ctx: &egui::Context) {
         let path = export::default_save_path("png");
         match export::save_png(&self.rgba, self.w, self.h, &path) {
-            Ok(p) => self.toast(ctx, format!("已保存 {}", p.display())),
+            Ok(p) => {
+                history::record_file(&p, history::Kind::Pin, self.source.as_deref());
+                self.toast(ctx, format!("已保存 {}", p.display()));
+            }
             Err(e) => self.toast(ctx, format!("保存失败: {e}")),
         }
     }

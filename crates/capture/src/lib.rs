@@ -105,6 +105,24 @@ pub fn set_window_icon(window_id: u32, rgba: &[u8], w: u32, h: u32) -> Result<()
     platform::set_window_icon(window_id, rgba, w, h)
 }
 
+// ---------------------------------------------------------------- 录制选区边框（M10）
+
+/// 录制期间的选区边框 guard：Linux X11 在选区外侧显示 4 条置顶、点击穿透的
+/// 红色边条，Drop 即销毁。Win/mac/Wayland 为空占位。
+pub use platform::RecordBorder;
+
+/// 在选区 (x, y, w, h) 周围显示录制边框，返回 RAII guard（guard 存活期间
+/// 边框常显）。平台不支持或创建失败返回 None——录制行为不变，仅无边框。
+pub fn record_border(x: i32, y: i32, w: u32, h: u32) -> Option<RecordBorder> {
+    platform::record_border(x, y, w, h)
+}
+
+/// 虚拟桌面（全部显示器并集）的 (x, y, w, h)。上层摆放"避开录制选区"的
+/// 窗口（状态窗等）用。失败返回 None。
+pub fn monitor_bounds() -> Option<(i32, i32, u32, u32)> {
+    platform::monitor_bounds().ok()
+}
+
 // ---------------------------------------------------------------- 窗口枚举（M9）
 
 /// 一个可交互的顶层窗口。坐标语义与 `Screenshot::origin` 同一坐标系同一单位

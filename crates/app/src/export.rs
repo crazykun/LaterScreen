@@ -166,6 +166,73 @@ pub fn open_in_file_manager(dir: &Path) {
         .spawn();
 }
 
+/// 在文件管理器中定位并选中某个文件（截图历史「打开目录并选中」用）。
+/// 三平台命令：Windows `explorer /select`、macOS `open -R`、
+/// Linux `org.freedesktop.FileManager1` D-Bus `ShowItems`（失败/无服务时
+/// 降级为只开父目录，不定位）。
+pub fn open_and_select(path: &Path) {
+    if !path.exists() {
+        // 文件已不存在：退化为打开父目录（若目录还在）
+        if let Some(dir) = path.parent() {
+            if dir.is_dir() {
+                open_in_file_manager(dir);
+            }
+        }
+        return;
+    }
+    let abspath = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("explorer")
+            .arg(format!("/select,{}", abspath.display()))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .arg("-R")
+            .arg(&abspath)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // FileManager1 ShowItems 失败（无服务/无实现）时降级为只开父目录
+        if !show_items_dbus(&abspath) {
+            if let Some(dir) = abspath.parent() {
+                if dir.is_dir() {
+                    open_in_file_manager(dir);
+                }
+            }
+        }
+    }
+}
+
+/// Linux：`org.freedesktop.FileManager1` D-Bus `ShowItems` 定位文件。
+/// 返回 false 表示未能定位（调用方降级为只开目录）。
+#[cfg(all(unix, not(target_os = "macos")))]
+fn show_items_dbus(path: &Path) -> bool {
+    let Ok(conn) = zbus::blocking::Connection::session() else {
+        return false;
+    };
+    let Ok(proxy) = zbus::blocking::Proxy::new(
+        &conn,
+        "org.freedesktop.FileManager1",
+        "/org/freedesktop/FileManager1",
+        "org.freedesktop.FileManager1",
+    ) else {
+        return false;
+    };
+    let uri = format!("file://{}", path.display());
+    let result: Result<(), zbus::Error> = proxy.call("ShowItems", &(vec![uri], String::new()));
+    result.is_ok()
+}
+
 pub fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {

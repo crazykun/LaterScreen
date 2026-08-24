@@ -12,6 +12,7 @@
 //! Wayland 会话无 X11 时热键整体降级为不可用（仅告警），托盘与菜单仍可用。
 
 use crate::config::{self, Config};
+use crate::history;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
@@ -35,6 +36,7 @@ pub enum Action {
     Pin,
     Record,
     Scroll,
+    History,
     Config,
     Quit,
 }
@@ -45,6 +47,7 @@ const MENU_ACTIONS: &[(Action, &str)] = &[
     (Action::Pin, "贴图"),
     (Action::Record, "录屏"),
     (Action::Scroll, "滚动截图"),
+    (Action::History, "历史"),
     (Action::Config, "配置"),
     (Action::Quit, "退出"),
 ];
@@ -58,6 +61,7 @@ fn dispatch(a: Action) -> bool {
         Action::Picker => spawn_detached(&["pick"]),
         Action::Record => spawn_detached(&["record", "--select"]),
         Action::Scroll => spawn_detached(&["scroll"]),
+        Action::History => spawn_detached(&["history"]),
         Action::Config => spawn_detached(&["config"]),
         Action::Pin => {
             if let Err(e) = pin_from_clipboard() {
@@ -109,6 +113,8 @@ fn pin_from_clipboard() -> Result<(), String> {
     let mut png = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
         .map_err(|e| format!("编码 PNG 失败: {e}"))?;
+    // 贴图自动入历史（M11 用户定稿）：剪贴板贴图不落盘，这里记 RGBA 副本
+    history::record_rgba(img.as_raw(), w, h, history::Kind::Pin, None);
 
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     use std::io::Write;
@@ -615,6 +621,7 @@ mod native_impl {
                     "pin" => Some(Action::Pin),
                     "record" => Some(Action::Record),
                     "scroll" => Some(Action::Scroll),
+                    "history" => Some(Action::History),
                     "config" => Some(Action::Config),
                     "quit" => Some(Action::Quit),
                     _ => None,
@@ -662,6 +669,7 @@ mod native_impl {
             Action::Pin => "pin",
             Action::Record => "record",
             Action::Scroll => "scroll",
+            Action::History => "history",
             Action::Config => "config",
             Action::Quit => "quit",
         }

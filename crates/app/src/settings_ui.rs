@@ -156,6 +156,10 @@ impl SettingsApp {
             self.toast(ctx, format!("未知工具名: {}", self.cfg.default_tool));
             return;
         }
+        if !(1..=50).contains(&self.cfg.history_max) {
+            self.toast(ctx, "历史条数无效（应为 1-50）".to_string());
+            return;
+        }
         match self.cfg.save() {
             Ok(()) => self.toast(ctx, "已保存（托盘进程自动生效）"),
             Err(e) => self.toast(ctx, format!("保存失败: {e}")),
@@ -437,6 +441,38 @@ impl SettingsApp {
                     .on_hover_text(
                         "占位符：{YYYYMMDD} {HHMMSS} {YYYY} {MM} {DD} {HH} {MI} {SS}；未知 token 原样保留",
                     );
+                    ui.end_row();
+
+                    row_label(ui, "录制格式");
+                    let current = config::RECORD_FORMAT_NAMES
+                        .iter()
+                        .find(|(id, _)| *id == self.cfg.record_format)
+                        .map(|(_, label)| *label)
+                        .unwrap_or("GIF 动图");
+                    egui::ComboBox::from_id_salt("record-format")
+                        .selected_text(egui::RichText::new(current).color(TEXT))
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            for (id, label) in config::RECORD_FORMAT_NAMES {
+                                ui.selectable_value(
+                                    &mut self.cfg.record_format,
+                                    id.to_string(),
+                                    *label,
+                                );
+                            }
+                        })
+                        .response
+                        .on_hover_text("录屏（GIF/MP4）的默认格式；命令行 --mp4 显式指定时优先于此");
+                    ui.end_row();
+
+                    row_label(ui, "历史条数");
+                    // egui 0.35 的 DragValue 无 on_hover_text：经 ui.add 的 Response 挂
+                    ui.add(
+                        egui::DragValue::new(&mut self.cfg.history_max)
+                            .range(1..=50)
+                            .speed(0.1),
+                    )
+                    .on_hover_text("托盘「历史」窗口保留的最近截图/贴图/录屏条数（1-50）");
                     ui.end_row();
                 });
             ui.small(

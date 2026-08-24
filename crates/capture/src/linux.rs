@@ -472,21 +472,26 @@ pub fn frontmost_window() -> Option<WindowInfo> {
     .flatten()
 }
 
+/// 全部显示器的并集 (min_x, min_y, max_x, max_y)。区域截屏的合法范围、
+/// 录制边条的钳制都以它为准（显示器原点可为负，不能只看根窗口 [0,w]×[0,h]）。
+fn virtual_desktop(conn: &impl Connection, screen: &Screen) -> Result<(i32, i32, i32, i32)> {
+    let mons = monitors(conn, screen)?;
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for m in &mons {
+        min_x = min_x.min(m.x);
+        min_y = min_y.min(m.y);
+        max_x = max_x.max(m.x + m.width as i32);
+        max_y = max_y.max(m.y + m.height as i32);
+    }
+    if max_x <= min_x || max_y <= min_y {
+        return Err(CaptureError("no monitor found".into()));
+    }
+    Ok((min_x, min_y, max_x, max_y))
+}
+
 pub fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<Screenshot> {
     with_conn(|conn, screen| {
-        // 可截区域 = 全部显示器的并集。显示器原点可为负（位于主屏左侧/上方），
-        // 钳到根窗口 [0, sw] 会把负坐标区域错误地折进主屏。
-        let mons = monitors(conn, screen)?;
-        let (mut min_x, mut min_y, mut max_x, mut max_y) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-        for m in &mons {
-            min_x = min_x.min(m.x);
-            min_y = min_y.min(m.y);
-            max_x = max_x.max(m.x + m.width as i32);
-            max_y = max_y.max(m.y + m.height as i32);
-        }
-        if max_x <= min_x || max_y <= min_y {
-            return Err(CaptureError("no monitor found".into()));
-        }
+        let (min_x, min_y, max_x, max_y) = virtual_desktop(conn, screen)?;
         let x0 = x.max(min_x).min(max_x);
         let y0 = y.max(min_y).min(max_y);
         // w/h 来自 u32，转 i32 可能为负；saturating_add 避免 debug 下溢出 panic
@@ -604,4 +609,145 @@ pub fn set_window_icon(window_id: u32, rgba: &[u8], w: u32, h: u32) -> Result<()
             .map_err(err)?;
         conn.sync().map_err(err)
     })
+}
+
+// --------------------------------------------- 录制选区边框（M10）
+
+use x11rb::wrapper::ConnectionExt as _;
+
+/// 虚拟桌面（全部显示器并集）的 (x, y, w, h)。
+/// 供上层摆放状态窗口等"避开选区"的布局计算用。
+pub fn monitor_bounds() -> Result<(i32, i32, u32, u32)> {
+    with_conn(|conn, screen| {
+        let (min_x, min_y, max_x, max_y) = virtual_desktop(conn, screen)?;
+        Ok((min_x, min_y, (max_x - min_x) as u32, (max_y - min_y) as u32))
+    })
+}
+
+/// 录制期间的选区边框（RAII）：4 条 override-redirect 细长窗口围在选区
+/// **外侧** 2px，Drop 即销毁（录制结束/出错/进程退出都不留残影）。
+///
+/// 关键约束：**边条绝不覆盖选区像素**——`capture_region` 抓的是根窗口实际
+/// 像素，选区内的任何装饰都会被录进成品。因此边条画在选区外扩一圈，
+/// 选区贴屏幕边缘时钳到虚拟桌面范围，缺一侧就缺一侧（宁可缺边也不污染成品）。
+/// 点击穿透用 XShape 把输入区置空，边条不抢鼠标事件。
+///
+/// override-redirect 而非带洞透明窗口：不赌合成器的透明与 XShape 挖洞
+/// 行为（与 M7 贴图同策略）；纯 x11rb 创建、填色、置顶，无 GUI 框架开销。
+pub struct RecordBorder {
+    /// 连接必须比窗口活得久：guard 存活着，X server 端窗口就有效
+    conn: x11rb::rust_connection::RustConnection,
+    wins: Vec<u32>,
+}
+
+impl RecordBorder {
+    /// 更新全部边条颜色（X TrueColor 像素值，如 0xE53935）。上层的闪烁
+    /// 线程定时调用（红/蓝交替）实现"录制中"的视觉提示。
+    pub fn set_color(&self, pixel: u32) {
+        use x11rb::protocol::xproto::ChangeWindowAttributesAux;
+        let aux = ChangeWindowAttributesAux::new().background_pixel(pixel);
+        for &w in &self.wins {
+            // background_pixel 只影响之后的重绘；clear_area(force) 用新背景
+            // 重画整窗（0 尺寸 = 到窗口边界）
+            let _ = self.conn.change_window_attributes(w, &aux);
+            let _ = self.conn.clear_area(true, w, 0, 0, 0, 0);
+        }
+        let _ = self.conn.sync();
+    }
+}
+
+impl Drop for RecordBorder {
+    fn drop(&mut self) {
+        for &w in &self.wins {
+            let _ = self.conn.destroy_window(w);
+        }
+        let _ = self.conn.sync();
+    }
+}
+
+/// 在选区 (x, y, w, h) 周围显示录制边框。任何失败（Wayland 会话/X 连接
+/// 失败/选区外无可用空间）都返回 None：录制行为不变，仅无边框。
+pub fn record_border(x: i32, y: i32, w: u32, h: u32) -> Option<RecordBorder> {
+    if ensure_x11().is_err() {
+        return None;
+    }
+    let (conn, screen_num) = x11rb::connect(None).ok()?;
+    let screen = conn.setup().roots[screen_num].clone();
+    let (min_x, min_y, max_x, max_y) = virtual_desktop(&conn, &screen).ok()?;
+
+    const T: i32 = 2; // 边条厚度
+    let wi = w.min(i32::MAX as u32) as i32;
+    let hi = h.min(i32::MAX as u32) as i32;
+    // 上/下/左/右四条边条的理想矩形（选区外扩 T px；u32→i32 先钳再算防溢出）
+    let strips = [
+        (
+            x.saturating_sub(T),
+            y.saturating_sub(T),
+            wi.saturating_add(2 * T),
+            T,
+        ),
+        (
+            x.saturating_sub(T),
+            y.saturating_add(hi),
+            wi.saturating_add(2 * T),
+            T,
+        ),
+        (x.saturating_sub(T), y, T, hi),
+        (x.saturating_add(wi), y, T, hi),
+    ];
+
+    use x11rb::protocol::shape::{ConnectionExt as _, SK, SO};
+    use x11rb::protocol::xproto::{CreateWindowAux, WindowClass};
+
+    let mut wins = Vec::new();
+    'strips: for (sx, sy, sw, sh) in strips {
+        // 钳到虚拟桌面：贴边选区的外扩条可能越界，裁掉越界部分
+        let x0 = sx.max(min_x);
+        let y0 = sy.max(min_y);
+        let x1 = sx.saturating_add(sw).min(max_x);
+        let y1 = sy.saturating_add(sh).min(max_y);
+        if x1 <= x0 || y1 <= y0 {
+            continue; // 该侧贴屏幕边缘，接受缺边
+        }
+        let Ok(win) = conn.generate_id() else {
+            break 'strips;
+        };
+        // 红色边条：depth-24/32 TrueColor 像素值 = RGB 直接拼位
+        // （现代 X server 的掩码约定 r=0xFF0000/g=0xFF00/b=0xFF）
+        let aux = CreateWindowAux::new()
+            .override_redirect(1u32) // Bool32 = u32
+            .background_pixel(0xE5_39_35);
+        let created = conn
+            .create_window(
+                x11rb::COPY_DEPTH_FROM_PARENT,
+                win,
+                screen.root,
+                x0 as i16,
+                y0 as i16,
+                (x1 - x0) as u16,
+                (y1 - y0) as u16,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                screen.root_visual,
+                &aux,
+            )
+            .is_ok()
+            // 点击穿透：输入 shape 置空（source bitmap = NONE）
+            && conn.shape_mask(SO::SET, SK::INPUT, win, 0, 0, x11rb::NONE).is_ok()
+            && conn.map_window(win).is_ok();
+        if !created {
+            let _ = conn.destroy_window(win);
+            break 'strips;
+        }
+        wins.push(win);
+    }
+    if wins.is_empty() || conn.sync().is_err() {
+        // 半途失败：销毁已建窗口，退化为无边框录制（绝不留残影）
+        for w in wins {
+            let _ = conn.destroy_window(w);
+        }
+        let _ = conn.sync();
+        return None;
+    }
+    Some(RecordBorder { conn, wins })
 }

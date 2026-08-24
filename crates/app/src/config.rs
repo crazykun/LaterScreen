@@ -34,6 +34,10 @@ pub struct Config {
     pub copy_auto_exit: bool,
     /// 保存文件后打开所在目录
     pub open_dir_after_save: bool,
+    /// 截图历史保留条数（1-50，默认 10）；超限裁最旧
+    pub history_max: usize,
+    /// 录制格式：gif / mp4（CLI --mp4 显式指定时优先于此配置）
+    pub record_format: String,
     /// 全局热键（托盘模式生效），如 "Ctrl+Alt+A"；留空 = 不注册。
     /// 截图默认 F1（Snipaste 惯例、系统冲突率低——Ctrl+Alt+A 在 Deepin
     /// 等桌面是系统截图键）；裸键仅允许 PrintScreen/F1-F12
@@ -55,6 +59,8 @@ impl Default for Config {
             default_selection: "window".to_string(),
             copy_auto_exit: true,
             open_dir_after_save: false,
+            history_max: 10,
+            record_format: "gif".to_string(),
             hotkey_screenshot: "F1".to_string(),
             hotkey_picker: String::new(),
             hotkey_pin: String::new(),
@@ -112,6 +118,16 @@ impl Config {
 
     pub fn tool(&self) -> Tool {
         tool_from_name(&self.default_tool).unwrap_or(Tool::Select)
+    }
+
+    /// 录制格式是否为 MP4（非法/未知值按 GIF 处理）
+    pub fn record_mp4(&self) -> bool {
+        self.record_format.trim().eq_ignore_ascii_case("mp4")
+    }
+
+    /// 截图历史保留条数（钳到 1-50；0 或非法值回退默认 10）
+    pub fn history_max(&self) -> usize {
+        self.history_max.clamp(1, 50)
     }
 
     pub fn style(&self) -> Style {
@@ -201,6 +217,9 @@ pub const SELECTION_NAMES: &[(&str, &str)] = &[
     ("fullscreen", "全屏"),
     ("none", "无"),
 ];
+
+/// 录制格式选项：(配置值, 面板文案)
+pub const RECORD_FORMAT_NAMES: &[(&str, &str)] = &[("gif", "GIF 动图"), ("mp4", "MP4 视频")];
 
 pub fn tool_from_name(name: &str) -> Option<Tool> {
     Some(match name.trim().to_ascii_lowercase().as_str() {
@@ -306,11 +325,36 @@ mod tests {
         let c = Config {
             save_dir: "/tmp/pics".into(),
             default_tool: "arrow".into(),
+            record_format: "mp4".into(),
             ..Default::default()
         };
         let text = toml::to_string_pretty(&c).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(c, back);
+    }
+
+    #[test]
+    fn record_format_selection() {
+        // 默认 gif；mp4 大小写不敏感；非法值按 gif
+        assert!(!Config::default().record_mp4());
+        assert!(Config {
+            record_format: "mp4".into(),
+            ..Default::default()
+        }
+        .record_mp4());
+        assert!(Config {
+            record_format: " MP4 ".into(),
+            ..Default::default()
+        }
+        .record_mp4());
+        assert!(!Config {
+            record_format: "webm".into(),
+            ..Default::default()
+        }
+        .record_mp4());
+        // 旧配置文件无此字段 → 默认值（serde default）
+        let back: Config = toml::from_str("save_dir = \"/tmp\"").unwrap();
+        assert_eq!(back.record_format, "gif");
     }
 
     #[test]

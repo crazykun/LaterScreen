@@ -267,6 +267,20 @@ pub fn record_mp4(
                     abort = Some(RecordError("帧尺寸/数据无效".into()));
                     break;
                 }
+                // H.264 宏块要求偶数尺寸；openh264 的 RGB→YUV 转换对奇数维
+                // 直接 assert（panic=abort 下整进程崩溃，状态窗/边框全消失）。
+                // 奇数宽/高裁掉最右列/最下行 1px（每帧一次行拷贝，小区域开销可忽略）
+                let (rgba, w, h) = if w % 2 == 1 || h % 2 == 1 {
+                    let (cw, ch) = (w & !1, h & !1);
+                    let mut buf = Vec::with_capacity((cw * ch * 4) as usize);
+                    for row in 0..ch as usize {
+                        let src = row * w as usize * 4;
+                        buf.extend_from_slice(&rgba[src..src + cw as usize * 4]);
+                    }
+                    (buf, cw, ch)
+                } else {
+                    (rgba, w, h)
+                };
                 if let Some(size) = frame_size {
                     if size != (w, h) {
                         abort = Some(RecordError(format!(
@@ -553,6 +567,37 @@ mod tests {
         assert_eq!(track.width(), 64);
         assert_eq!(track.height(), 48);
         assert_eq!(track.sample_count() as usize, n);
+        std::fs::remove_file(&dir).ok();
+    }
+
+    /// 奇数宽高的帧不得让 openh264 崩溃（RGB→YUV 转换断言偶数维；
+    /// panic=abort 下整进程退出，状态窗/边框全消失——真实缺陷回归）。
+    /// 裁偶后产物尺寸 = 原尺寸各减 1。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn odd_frames_to_mp4() {
+        let dir = std::env::temp_dir().join("lscreen-record-test-odd.mp4");
+        let stop = AtomicBool::new(false);
+        let n = record_mp4(
+            move || {
+                let (w, h) = (65u32, 49u32);
+                Ok((vec![0x80u8; (w * h * 4) as usize], w, h))
+            },
+            &Mp4Options {
+                fps: 10,
+                bitrate_kbps: 500,
+            },
+            Duration::from_millis(350),
+            &stop,
+            &dir,
+        )
+        .unwrap();
+        assert!(n >= 2, "帧数过少: {n}");
+        let f = std::fs::File::open(&dir).unwrap();
+        let reader = mp4::read_mp4(f).unwrap();
+        let track = reader.tracks().values().next().unwrap();
+        assert_eq!(track.width(), 64);
+        assert_eq!(track.height(), 48);
         std::fs::remove_file(&dir).ok();
     }
 }
