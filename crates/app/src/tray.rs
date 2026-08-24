@@ -740,12 +740,8 @@ mod native_impl {
                 for item in items {
                     let id = format!("{HIST_PREFIX}{}", item.filename);
                     let mi = MenuItem::with_id(id.clone(), item.label(), true, None);
-                    // 子项缩略图图标（Windows 自绘 / macOS 原生菜单都走 muda Icon）
-                    if let Some((rgba, w, h)) = crate::history::thumbnail_rgba(&item) {
-                        if let Ok(icon) = tray_icon::menu::Icon::from_rgba(rgba, w, h) {
-                            mi.set_icon(Some(icon));
-                        }
-                    }
+                    // 注：muda 普通 MenuItem 不支持图标（仅 Submenu 有 set_icon），
+                    // 原生菜单这里只留文字，缩略图仅 Linux dbusmenu 路径支持
                     let _ = submenu.append(&mi);
                     self.history_items.insert(id, item);
                 }

@@ -74,7 +74,13 @@ pub fn list_windows() -> Vec<WindowInfo> {
                 continue;
             }
         }
+        // 仅在 macOS 缩放换算时会被重新赋值；Windows 无此逻辑，mut 会触发
+        // unused_mut 警告，故按平台条件加 mut（width/height 复用 66 行的绑定）
+        #[cfg(target_os = "macos")]
         let (mut x, mut y) = (w.x().unwrap_or(0), w.y().unwrap_or(0));
+        #[cfg(not(target_os = "macos"))]
+        let (x, y) = (w.x().unwrap_or(0), w.y().unwrap_or(0));
+        #[cfg(target_os = "macos")]
         let (mut width, mut height) = (width, height);
         // macOS：CG 坐标是逻辑点，按窗口中心所在显示器的缩放比换算物理像素，
         // 与 Screenshot 的坐标系（xcap Monitor 原点 + 物理像素位图）对齐
