@@ -386,40 +386,37 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       走自动打开目录；record（GIF/MP4）与 scroll `-o` 落盘后同样按配置
       打开所在目录
 
-### M11 截图历史（托盘「历史」子菜单，最近 10 张）
+### M11 截图历史（托盘「历史」→ 缩略图面板，最近 10 张）
 
-从托盘菜单的「历史」子菜单回看最近保存的截图 / 贴图 / 录屏——展开即列表，
-单击图片**复制**、单击录屏**打开目录并选中文件**。解决「刚截的图找不到去哪了」
-的高频痛点。形态上**不做独立窗口**（用户定稿）：直接做成托盘子菜单，点开即用、
-用完即收，比另开面板更轻。
+托盘菜单点「历史」打开一个**无边框置顶浮窗**（Snipaste 同款思路：原生菜单
+画不了缩略图，用自绘窗口展示缩略图网格）。单击缩略图**复制**（截图/贴图）或
+**打开目录并选中**（录屏）；右键贴图/打开/删除。解决「刚截的图找不到去哪了」
+的高频痛点。
 
 - [x] **记录时机**：历史 = 每次「产出图片」时追加一条记录，而非事后扫目录。
       原因：保存目录是用户任意指定的、可能混入非 lscreen 图片。写入点收敛在
       `history` 模块，各产出路径统一调用：
-      - 截图保存（`ui/mod.rs` `save_and_exit`）
-      - 贴图保存按钮（`pin.rs` `do_save`）
+      - 截图保存（`ui/mod.rs` `save_and_exit`）、复制（`copy_and_exit`）
+      - 贴图保存按钮（`pin.rs` `do_save`）、贴图创建（`pin_and_exit` +
+        `pin_from_clipboard`）
       - CLI 直出（`main.rs` `run_shot` / `run_scroll` 显式 -o 分支）
-      - **贴图创建时自动记一条**（`ui/mod.rs` `pin_and_exit` + 托盘
-        `pin_from_clipboard`）——贴图本不落盘，这条是「贴图历史」的唯一来源
       - **录屏落盘时**（`main.rs` `run_record`，GIF/MP4 都入）
 - [x] **存储形态（小而美）**：独立历史目录 `~/.config/lscreen/history/`
       （三平台 config_dir 下），每项存一份**全尺寸 PNG 副本**，索引 `index.toml`
       记录（时间戳、来源类型、尺寸，按时间倒序）。上限 `history_max`（默认 10，
       1-50），append 超限裁最旧。**存副本而非只记路径**：再复制/贴图必须能读到
       原图，源文件可能被移动或删除；自包含副本保证历史永远可点开。代价：磁盘约
-      N×单张 PNG 大小（10 张 1080p 截图约 20–40MB，可控）。无历史时子菜单显示
+      N×单张 PNG 大小（10 张 1080p 截图约 20–40MB，可控）。无历史时面板显示
       「暂无历史」占位，不报错不落盘。
-- [x] **托盘子菜单（Linux ksni）**：`tray.rs` 的 `Action` 增
-      `HistoryItem(Item)`；根菜单固定顺序里在「滚动截图」与「配置」之间插
-      「历史」`SubMenu`，子项 = 最近 N 条历史。**每次展开前刷新**：覆盖
-      `menu_about_to_show`（空实现即触发 ksni 重建菜单，默认实现会置静态标志），
-      从磁盘重读 `history::list()`。单击子项 → `dispatch` 按 kind 分流：
-      Shot/Pin 复制、Record 打开目录并选中。子菜单文案：图片 = `MM-DD HH:MM ·
-      WxH`，录屏 = `[录] MM-DD HH:MM`。
-- [x] **托盘子菜单（Win/mac tray-icon + muda）**：`NativeApp` 持 `Submenu` 句柄
-      与 `history_items` 表；历史签名（条目数 + 最新 filename）变化才清空重建
-      子项（`Submenu::remove_at` 逐条移除 + `append`）。菜单事件按
-      `hist:<filename>` id 查表路由，与固定动作 id 分离。
+- [x] **面板浮窗（`history.rs` `HistoryApp`）**：`egui::Panel::top`(标题+计数+
+      ✕) + `CentralPanel` 里 `ScrollArea` 缩略图列表（长边缩到 256，`thumb`
+      懒加载 + 缓存）。单击按 kind 分流：Shot/Pin 复制、Record `open_and_select`；
+      右键菜单贴图/打开目录/删除。`refresh_if_changed` 轮询 `index.toml` mtime，
+      新截图落盘面板自动出现。Esc/✕ 关闭。
+- [x] **托盘入口**：`tray.rs` 的 `Action::History` = `spawn_detached(["history"])`，
+      `MENU_ACTIONS` 在「滚动截图」与「配置」之间插「历史」（Linux ksni 与
+      Win/mac tray-icon 都走普通菜单项，不再用子菜单）。`main.rs` 恢复
+      `Cmd::History` + `run_history`（320×440 无边框置顶窗 + `HistoryApp`）。
 - [x] **录屏缩略图**：GIF/MP4 均**录制时留首帧**——`record_mp4`/`record_gif`
       采帧时把第一帧 RGBA 存入共享槽，录毕另存 `_poster.png` 并记一条，
       `source` 指向实际 GIF/MP4 文件。**不做复制**（用户定稿）：剪贴板只收
@@ -430,8 +427,8 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       ashpd 在依赖树，不增体积）。
 - [x] **配置**：`config.rs` 增 `history_max: usize`（默认 10）；`settings_ui.rs`
       「保存」卡片增「历史条数」（DragValue 1–50，保存时校验非法提示不落盘）。
-- [x] **README 同步**：托盘菜单文案补「历史」子菜单；CLI 表不含 history
-      （无独立子命令）。`docs/PLAN.md` §6 目录规范补 `app/src/history.rs`。
+- [x] **README 同步**：托盘菜单文案补「历史」面板；CLI 表补 `history` 子命令。
+      `docs/PLAN.md` §6 目录规范补 `app/src/history.rs`。
 
 ### 遗留 TODO（review 2026-08-17）
 

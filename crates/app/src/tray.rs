@@ -36,8 +36,8 @@ pub enum Action {
     Pin,
     Record,
     Scroll,
-    /// 历史子菜单里的具体条目：单击按 kind 分动作（截图/贴图复制、录屏定位）
-    HistoryItem(crate::history::Item),
+    /// 打开历史面板（自绘缩略图浮窗，独立进程）
+    History,
     Config,
     Quit,
 }
@@ -48,6 +48,7 @@ const MENU_ACTIONS: &[(Action, &str)] = &[
     (Action::Pin, "贴图"),
     (Action::Record, "录屏"),
     (Action::Scroll, "滚动截图"),
+    (Action::History, "历史"),
     (Action::Config, "配置"),
     (Action::Quit, "退出"),
 ];
@@ -61,17 +62,8 @@ fn dispatch(a: Action) -> bool {
         Action::Picker => spawn_detached(&["pick"]),
         Action::Record => spawn_detached(&["record", "--select"]),
         Action::Scroll => spawn_detached(&["scroll"]),
+        Action::History => spawn_detached(&["history"]),
         Action::Config => spawn_detached(&["config"]),
-        Action::HistoryItem(item) => {
-            // 复制/定位可能阻塞（复制走 clipd 子进程同步等回执、定位走 D-Bus），
-            // 必须放到后台线程——否则卡住托盘主循环，整个托盘失去响应。
-            std::thread::spawn(move || match item.kind {
-                crate::history::Kind::Record => crate::history::open_item(&item),
-                crate::history::Kind::Shot | crate::history::Kind::Pin => {
-                    crate::history::copy_item(&item)
-                }
-            });
-        }
         Action::Pin => {
             if let Err(e) = pin_from_clipboard() {
                 eprintln!("lscreen tray: {e}");
@@ -433,15 +425,13 @@ mod linux_impl {
     use super::*;
 
     use ksni::blocking::TrayMethods;
-    use ksni::menu::{StandardItem, SubMenu};
+    use ksni::menu::StandardItem;
     use ksni::{Icon, Tray};
     use std::sync::mpsc::Sender;
 
     pub struct LscreenTray {
         pub cfg: Config,
         pub tx: Sender<Action>,
-        /// 历史缓存：menu_about_to_show 时刷新，menu() 据此建子菜单
-        history: Vec<crate::history::Item>,
     }
 
     impl Tray for LscreenTray {
@@ -483,73 +473,15 @@ mod linux_impl {
         }
 
         fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
-            // 固定顺序：五个动作 + 历史子菜单 + 配置 + 退出（退出前加分隔线）
-            let mut all: Vec<ksni::MenuItem<Self>> = Vec::new();
-            for (a, _) in [
-                (Action::Screenshot, "截图"),
-                (Action::Picker, "取色"),
-                (Action::Pin, "贴图"),
-                (Action::Record, "录屏"),
-                (Action::Scroll, "滚动截图"),
-            ] {
-                all.push(menu_item(&menu_label(&self.cfg, &a), &self.tx, a));
-            }
-            // 历史子菜单
-            all.push(history_submenu(&self.history, &self.tx));
-            all.push(menu_item(
-                &menu_label(&self.cfg, &Action::Config),
-                &self.tx,
-                Action::Config,
-            ));
-            all.push(ksni::MenuItem::Separator);
-            all.push(menu_item(
-                &menu_label(&self.cfg, &Action::Quit),
-                &self.tx,
-                Action::Quit,
-            ));
+            let mut all: Vec<ksni::MenuItem<Self>> = MENU_ACTIONS
+                .iter()
+                .map(|(a, _)| menu_item(&menu_label(&self.cfg, a), &self.tx, a.clone()))
+                .collect();
+            // 退出与常规动作之间加分隔线
+            let quit = all.len() - 1;
+            all.insert(quit, ksni::MenuItem::Separator);
             all
         }
-    }
-
-    /// 「历史」子菜单：每条历史一个条目，单击发送 Action::HistoryItem。
-    fn history_submenu(
-        items: &[crate::history::Item],
-        tx: &Sender<Action>,
-    ) -> ksni::MenuItem<LscreenTray> {
-        let tx = tx.clone();
-        let submenu: Vec<ksni::MenuItem<LscreenTray>> = if items.is_empty() {
-            vec![StandardItem {
-                label: "暂无历史".to_string(),
-                enabled: false,
-                ..Default::default()
-            }
-            .into()]
-        } else {
-            items
-                .iter()
-                .map(|item| {
-                    let tx = tx.clone();
-                    let item = item.clone();
-                    // 子项图标 = 缩略图 PNG（dbusmenu icon-data；宿主不渲染则无图标）
-                    let icon_data = crate::history::thumbnail_png(&item).unwrap_or_default();
-                    StandardItem {
-                        label: item.label(),
-                        icon_data,
-                        activate: Box::new(move |_t: &mut LscreenTray| {
-                            let _ = tx.send(Action::HistoryItem(item.clone()));
-                        }),
-                        ..Default::default()
-                    }
-                    .into()
-                })
-                .collect()
-        };
-        SubMenu {
-            label: "历史".to_string(),
-            submenu,
-            ..Default::default()
-        }
-        .into()
     }
 
     fn menu_item(label: &str, tx: &Sender<Action>, act: Action) -> ksni::MenuItem<LscreenTray> {
@@ -578,16 +510,11 @@ mod linux_impl {
         hotkeys.apply(&cfg);
 
         let (tx, rx) = std::sync::mpsc::channel::<Action>();
-        let handle = LscreenTray {
-            cfg,
-            tx,
-            history: crate::history::list(),
-        }
-        .spawn()
-        .map_err(|e| format!("托盘启动失败（D-Bus / StatusNotifierWatcher 不可用）: {e}"))?;
+        let handle = LscreenTray { cfg, tx }
+            .spawn()
+            .map_err(|e| format!("托盘启动失败（D-Bus / StatusNotifierWatcher 不可用）: {e}"))?;
 
         let mut last_mtime = config_mtime();
-        let mut last_hist_mtime = crate::history::index_mtime();
         let mut last_poll = std::time::Instant::now();
 
         'main: loop {
@@ -617,15 +544,6 @@ mod linux_impl {
                     hotkeys.apply(&cfg);
                     handle.update(move |t: &mut LscreenTray| t.cfg = cfg);
                 }
-                // 历史变化：截图/贴图/录屏落盘会改 index.toml 的 mtime。
-                // 不能只靠 menu_about_to_show（Deepin 等面板对 activate 打开的
-                // 菜单不回调该信号），轮询检测到变化就重建子菜单。
-                let hist_mtime = crate::history::index_mtime();
-                if hist_mtime != last_hist_mtime {
-                    last_hist_mtime = hist_mtime;
-                    let history = crate::history::list();
-                    handle.update(move |t: &mut LscreenTray| t.history = history);
-                }
             }
             std::thread::park_timeout(std::time::Duration::from_millis(150));
         }
@@ -646,15 +564,12 @@ mod native_impl {
     use super::*;
 
     use std::collections::HashMap;
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem, Submenu};
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem};
     use tray_icon::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
     use winit::application::ApplicationHandler;
     use winit::event::WindowEvent;
     use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
     use winit::window::WindowId;
-
-    /// 历史子菜单条目 id 前缀（`hist:<filename>`），据此在 MenuEvent 里路由。
-    const HIST_PREFIX: &str = "hist:";
 
     enum UserEvent {
         Menu(String),
@@ -666,12 +581,6 @@ mod native_impl {
         cfg: Config,
         tray: Option<TrayIcon>,
         menu_items: HashMap<String, MenuItem>,
-        /// 历史子菜单句柄（tick 里按签名重建子项）
-        history_submenu: Option<Submenu>,
-        /// 历史条目：id("hist:<filename>") → Item，菜单点击时查表
-        history_items: HashMap<String, crate::history::Item>,
-        /// 历史签名（数量 + 首条 filename），变化才重建子菜单
-        history_sig: Option<String>,
         hotkeys: Hotkeys,
         last_mtime: Option<std::time::SystemTime>,
         mtime_initialized: bool,
@@ -683,24 +592,9 @@ mod native_impl {
         fn setup(&mut self) {
             let menu = Menu::new();
             let mut items = HashMap::new();
-            // 固定顺序：五个动作 + 历史子菜单 + 配置 + 退出（退出前分隔线）
-            for (a, _) in [
-                (Action::Screenshot, "截图"),
-                (Action::Picker, "取色"),
-                (Action::Pin, "贴图"),
-                (Action::Record, "录屏"),
-                (Action::Scroll, "滚动截图"),
-            ] {
-                let id = action_id(&a);
-                let item = MenuItem::with_id(id.clone(), menu_label(&self.cfg, &a), true, None);
-                let _ = menu.append(&item);
-                items.insert(id, item);
-            }
-            let history_submenu = Submenu::with_id("history", "历史", true);
-            let _ = menu.append(&history_submenu);
-            for (a, _) in [(Action::Config, "配置"), (Action::Quit, "退出")] {
-                let id = action_id(&a);
-                let item = MenuItem::with_id(id.clone(), menu_label(&self.cfg, &a), true, None);
+            for (a, _) in MENU_ACTIONS {
+                let id = action_id(a);
+                let item = MenuItem::with_id(id.clone(), menu_label(&self.cfg, a), true, None);
                 let _ = menu.append(&item);
                 items.insert(id, item);
             }
@@ -717,59 +611,17 @@ mod native_impl {
             self.hotkeys.apply(&self.cfg);
             self.tray = Some(tray);
             self.menu_items = items;
-            self.history_submenu = Some(history_submenu);
-            self.rebuild_history();
-        }
-
-        /// 清空并重建历史子菜单（history_items 表同步）。
-        fn rebuild_history(&mut self) {
-            let Some(submenu) = &self.history_submenu else {
-                return;
-            };
-            // 清空既有子项（remove_at 从后往前，逐个移除）
-            let n = submenu.items().len();
-            for _ in 0..n {
-                let _ = submenu.remove_at(0);
-            }
-            self.history_items.clear();
-            let items = crate::history::list();
-            if items.is_empty() {
-                let placeholder = MenuItem::with_id("history:empty", "暂无历史", false, None);
-                let _ = submenu.append(&placeholder);
-            } else {
-                for item in items {
-                    let id = format!("{HIST_PREFIX}{}", item.filename);
-                    let mi = MenuItem::with_id(id.clone(), item.label(), true, None);
-                    // 注：muda 普通 MenuItem 不支持图标（仅 Submenu 有 set_icon），
-                    // 原生菜单这里只留文字，缩略图仅 Linux dbusmenu 路径支持
-                    let _ = submenu.append(&mi);
-                    self.history_items.insert(id, item);
-                }
-            }
-            self.history_sig = history_sig();
         }
 
         fn handle(&mut self, ev: UserEvent, loop_target: &ActiveEventLoop) {
             let action = match ev {
-                // 历史条目 id 走独立路由（带 filename 载荷，不能套固定映射）
-                UserEvent::Menu(id) if id.starts_with(HIST_PREFIX) => {
-                    if let Some(item) = self.history_items.get(&id).cloned() {
-                        // 后台线程执行：复制/定位可能阻塞，不能卡住事件循环
-                        std::thread::spawn(move || match item.kind {
-                            crate::history::Kind::Record => crate::history::open_item(&item),
-                            crate::history::Kind::Shot | crate::history::Kind::Pin => {
-                                crate::history::copy_item(&item)
-                            }
-                        });
-                    }
-                    return;
-                }
                 UserEvent::Menu(id) => match id.as_str() {
                     "shot" => Some(Action::Screenshot),
                     "pick" => Some(Action::Picker),
                     "pin" => Some(Action::Pin),
                     "record" => Some(Action::Record),
                     "scroll" => Some(Action::Scroll),
+                    "history" => Some(Action::History),
                     "config" => Some(Action::Config),
                     "quit" => Some(Action::Quit),
                     _ => None,
@@ -801,10 +653,6 @@ mod native_impl {
                 }
                 self.cfg = cfg;
             }
-            // 历史变化（截图/贴图/录屏落盘后）才重建子菜单
-            if self.history_sig.as_deref() != history_sig().as_deref() {
-                self.rebuild_history();
-            }
         }
     }
 
@@ -814,16 +662,6 @@ mod native_impl {
             .and_then(|m| m.modified().ok())
     }
 
-    /// 历史子菜单的签名：条目数 + 最新一条 filename。变化即重建。
-    fn history_sig() -> Option<String> {
-        let items = crate::history::list();
-        Some(format!(
-            "{:?}:{}",
-            items.len(),
-            items.first().map(|i| i.filename.as_str()).unwrap_or("")
-        ))
-    }
-
     fn action_id(a: &Action) -> String {
         match a {
             Action::Screenshot => "shot",
@@ -831,9 +669,9 @@ mod native_impl {
             Action::Pin => "pin",
             Action::Record => "record",
             Action::Scroll => "scroll",
+            Action::History => "history",
             Action::Config => "config",
             Action::Quit => "quit",
-            Action::HistoryItem(_) => "history-item",
         }
         .to_string()
     }
@@ -909,9 +747,6 @@ mod native_impl {
             cfg,
             tray: None,
             menu_items: HashMap::new(),
-            history_submenu: None,
-            history_items: HashMap::new(),
-            history_sig: None,
             hotkeys: Hotkeys::new(),
             last_mtime: None,
             mtime_initialized: false,
