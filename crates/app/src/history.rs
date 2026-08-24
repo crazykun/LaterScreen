@@ -442,11 +442,17 @@ impl eframe::App for HistoryApp {
             .show(ui, |ui| {
                 // 鼠标拖拽滚动：egui 默认 drag 只在触摸屏生效，这里显式开启——
                 // 列表只有滚轮滚非常难用。默认源（滚动条+滚轮）或上 DragScroll::Always。
+                // auto_shrink(false)：默认 ScrollArea 会收缩到内容宽度，内容行比面板
+                // 窄时滚动条就落在面板中间；关掉收缩让它撑满面板，滚动条贴到右缘。
                 use egui::containers::scroll_area::ScrollSource;
                 egui::ScrollArea::vertical()
+                    .auto_shrink(false)
                     .scroll_source(ScrollSource::default() | ScrollSource::DRAG)
                     .on_drag_cursor(egui::CursorIcon::Grabbing)
                     .show(ui, |ui| {
+                        // 滚动内容强制占满整行宽度：行内 horizontal 仅按子项宽度布局，
+                        // 若不设宽度，内容（从而滚动条）会收缩到最宽一行的宽度。
+                        ui.set_width(ui.available_width());
                         // take 出 items：循环体要可变借用 self（thumb 缓存）与读列表，
                         // 二者都用 self 会借用冲突，先取出再放回
                         let mut items = std::mem::take(&mut self.items);
