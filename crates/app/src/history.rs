@@ -190,10 +190,12 @@ fn trim(index: &mut Index) {
 /// 缩略图边长上限（长边缩到 256，等比缩放）。
 const THUMB: u32 = 256;
 /// 列表里缩略图的固定高度（逻辑点）：图片按此高成等比缩放，行高一致，
-/// 与右侧时间/类型标签对齐。宽超出再按比例缩，保证不溢出面板。
-const THUMB_H: f32 = 96.0;
-/// 缩略图占行左列的宽度上限（长图不撑爆面板）。
-const THUMB_W: f32 = 150.0;
+/// 与右侧时间/类型标签对齐。图片是主角，保持较高的固定高度。
+const THUMB_H: f32 = 120.0;
+/// 右栏宽度上限（类型/时间/分辨率各一行）。实际取「图片实际宽度」与
+/// 此上限的较小值：横版图填满行宽时右栏收到上限，竖版窄图时右栏跟着
+/// 收窄——图片永远是行内最大元素，文字只是配角。
+const META_W: f32 = 76.0;
 
 /// 历史面板（Snipaste 式自绘弹窗）：无边框浮窗 + 缩略图列表，悬停 Tooltip +
 /// 右键菜单（贴图/打开目录/删除），单击按类型复制或定位；鼠标可拖拽滚动。
@@ -279,20 +281,10 @@ impl HistoryApp {
         ok
     }
 
-    /// 打开源文件所在目录并选中（录屏=实际视频，截图/贴图=源文件/副本）。
+    /// 打开源文件所在目录并选中（右键「打开目录」用）。
     /// 尽力而为：打开失败也弹提示，不让用户点了毫无反馈。
     fn open_item(&mut self, ctx: &egui::Context, item: &Item) {
-        let target = if !item.source.is_empty() {
-            let p = PathBuf::from(&item.source);
-            if p.exists() {
-                Some(p)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let target = target.unwrap_or_else(|| file_path(item));
+        let target = resolve_source(item).unwrap_or_else(|| file_path(item));
         if target.exists() {
             export::open_and_select(&target);
             self.toast(ctx, format!("已打开所在目录: {}", short_dir(&target)));
@@ -305,6 +297,19 @@ impl HistoryApp {
             } else {
                 self.toast(ctx, "文件不存在，且父目录也已删除");
             }
+        }
+    }
+
+    /// 录屏单击：用系统默认程序播放实际视频（GIF/MP4），而不是打开缩略图副本。
+    /// 视频路径来自 `source`（录制时记的实际产物）；`source` 为空或文件已删
+    /// （M11 之前的旧条目）时退化为打开目录，至少给用户一个去处。
+    fn play_item(&mut self, ctx: &egui::Context, item: &Item) {
+        if let Some(path) = resolve_source(item) {
+            export::open_with_default(&path);
+            self.toast(ctx, format!("已在默认播放器打开: {}", short_dir(&path)));
+        } else {
+            // 视频丢了：退化为打开目录（让用户看到原始序列或清理）
+            self.open_item(ctx, item);
         }
     }
 
@@ -452,83 +457,93 @@ impl eframe::App for HistoryApp {
                         }
                         let mut remove: Option<String> = None;
                         for item in &items {
-                            // 每行一条卡片：固定高度缩略图（左）+ 时间/类型（右），
-                            // 整行可点（单击看类型，右键开菜单）。
+                            // 每行一张满宽卡片：左缩略图（固定高）+ 右元数据三行
+                            // （类型/时间/分辨率，各自一行，右侧不再挤得满满的）。
                             let thumb = self.thumb(&ctx, item);
 
-                            // 缩略图尺寸：固定高 THUMB_H，宽按图高比缩放并钳到上限
+                            // 缩略图尺寸：固定高 THUMB_H，宽按图高比缩放；横版图放大到
+                            // 占满行内剩余全部宽度，竖版图按高比自然更窄。上限 =
+                            // 行宽 - 右栏 - 分隔符，避免把右栏挤出面板。
                             let img_size = thumb.size_vec2();
                             let mut size =
                                 Vec2::new(img_size.x * (THUMB_H / img_size.y.max(1.0)), THUMB_H);
-                            if size.x > THUMB_W {
-                                size *= THUMB_W / size.x;
+                            let max_w = (ui.available_width() - META_W - 8.0).max(48.0);
+                            if size.x > max_w {
+                                size *= max_w / size.x;
                             }
+                            // 右栏宽度随图片实际宽度收敛：不超上限，也不宽过图片
+                            // （竖版窄图下文字保持配角，不会占掉半边）。
+                            let meta_w = META_W.min(size.x.max(48.0));
 
-                            // 图片与右侧元数据同一行（horizontal）；图片用固定高度矩形，
-                            // 元数据放其右侧（vertical 两行：类型 + 时间·分辨率）。
                             let mut img_rect = Rect::ZERO;
                             ui.horizontal(|ui| {
                                 let img_resp = ui.add(egui::Image::from_texture(
                                     egui::load::SizedTexture::new(&thumb, size),
                                 ));
                                 img_rect = img_resp.rect;
-                                ui.vertical(|ui| {
-                                    ui.label(
-                                        egui::RichText::new(if item.kind == Kind::Record {
-                                            "录屏"
-                                        } else if item.kind == Kind::Pin {
-                                            "贴图"
-                                        } else {
-                                            "截图"
-                                        })
-                                        .size(12.0)
-                                        .strong()
-                                        .color(egui::Color32::from_rgb(0xec, 0xec, 0xf0)),
-                                    );
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "{}  {}×{}",
-                                            fmt_time(item.timestamp),
-                                            item.width,
-                                            item.height
-                                        ))
-                                        .size(11.0)
-                                        .weak(),
-                                    );
-                                });
+                                // 右栏 → 类型 / 时间 / 分辨率三行居中
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(meta_w, img_rect.height()),
+                                    egui::Layout::top_down(egui::Align::LEFT),
+                                    |ui| {
+                                        ui.vertical_centered(|ui| {
+                                            ui.label(
+                                                egui::RichText::new(if item.kind == Kind::Record {
+                                                    "录屏"
+                                                } else if item.kind == Kind::Pin {
+                                                    "贴图"
+                                                } else {
+                                                    "截图"
+                                                })
+                                                .size(13.0)
+                                                .strong()
+                                                .color(egui::Color32::from_rgb(0xec, 0xec, 0xf0)),
+                                            );
+                                            ui.add_space(2.0);
+                                            ui.label(
+                                                egui::RichText::new(fmt_time(item.timestamp))
+                                                    .size(11.0)
+                                                    .weak(),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "{}×{}",
+                                                    item.width, item.height
+                                                ))
+                                                .size(10.0)
+                                                .weak(),
+                                            );
+                                        });
+                                    },
+                                );
                             });
 
-                            // 点击区 = 缩略图本身（不是整行——整行用 Sense::click 会抢占
-                            // 滚动区的拖拽层，行上就无法拖拽滚动）。图片 Sense::hover 不占
-                            // 交互，真正可点的是下面这个选中层。
-                            let click_resp = ui
+                            // 整行卡片矩形（缩略图左缘到面板右缘）——用于悬停底色 + 红框
+                            let row_rect = Rect::from_min_size(
+                                img_rect.min,
+                                Vec2::new(
+                                    (ui.max_rect().right() - img_rect.min.x).max(0.0),
+                                    img_rect.height(),
+                                ),
+                            );
+                            // 行文字区 hover-only：只负责悬停红框，不抢占滚动区拖拽层，
+                            // 在文字/空白处按住拖动即滚动列表（缩略图上的点击除外）。
+                            let hover = ui
                                 .interact(
-                                    img_rect,
-                                    egui::Id::new(("history-item", &item.filename)),
-                                    egui::Sense::click(),
+                                    row_rect,
+                                    egui::Id::new(("history-row", &item.filename)),
+                                    egui::Sense::hover(),
                                 )
-                                .on_hover_cursor(egui::CursorIcon::PointingHand);
-                            let hovered = click_resp.hovered()
-                                // 元数据区域也纳入悬停（提示整行可读）
-                                || ui
-                                    .interact(
-                                        Rect::from_min_size(
-                                            img_rect.right_top(),
-                                            Vec2::new(
-                                                (ui.max_rect().right() - img_rect.right()).max(0.0),
-                                                img_rect.height(),
-                                            ),
-                                        ),
-                                        egui::Id::new(("history-meta", &item.filename)),
-                                        egui::Sense::hover(),
-                                    )
-                                    .hovered();
-
-                            // 悬停高亮（给整行）
-                            if hovered {
+                                .hovered();
+                            if hover {
+                                ui.painter().rect_filled(
+                                    row_rect.expand(2.0),
+                                    7.0,
+                                    egui::Color32::from_rgba_unmultiplied(0xe5, 0x39, 0x35, 18),
+                                );
                                 ui.painter().rect_stroke(
-                                    img_rect.expand(2.0),
-                                    6.0,
+                                    row_rect.expand(2.0),
+                                    7.0,
                                     egui::Stroke::new(
                                         1.5,
                                         egui::Color32::from_rgb(0xe5, 0x39, 0x35),
@@ -537,10 +552,20 @@ impl eframe::App for HistoryApp {
                                 );
                             }
 
+                            // 点击区 = 缩略图（左键复制/播放，右键弹出菜单）。整行用
+                            // Sense::click 会抢占滚动区拖拽层，行上就无法拖拽滚动。
+                            let click_resp = ui
+                                .interact(
+                                    img_rect,
+                                    egui::Id::new(("history-item", &item.filename)),
+                                    egui::Sense::click(),
+                                )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+
                             if click_resp.clicked() {
-                                // 单击：按类型复制 / 定位
+                                // 单击：录屏 = 播放视频；截图/贴图 = 复制
                                 match item.kind {
-                                    Kind::Record => self.open_item(&ctx, item),
+                                    Kind::Record => self.play_item(&ctx, item),
                                     Kind::Shot | Kind::Pin => {
                                         if self.copy_item(&ctx, item) && self.close_after_copy {
                                             self.close = true;
@@ -548,7 +573,7 @@ impl eframe::App for HistoryApp {
                                     }
                                 }
                             }
-                            // 右键菜单：贴图 / 打开目录 / 删除
+                            // 右键菜单挂在缩略图：贴图 / 打开目录 / 删除
                             click_resp.context_menu(|ui| {
                                 if ui.button("贴图").clicked() {
                                     self.pin_item(item);
@@ -599,6 +624,16 @@ fn short_dir(p: &std::path::Path) -> String {
         }
     }
     p.display().to_string()
+}
+
+/// 条目已记录的源文件（截图/贴图=原保存路径，录屏=实际 GIF/MP4），
+/// 只在存在且未失效时返回。
+fn resolve_source(item: &Item) -> Option<PathBuf> {
+    if item.source.is_empty() {
+        return None;
+    }
+    let p = PathBuf::from(&item.source);
+    p.exists().then_some(p)
 }
 
 /// unix 秒 → 本地 "MM-DD HH:MM"。

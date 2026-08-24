@@ -409,27 +409,31 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       N×单张 PNG 大小（10 张 1080p 截图约 20–40MB，可控）。无历史时面板显示
       「暂无历史」占位，不报错不落盘。
 - [x] **面板浮窗（`history.rs` `HistoryApp`）**：`egui::Panel::top`(标题+计数+
-      ✕) + `CentralPanel` 里 `ScrollArea` 缩略图列表。每行固定高度缩略图（左）+
-      类型/时间/分辨率（右），整行可点，悬停高亮；**鼠标可拖拽滚动**
+      ✕) + `CentralPanel` 里 `ScrollArea` 缩略图列表。每行一张**满宽卡片**：左缩略图
+      固定高 120px、按图高比缩放并**吃满行内剩余宽度**（横版图不再"框宽 item
+      窄"），右栏类型/时间/分辨率三行居中、宽度随图片收敛（竖版窄图下文字保持
+      配角）。悬停覆盖**整行**（含文字，红框 + 淡色底），**鼠标可拖拽滚动**
       （`ScrollSource::default() | DRAG`，egui 默认拖拽只在触摸屏生效）。
-      单击按 kind 分流：Shot/Pin 复制、Record `open_and_select`；**复制/打开都有
-      底部 toast 反馈**（不再"点了没反应"），按 `history_close_after_copy`
-      可在复制成功后自动收面板。右键菜单贴图/打开目录/删除。`refresh_if_changed`
-      轮询 `index.toml` mtime，新截图落盘面板自动出现。Esc/✕ 关闭。
+      单击按 kind 分流：Shot/Pin 复制、Record 用默认播放器播放 `source` 视频
+      （`open_with_default`，不再打开缩略图）；点击/播放/打开都有**底部 toast 反馈**，
+      按 `history_close_after_copy` 可在复制成功后自动收面板。右键缩略图
+      贴图/打开目录/删除。`refresh_if_changed` 轮询 `index.toml` mtime，
+      新截图落盘面板自动出现。Esc/✕ 关闭。
 - [x] **托盘入口**：`tray.rs` 的 `Action::History` = `spawn_detached(["history"])`，
       `MENU_ACTIONS` 在「滚动截图」与「配置」之间插「历史」（Linux ksni 与
       Win/mac tray-icon 都走普通菜单项，不再用子菜单）。`main.rs` 恢复
-      `Cmd::History` + `run_history`（320×440 无边框置顶窗 + `HistoryApp`），
+      `Cmd::History` + `run_history`（280×420 无边框置顶窗 + `HistoryApp`），
       摆放改为**主屏右下**（`primary_monitor_bounds`）——Deepin 的 dock 在主屏，
       历史面板贴主屏而非虚拟桌面右边界。
 - [x] **录屏缩略图**：GIF/MP4 均**录制时留首帧**——`record_mp4`/`record_gif`
       采帧时把第一帧 RGBA 存入共享槽，录毕另存 `_poster.png` 并记一条，
-      `source` 指向实际 GIF/MP4 文件。**不做复制**（用户定稿）：剪贴板只收
-      静态图，录屏子项单击 = `open_and_select(source)` 定位源文件。
+      `source` 指向实际 GIF/MP4 文件。**录屏点击不复制也不定位**：`source`
+      存在且未失效时用系统默认播放器播放视频（`export::open_with_default`），
+      源已删/旧条目无 source 时退化为打开目录。
 - [x] **打开目录并选中**：`export::open_and_select(path)` 三平台定位文件：
       Windows `explorer /select`、macOS `open -R`、Linux FileManager1 D-Bus
       `ShowItems`（失败降级 `xdg-open` 目录）。zbus 升为 app 直接依赖（已随
-      ashpd 在依赖树，不增体积）。
+      ashpd 在依赖树，不增体积）。右键「打开目录」走此路径。
 - [x] **配置**：`config.rs` 增 `history_max: usize`（默认 10）与
       `history_close_after_copy: bool`（默认 false，历史面板复制后自动收）；
       `settings_ui.rs`「保存」卡片增「历史条数」（DragValue 1–50，保存时校验

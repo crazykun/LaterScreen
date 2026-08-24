@@ -147,6 +147,25 @@ pub fn save_png(rgba: &[u8], w: u32, h: u32, path: &Path) -> Result<PathBuf, Str
     Ok(out)
 }
 
+/// 用系统默认程序打开文件（录屏点击播放、图片等按默认应用打开）。
+/// 尽力而为，失败不报错。与 `open_in_file_manager` 的区别是这里把
+/// 文件本身交给默认处理程序（如视频→播放器），而非只打开所在目录。
+pub fn open_with_default(path: &Path) {
+    let prog = if cfg!(target_os = "windows") {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(prog)
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 /// 在文件管理器中打开文件所在目录（尽力而为，失败不报错）。
 /// 平台命令：xdg-open / explorer / open；打开目录而非定位文件——
 /// 定位接口三平台不一致（org.freedesktop.FileManager2 等），保持简单。

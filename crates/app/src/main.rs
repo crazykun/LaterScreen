@@ -325,8 +325,8 @@ fn run_settings() -> Result<(), String> {
 fn run_history() -> Result<(), String> {
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_app_id("lscreen")
-        .with_inner_size([320.0, 440.0])
-        .with_min_inner_size([260.0, 200.0])
+        .with_inner_size([280.0, 420.0])
+        .with_min_inner_size([240.0, 200.0])
         .with_resizable(true)
         .with_decorations(false)
         .with_always_on_top();
@@ -334,7 +334,7 @@ fn run_history() -> Result<(), String> {
     // 而非虚拟桌面右边界——多屏时后者会落在最右那块屏上（monitor_bounds 是
     // 全部显示器并集）。X11 下逻辑点=物理像素（scale=1），无需换算。
     if let Some((dx, dy, dw, dh)) = lscreen_capture::primary_monitor_bounds() {
-        let (pw, ph) = (320.0, 440.0);
+        let (pw, ph) = (280.0, 420.0);
         let x = (dx as f32 + dw as f32 - pw - 8.0).max(dx as f32);
         let y = (dy as f32 + dh as f32 - ph - 8.0).max(dy as f32);
         viewport = viewport.with_position(eframe::egui::Pos2::new(x, y));
