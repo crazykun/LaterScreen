@@ -421,13 +421,15 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       `action_id` 映射与菜单项。
 - [ ] **历史窗口（`lscreen history`）**：新 `history.rs`（`HistoryApp` eframe
       窗口，有边框、可缩放、非置顶——与托盘/贴图/结果面板都不同，是普通窗口）。
-      网格列出最近 N 项（缩略图 + 时间戳/尺寸）。**交互以「单击 = 复制」为主**
-      （用户明确的直觉：鼠标点下去就是复制）——读副本进剪贴板，走
-      `export::copy_to_clipboard`（X11 复用 clipd 守护）。次要动作不在底部排一
-      条动作栏，而是收在条目 hover 浮层 / 右键菜单：「贴图」（spawn
-      `lscreen pin -i <副本路径>`，独立进程）、「打开目录」
-      （`export::open_in_file_manager` 指向源文件目录）、「删除」（从历史移除
-      该项，不动源文件）。空历史显示引导文案（「保存截图或贴图后会出现这里」）。
+      网格列出最近 N 项（缩略图 + 时间戳/尺寸）。**单击按条目类型分动作**
+      （用户明确的直觉：鼠标点下去就是该类型最有用的那个动作）：
+      - 截图 / 贴图 → **复制**：读副本进剪贴板，走 `export::copy_to_clipboard`
+        （X11 复用 clipd 守护）
+      - 录屏（GIF/MP4）→ **打开目录并选中文件**（`export::open_and_select`）
+      次要动作不在底部排一条动作栏，而是收在条目 hover 浮层 / 右键菜单：
+      「贴图」（spawn `lscreen pin -i <副本路径>`，独立进程）、「打开目录」
+      （`export::open_and_select` 定位源文件）、「删除」（从历史移除该项，不动
+      源文件）。空历史显示引导文案（「保存截图或贴图后会出现这里」）。
 - [ ] **录屏缩略图（含硬限制）**：GIF 与 MP4 分两条路——
       - GIF：`image` crate 开 `gif` 特性（`crates/app/Cargo.toml` 一行依赖），
         写入历史时解首帧作缩略图/副本，无额外文件
@@ -436,9 +438,19 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
         第一帧另存一张 PNG sidecar，历史和它并排放，缩略图/点开均用该 PNG。
         （`record_gif` 也可同机制存首帧 PNG，让两格式缩略图读取路径统一，取舍
         待实现时定；倾向统一存 sidecar）
-      - **复制硬限制**：剪贴板只收静态图——GIF 复制出去是首帧（可接受，提示
-        「GIF 复制为静态首帧」），**MP4 无法复制**，其条目的复制动作置灰并提示
-        「视频不支持复制」，贴图/打开目录仍可用（贴图用首帧 PNG）
+      - **录屏条目不做复制**（用户定稿）：剪贴板只收静态图，GIF/MP4 复制出去
+        没有意义，**复制动作整个移除**（不置灰、不出现）。**单击 = 「打开目录
+        并选中文件」**——这是录屏条目真正有用的动作
+- [ ] **打开目录并选中（新能力）**：`export.rs` 现 `open_in_file_manager(dir)`
+      只开目录不定位（注释明言「定位接口三平台不一致」）。新增
+      `export::open_and_select(path: &Path)`，三平台定位文件：
+      - Windows：`explorer /select,<path>`
+      - macOS：`open -R <path>`
+      - Linux：`org.freedesktop.FileManager1` D-Bus `ShowItems`（Nautilus/Dolphin
+        /Nemo 等通用）；zbus 从「仅钉版本」升为 app 直接依赖（已随 ashpd 在
+        依赖树内，不增体积；blocking + async-io 与 capture 同款）；D-Bus 调用
+        失败或服务不存在时**降级** `xdg-open <目录>`（不定位，同现状行为）。
+      截图/贴图条目的「打开目录」动作也复用此函数（从开目录升级为定位文件）
 - [ ] **配置**：`config.rs` 增 `history_max: usize`（默认 10，`serde(default)` +
       `#[serde(default)]` 兼容旧配置缺失字段）；`settings_ui.rs`「保存」卡片
       增一行「历史条数」（DragValue 1–50 或 ComboBox 5/10/20/50，校验非法
