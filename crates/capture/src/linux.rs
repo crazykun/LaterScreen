@@ -624,6 +624,21 @@ pub fn monitor_bounds() -> Result<(i32, i32, u32, u32)> {
     })
 }
 
+/// 主显示器的 (x, y, w, h)，物理像素。无主屏标记时退回第一台。
+/// 上层摆放"靠近托盘/主屏右下"的窗口（历史面板）用——`monitor_bounds`
+/// 是全部显示器并集，多屏下右边界落在最右那块屏，未必是主屏。
+pub fn primary_monitor_bounds() -> Result<(i32, i32, u32, u32)> {
+    with_conn(|conn, screen| {
+        let mons = monitors(conn, screen)?;
+        let m = mons
+            .iter()
+            .find(|m| m.primary)
+            .or_else(|| mons.first())
+            .ok_or_else(|| CaptureError("no monitor found".into()))?;
+        Ok((m.x, m.y, m.width, m.height))
+    })
+}
+
 /// 录制期间的选区边框（RAII）：4 条 override-redirect 细长窗口围在选区
 /// **外侧** 2px，Drop 即销毁（录制结束/出错/进程退出都不留残影）。
 ///

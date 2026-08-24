@@ -330,8 +330,10 @@ fn run_history() -> Result<(), String> {
         .with_resizable(true)
         .with_decorations(false)
         .with_always_on_top();
-    // 主屏右下、贴托盘上方；X11 下逻辑点=物理像素（scale=1），无需换算
-    if let Some((dx, dy, dw, dh)) = lscreen_capture::monitor_bounds() {
+    // 主屏右下、贴托盘上方。Deepin 的 dock 在主屏右下角，历史面板应贴主屏
+    // 而非虚拟桌面右边界——多屏时后者会落在最右那块屏上（monitor_bounds 是
+    // 全部显示器并集）。X11 下逻辑点=物理像素（scale=1），无需换算。
+    if let Some((dx, dy, dw, dh)) = lscreen_capture::primary_monitor_bounds() {
         let (pw, ph) = (320.0, 440.0);
         let x = (dx as f32 + dw as f32 - pw - 8.0).max(dx as f32);
         let y = (dy as f32 + dh as f32 - ph - 8.0).max(dy as f32);

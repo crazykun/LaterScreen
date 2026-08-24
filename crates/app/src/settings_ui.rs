@@ -135,6 +135,7 @@ impl SettingsApp {
             ("贴图热键", self.cfg.hotkey_pin.clone()),
             ("录屏热键", self.cfg.hotkey_record.clone()),
             ("滚动截图热键", self.cfg.hotkey_scroll.clone()),
+            ("历史热键", self.cfg.hotkey_history.clone()),
         ];
         for (name, raw) in hotkeys {
             if raw.trim().is_empty() {
@@ -228,7 +229,8 @@ impl SettingsApp {
             1 => &mut self.cfg.hotkey_picker,
             2 => &mut self.cfg.hotkey_pin,
             3 => &mut self.cfg.hotkey_record,
-            _ => &mut self.cfg.hotkey_scroll,
+            4 => &mut self.cfg.hotkey_scroll,
+            _ => &mut self.cfg.hotkey_history,
         }
     }
 
@@ -603,6 +605,11 @@ impl SettingsApp {
                 &mut self.cfg.copy_auto_exit,
                 egui::RichText::new("复制到剪贴板后自动退出").color(TEXT),
             );
+            ui.add_space(4.0);
+            ui.checkbox(
+                &mut self.cfg.history_close_after_copy,
+                egui::RichText::new("历史面板点击复制后自动关闭").color(TEXT),
+            );
         });
 
         card(ui, "全局热键", |ui| {
@@ -624,6 +631,9 @@ impl SettingsApp {
                     ui.end_row();
                     row_label(ui, "滚动截图");
                     self.hotkey_capture(ui, 4, &self.cfg.hotkey_scroll.clone());
+                    ui.end_row();
+                    row_label(ui, "历史");
+                    self.hotkey_capture(ui, 5, &self.cfg.hotkey_history.clone());
                     ui.end_row();
                 });
             ui.add_space(2.0);

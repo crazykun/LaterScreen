@@ -190,6 +190,23 @@ pub fn monitor_bounds() -> Result<(i32, i32, u32, u32)> {
     Ok((min_x, min_y, (max_x - min_x) as u32, (max_y - min_y) as u32))
 }
 
+/// 主显示器的 (x, y, w, h)，物理像素。无主屏标记时退回第一台（Win/mac 由
+/// xcap 的 `Monitor::is_primary()` 提供；macOS 上主屏恒为内置屏）。
+pub fn primary_monitor_bounds() -> Result<(i32, i32, u32, u32)> {
+    let monitors = Monitor::all().map_err(err)?;
+    let m = monitors
+        .iter()
+        .find(|m| m.is_primary().unwrap_or(false))
+        .or_else(|| monitors.first())
+        .ok_or_else(|| CaptureError("no monitor found".into()))?;
+    Ok((
+        m.x().map_err(err)?,
+        m.y().map_err(err)?,
+        m.width().map_err(err)?,
+        m.height().map_err(err)?,
+    ))
+}
+
 pub fn record_border(_x: i32, _y: i32, _w: u32, _h: u32) -> Option<RecordBorder> {
     None
 }

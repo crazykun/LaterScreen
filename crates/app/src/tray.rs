@@ -351,6 +351,7 @@ impl Hotkeys {
             ("hotkey_pin", &cfg.hotkey_pin, Action::Pin),
             ("hotkey_record", &cfg.hotkey_record, Action::Record),
             ("hotkey_scroll", &cfg.hotkey_scroll, Action::Scroll),
+            ("hotkey_history", &cfg.hotkey_history, Action::History),
         ] {
             let _ = field;
             if raw.trim().is_empty() {
@@ -382,6 +383,7 @@ fn menu_label(cfg: &Config, a: &Action) -> String {
         Action::Pin => &cfg.hotkey_pin,
         Action::Record => &cfg.hotkey_record,
         Action::Scroll => &cfg.hotkey_scroll,
+        Action::History => &cfg.hotkey_history,
         _ => "",
     };
     if hk.trim().is_empty() {

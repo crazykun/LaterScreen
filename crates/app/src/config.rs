@@ -36,6 +36,8 @@ pub struct Config {
     pub open_dir_after_save: bool,
     /// 截图历史保留条数（1-50，默认 10）；超限裁最旧
     pub history_max: usize,
+    /// 历史面板里点击缩略图复制成功后自动关闭面板
+    pub history_close_after_copy: bool,
     /// 录制格式：gif / mp4（CLI --mp4 显式指定时优先于此配置）
     pub record_format: String,
     /// 全局热键（托盘模式生效），如 "Ctrl+Alt+A"；留空 = 不注册。
@@ -46,6 +48,7 @@ pub struct Config {
     pub hotkey_pin: String,
     pub hotkey_record: String,
     pub hotkey_scroll: String,
+    pub hotkey_history: String,
 }
 
 impl Default for Config {
@@ -60,12 +63,14 @@ impl Default for Config {
             copy_auto_exit: true,
             open_dir_after_save: false,
             history_max: 10,
+            history_close_after_copy: false,
             record_format: "gif".to_string(),
             hotkey_screenshot: "F1".to_string(),
             hotkey_picker: String::new(),
             hotkey_pin: String::new(),
             hotkey_record: String::new(),
             hotkey_scroll: String::new(),
+            hotkey_history: String::new(),
         }
     }
 }

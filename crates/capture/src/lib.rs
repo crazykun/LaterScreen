@@ -123,6 +123,13 @@ pub fn monitor_bounds() -> Option<(i32, i32, u32, u32)> {
     platform::monitor_bounds().ok()
 }
 
+/// 主显示器的 (x, y, w, h)。上层摆放"靠近托盘/主屏右下"的窗口（历史面板）
+/// 用——多屏下应贴主屏而不是虚拟桌面右边界（Deepin 的 dock 在主屏）。
+/// 失败返回 None。
+pub fn primary_monitor_bounds() -> Option<(i32, i32, u32, u32)> {
+    platform::primary_monitor_bounds().ok()
+}
+
 // ---------------------------------------------------------------- 窗口枚举（M9）
 
 /// 一个可交互的顶层窗口。坐标语义与 `Screenshot::origin` 同一坐标系同一单位

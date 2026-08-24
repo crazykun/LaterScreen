@@ -222,11 +222,11 @@ Snipaste 的招牌能力：截完把图钉在屏幕上置顶悬浮，方便对�
       弃用）；Win/mac 用 tray-icon（系统原生 API），事件泵复用 eframe 已链接的
       winit 0.30（macOS 要求托盘在主线程已运行的事件循环上创建）
 - [x] 托盘菜单：截图、取色、贴图（读剪贴板）、录屏（`record --select` 交互框选）、
-      配置、退出；菜单项带热键后缀；Linux 左键单击弹菜单（MENU_ON_ACTIVATE），
-      activate 兜底为直接截图
+      滚动截图、历史、配置、退出；菜单项带热键后缀；Linux 左键单击弹菜单
+      （MENU_ON_ACTIVATE），activate 兜底为直接截图
 - [x] 配置面板（`lscreen config`，settings_ui.rs）：保存目录、文件名模板、
-      默认工具/颜色/线宽、复制后自动退出、保存后打开目录、三个全局热键；
-      保存前全部校验（模板/热键/颜色/工具名），非法只提示不落盘
+      默认工具/颜色/线宽、复制后自动退出、保存后打开目录、历史条数/复制后收面板、
+      六个全局热键；保存前全部校验（模板/热键/颜色/工具名），非法只提示不落盘
 - [x] 全局热键：`global-hotkey` crate（托盘进程内自监听）；**默认 F1 截图**
       （Snipaste 惯例——实测 Ctrl+Alt+A 与 Deepin 系统截图键冲突）；注册失败/
       Wayland 无 X11 时仅告警降级，托盘与菜单不受影响；裸键仅允许
@@ -409,14 +409,19 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       N×单张 PNG 大小（10 张 1080p 截图约 20–40MB，可控）。无历史时面板显示
       「暂无历史」占位，不报错不落盘。
 - [x] **面板浮窗（`history.rs` `HistoryApp`）**：`egui::Panel::top`(标题+计数+
-      ✕) + `CentralPanel` 里 `ScrollArea` 缩略图列表（长边缩到 256，`thumb`
-      懒加载 + 缓存）。单击按 kind 分流：Shot/Pin 复制、Record `open_and_select`；
-      右键菜单贴图/打开目录/删除。`refresh_if_changed` 轮询 `index.toml` mtime，
-      新截图落盘面板自动出现。Esc/✕ 关闭。
+      ✕) + `CentralPanel` 里 `ScrollArea` 缩略图列表。每行固定高度缩略图（左）+
+      类型/时间/分辨率（右），整行可点，悬停高亮；**鼠标可拖拽滚动**
+      （`ScrollSource::default() | DRAG`，egui 默认拖拽只在触摸屏生效）。
+      单击按 kind 分流：Shot/Pin 复制、Record `open_and_select`；**复制/打开都有
+      底部 toast 反馈**（不再"点了没反应"），按 `history_close_after_copy`
+      可在复制成功后自动收面板。右键菜单贴图/打开目录/删除。`refresh_if_changed`
+      轮询 `index.toml` mtime，新截图落盘面板自动出现。Esc/✕ 关闭。
 - [x] **托盘入口**：`tray.rs` 的 `Action::History` = `spawn_detached(["history"])`，
       `MENU_ACTIONS` 在「滚动截图」与「配置」之间插「历史」（Linux ksni 与
       Win/mac tray-icon 都走普通菜单项，不再用子菜单）。`main.rs` 恢复
-      `Cmd::History` + `run_history`（320×440 无边框置顶窗 + `HistoryApp`）。
+      `Cmd::History` + `run_history`（320×440 无边框置顶窗 + `HistoryApp`），
+      摆放改为**主屏右下**（`primary_monitor_bounds`）——Deepin 的 dock 在主屏，
+      历史面板贴主屏而非虚拟桌面右边界。
 - [x] **录屏缩略图**：GIF/MP4 均**录制时留首帧**——`record_mp4`/`record_gif`
       采帧时把第一帧 RGBA 存入共享槽，录毕另存 `_poster.png` 并记一条，
       `source` 指向实际 GIF/MP4 文件。**不做复制**（用户定稿）：剪贴板只收
@@ -425,8 +430,10 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       Windows `explorer /select`、macOS `open -R`、Linux FileManager1 D-Bus
       `ShowItems`（失败降级 `xdg-open` 目录）。zbus 升为 app 直接依赖（已随
       ashpd 在依赖树，不增体积）。
-- [x] **配置**：`config.rs` 增 `history_max: usize`（默认 10）；`settings_ui.rs`
-      「保存」卡片增「历史条数」（DragValue 1–50，保存时校验非法提示不落盘）。
+- [x] **配置**：`config.rs` 增 `history_max: usize`（默认 10）与
+      `history_close_after_copy: bool`（默认 false，历史面板复制后自动收）；
+      `settings_ui.rs`「保存」卡片增「历史条数」（DragValue 1–50，保存时校验
+      非法提示不落盘）；「全局热键」增「历史」一行（`hotkey_history`）。
 - [x] **README 同步**：托盘菜单文案补「历史」面板；CLI 表补 `history` 子命令。
       `docs/PLAN.md` §6 目录规范补 `app/src/history.rs`。
 

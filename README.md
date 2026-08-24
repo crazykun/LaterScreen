@@ -155,7 +155,7 @@ lscreen tray --foreground              # 托盘前台运行（调试/自启动�
 
 ### 全局热键
 
-默认 **F1 截图**（Snipaste 惯例），可在配置面板改为其他组合。截图 / 取色 / 贴图 / 录屏 / 滚动截图五个动作都可各自绑定热键，除截图外默认留空（不注册）。注意 `Ctrl+Alt+A` 在 Deepin 等桌面已被系统截图占用。
+默认 **F1 截图**（Snipaste 惯例），可在配置面板改为其他组合。截图 / 取色 / 贴图 / 录屏 / 滚动截图 / 历史六个动作都可各自绑定热键，除截图外默认留空（不注册）。注意 `Ctrl+Alt+A` 在 Deepin 等桌面已被系统截图占用。
 
 托盘实现：Linux 走 ksni（纯 Rust 的 StatusNotifierItem/D-Bus 直连，无动态库依赖）；Windows/macOS 走 tray-icon（系统原生 API）。全局热键在 Wayland 会话（无 X11）不可用，托盘与菜单不受影响。窗口在 Linux 下显式设置 `WM_CLASS=lscreen` 并配 `StartupWMClass`，任务栏图标正确归属到 lscreen。
 
@@ -169,7 +169,7 @@ lscreen tray --foreground              # 托盘前台运行（调试/自启动�
 | Windows | `%APPDATA%\lscreen\config.toml` |
 | macOS | `~/Library/Application Support/lscreen/config.toml` |
 
-可配置项：保存目录、文件名模板（默认 `lscreen_{YYYYMMDD}_{HHMMSS}`）、默认工具/颜色/线宽、复制后是否自动退出、保存后是否打开目录、历史保留条数（默认 10，1–50）、五个全局热键（截图 / 取色 / 贴图 / 录屏 / 滚动截图）。
+可配置项：保存目录、文件名模板（默认 `lscreen_{YYYYMMDD}_{HHMMSS}`）、默认工具/颜色/线宽、复制后是否自动退出、保存后是否打开目录、历史保留条数（默认 10，1–50）、历史面板点击复制后是否自动关闭、六个全局热键（截图 / 取色 / 贴图 / 录屏 / 滚动截图 / 历史）。
 
 ## 运行环境
 
