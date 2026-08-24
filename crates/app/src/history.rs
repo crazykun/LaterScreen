@@ -221,6 +221,25 @@ pub fn open_item(item: &Item) {
     export::open_and_select(&file_path(item));
 }
 
+/// 生成某条历史的缩略图 PNG 字节（Linux 托盘子菜单 `icon-data` 用）。
+/// 缩到 24×24 以内（保持比例），编码为 PNG；失败返回 None（菜单无图标）。
+pub fn thumbnail_png(item: &Item) -> Option<Vec<u8>> {
+    let (rgba, w, h) = thumbnail_rgba(item)?;
+    let img = image::RgbaImage::from_raw(w, h, rgba)?;
+    let mut buf = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .ok()?;
+    Some(buf)
+}
+
+/// 生成缩略图 RGBA（Win/mac 菜单图标用）：(像素, 宽, 高)。
+pub fn thumbnail_rgba(item: &Item) -> Option<(Vec<u8>, u32, u32)> {
+    let img = image::open(file_path(item)).ok()?;
+    let img = image::imageops::thumbnail(&img, 24, 24);
+    let (w, h) = (img.width(), img.height());
+    Some((img.into_raw(), w, h))
+}
+
 /// unix 秒 → 本地 "MM-DD HH:MM"。
 fn fmt_time(secs: u64) -> String {
     #[cfg(unix)]

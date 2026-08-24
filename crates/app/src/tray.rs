@@ -530,8 +530,11 @@ mod linux_impl {
                 .map(|item| {
                     let tx = tx.clone();
                     let item = item.clone();
+                    // 子项图标 = 缩略图 PNG（dbusmenu icon-data；宿主不渲染则无图标）
+                    let icon_data = crate::history::thumbnail_png(&item).unwrap_or_default();
                     StandardItem {
                         label: item.label(),
+                        icon_data,
                         activate: Box::new(move |_t: &mut LscreenTray| {
                             let _ = tx.send(Action::HistoryItem(item.clone()));
                         }),
@@ -737,6 +740,12 @@ mod native_impl {
                 for item in items {
                     let id = format!("{HIST_PREFIX}{}", item.filename);
                     let mi = MenuItem::with_id(id.clone(), item.label(), true, None);
+                    // 子项缩略图图标（Windows 自绘 / macOS 原生菜单都走 muda Icon）
+                    if let Some((rgba, w, h)) = crate::history::thumbnail_rgba(&item) {
+                        if let Ok(icon) = tray_icon::menu::Icon::from_rgba(rgba, w, h) {
+                            mi.set_icon(Some(icon));
+                        }
+                    }
                     let _ = submenu.append(&mi);
                     self.history_items.insert(id, item);
                 }
