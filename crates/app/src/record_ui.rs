@@ -27,6 +27,8 @@ const RED_HOVER: Color32 = Color32::from_rgb(0xef, 0x5a, 0x50);
 const BLUE: Color32 = Color32::from_rgb(0x42, 0xa5, 0xf5);
 const BLUE_HOVER: Color32 = Color32::from_rgb(0x64, 0xb5, 0xf6);
 const ORANGE: Color32 = Color32::from_rgb(0xf5, 0x7c, 0x00);
+/// 齿轮静止色：明显亮于正文灰（太淡在深底上看着像没了）
+const GEAR_DIM: Color32 = Color32::from_rgb(0xd8, 0xd8, 0xe2);
 
 /// 录制实时状态：主线程 UI 每帧读，录屏线程每次采帧更新。
 #[derive(Clone, Copy, Default)]
@@ -127,8 +129,7 @@ impl eframe::App for RecordApp {
                 let avail = ui.available_width();
 
                 // ---- 头部：呼吸灯 + 状态词（左） · 计数（右） · 齿轮（最右） ----
-                let (hdr, hdr_resp) =
-                    ui.allocate_exact_size(Vec2::new(avail, 26.0), egui::Sense::click_and_drag());
+                let (hdr, _) = ui.allocate_exact_size(Vec2::new(avail, 26.0), egui::Sense::hover());
                 let p = ui.painter_at(hdr);
                 let running = !armed;
                 // 呼吸灯：运行中亮度随时间正弦起伏（0.45..1.0），待开始常亮
@@ -165,17 +166,28 @@ impl eframe::App for RecordApp {
                     TEXT,
                 );
 
-                // 齿轮：独立交互区，悬停有圆形底；点击打开配置面板
-                let gear = Rect::from_min_size(hdr.right_top(), Vec2::splat(26.0));
+                // 齿轮：右端独立交互区（先从拖动区里挖掉）。常显圆形按钮底板
+                // + 粗线条图标——裸描线齿轮在深底上小而淡，肉眼找不到。
+                // 矩形必须完全落在面板内（右缘贴 hdr.right，向下超出头部 2px 无妨）
+                let gear = Rect::from_min_size(
+                    Pos2::new(hdr.right() - 28.0, hdr.min.y - 2.0),
+                    Vec2::splat(28.0),
+                );
                 let gear_resp = ui.interact(gear, egui::Id::new("rec-gear"), egui::Sense::click());
                 let gear_c = gear_resp.hovered() || gear_resp.is_pointer_button_down_on();
-                if gear_c {
-                    p.circle_filled(gear.center(), 15.0, HOVER_BG);
-                }
-                draw_gear(&p, gear.shrink(6.0), if gear_c { TEXT } else { MUTED });
+                // 底板常显（悬停提亮）+ 细边框，读作"可点的按钮"
+                p.circle_filled(gear.center(), 14.0, if gear_c { HOVER_BG } else { TRACK });
+                p.circle_stroke(
+                    gear.center(),
+                    14.0,
+                    Stroke::new(1.0, Color32::from_rgb(0x55, 0x55, 0x62)),
+                );
+                draw_gear(&p, gear.shrink(6.0), if gear_c { TEXT } else { GEAR_DIM });
                 if gear_resp.clicked() {
                     open_settings();
                 }
+                gear_resp
+                    .on_hover_text("配置（保存目录 / 录制格式）；armed 阶段保存后对本次录制生效");
                 // 计数右对齐到齿轮左侧
                 p.text(
                     Pos2::new(gear.left() - 8.0, hdr.center().y),
@@ -184,14 +196,24 @@ impl eframe::App for RecordApp {
                     egui::FontId::proportional(12.0),
                     MUTED,
                 );
-                // 头部其余区域拖动 = 移动窗口（_NET_WM_MOVERESIZE；无装饰窗口
-                // 的标准交互，本窗建窗即有焦点，无贴图窗口的首次拖不动问题）。
-                // 点在齿轮上时不触发（点击与拖动互不影响，齿轮自身吃掉 click）
-                if hdr_resp.dragged_by(egui::PointerButton::Primary) {
+
+                // 头部其余区域（挖掉齿轮）拖动 = 移动窗口（_NET_WM_MOVERESIZE）。
+                // 关键：只在 drag_started（按下后判定为拖拽的那一帧）发一次——
+                // dragged_by 是持续状态，逐帧重发 StartDrag 会让 WM 的交互式
+                // 移动结束即被重启，窗口永远跟着鼠标停不下来
+                let drag_area =
+                    Rect::from_min_size(hdr.min, Vec2::new((avail - 28.0).max(0.0), 26.0));
+                let drag_resp =
+                    ui.interact(drag_area, egui::Id::new("rec-drag"), egui::Sense::drag());
+                // 先判 drag_started 再挂 hover 光标（Response 不可 Copy，
+                // on_hover_cursor 会消费它）
+                if drag_resp
+                    .clone()
+                    .drag_started_by(egui::PointerButton::Primary)
+                {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
-                gear_resp
-                    .on_hover_text("配置（保存目录 / 录制格式）；armed 阶段保存后对本次录制生效");
+                drag_resp.on_hover_cursor(egui::CursorIcon::Grab);
 
                 // ---- 进度条：自绘圆角细条 ----
                 ui.add_space(8.0);
@@ -305,18 +327,19 @@ impl eframe::App for RecordApp {
 }
 
 /// 齿轮图标：双圈 + 8 齿。与工具栏同约定——纯 painter 绘制，
-/// 不依赖字体图标/emoji 覆盖，任何系统渲染一致
+/// 不依赖字体图标/emoji 覆盖，任何系统渲染一致。
+/// 线宽 1.8：小图标在深底上要够粗才显眼
 fn draw_gear(p: &egui::Painter, r: Rect, c: Color32) {
     let ctr = r.center();
     let rad = r.width() * 0.5;
-    p.circle_stroke(ctr, rad * 0.70, Stroke::new(1.5, c));
-    p.circle_stroke(ctr, rad * 0.26, Stroke::new(1.5, c));
+    p.circle_stroke(ctr, rad * 0.70, Stroke::new(1.8, c));
+    p.circle_stroke(ctr, rad * 0.26, Stroke::new(1.8, c));
     for i in 0..8 {
         let a = i as f32 * std::f32::consts::TAU / 8.0;
         let dir = Vec2::new(a.cos(), a.sin());
         p.line_segment(
             [ctr + dir * (rad * 0.60), ctr + dir * (rad * 0.94)],
-            Stroke::new(1.5, c),
+            Stroke::new(1.8, c),
         );
     }
 }
