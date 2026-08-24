@@ -386,80 +386,52 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       走自动打开目录；record（GIF/MP4）与 scroll `-o` 落盘后同样按配置
       打开所在目录
 
-### M11 截图历史（托盘查看最近 10 张，规划中）
+### M11 截图历史（托盘「历史」子菜单，最近 10 张）
 
-从托盘打开「历史」面板，回看最近保存的截图 / 贴图 / 录屏，**单击即复制**、
-再贴图或打开所在目录——解决「刚截的图找不到去哪了」的高频痛点。对齐 Snipaste
-的「最近」体验，但收在独立窗口里（egui），不塞进托盘菜单子项（菜单是静态的，
-无法随每次截图动态更新）。
+从托盘菜单的「历史」子菜单回看最近保存的截图 / 贴图 / 录屏——展开即列表，
+单击图片**复制**、单击录屏**打开目录并选中文件**。解决「刚截的图找不到去哪了」
+的高频痛点。形态上**不做独立窗口**（用户定稿）：直接做成托盘子菜单，点开即用、
+用完即收，比另开面板更轻。
 
-- [x] **记录时机（已定）**：历史 = 每次「产出图片」时追加一条记录，而非事后
-      扫目录。原因：保存目录是用户任意指定的、可能混入非 lscreen 图片。
-      写入点收敛在现有 `export` 出口，各产出路径统一调用一次
-      `history::record(...)`：
-      - 截图保存（`ui/mod.rs:385` `save_and_exit`）
-      - 贴图保存按钮（`pin.rs:123` `do_save`）
+- [x] **记录时机**：历史 = 每次「产出图片」时追加一条记录，而非事后扫目录。
+      原因：保存目录是用户任意指定的、可能混入非 lscreen 图片。写入点收敛在
+      `history` 模块，各产出路径统一调用：
+      - 截图保存（`ui/mod.rs` `save_and_exit`）
+      - 贴图保存按钮（`pin.rs` `do_save`）
       - CLI 直出（`main.rs` `run_shot` / `run_scroll` 显式 -o 分支）
       - **贴图创建时自动记一条**（`ui/mod.rs` `pin_and_exit` + 托盘
-        `pin_from_clipboard`）——贴图目前完全不落盘（M7 的独立进程只持内存
-        位图），这条是「贴图历史」的唯一来源，属用户确认的行为变更
-      - **录屏落盘时**（`main.rs` `run_record`，GIF/MP4 都入）——见下方
-        「录屏缩略图」条目
-- [ ] **存储形态（小而美）**：独立历史目录 `~/.config/lscreen/history/`
-      （三平台 config_dir 下），每项存一份**全尺寸 PNG 副本** + 缩略图，
-      由索引 `index.json` 记录（时间戳、来源类型、尺寸，按时间倒序）。上限 N 条
-      （默认 10，配置项），append 时超限裁最旧。**为什么要副本而非只记路径**：
-      历史窗口要「再贴图 / 复制」必须能读到原图，而源文件可能被用户移动或删除；
-      自包含副本保证历史永远可点开。代价：磁盘约 N×单张 PNG 大小（10 张 1080p
-      截图约 20–40MB，可控）。缩略图在写入时即时生成（`image::imageops::thumbnail`
-      缩到长边 256 存 `_thumb.png`），窗口打开读 10 张缩略图远快于读原图。
-      无历史（目录不存在/为空）时窗口显示空态提示，不报错不落盘。
-- [ ] **托盘入口**：`tray.rs` 的 `Action` 增 `History`，`MENU_ACTIONS` 在
-      「滚动截图」与「配置」之间插「历史」，`dispatch` 走
-      `spawn_detached(&["history"])`——沿用「独立子进程、用完即退」的既有模式，
-      不常驻新进程、不增托盘空闲内存。Win/mac 的 `native_impl` 同步补
-      `action_id` 映射与菜单项。
-- [ ] **历史窗口（`lscreen history`）**：新 `history.rs`（`HistoryApp` eframe
-      窗口，有边框、可缩放、非置顶——与托盘/贴图/结果面板都不同，是普通窗口）。
-      网格列出最近 N 项（缩略图 + 时间戳/尺寸）。**单击按条目类型分动作**
-      （用户明确的直觉：鼠标点下去就是该类型最有用的那个动作）：
-      - 截图 / 贴图 → **复制**：读副本进剪贴板，走 `export::copy_to_clipboard`
-        （X11 复用 clipd 守护）
-      - 录屏（GIF/MP4）→ **打开目录并选中文件**（`export::open_and_select`）
-      次要动作不在底部排一条动作栏，而是收在条目 hover 浮层 / 右键菜单：
-      「贴图」（spawn `lscreen pin -i <副本路径>`，独立进程）、「打开目录」
-      （`export::open_and_select` 定位源文件）、「删除」（从历史移除该项，不动
-      源文件）。空历史显示引导文案（「保存截图或贴图后会出现这里」）。
-- [ ] **录屏缩略图（含硬限制）**：GIF 与 MP4 分两条路——
-      - GIF：`image` crate 开 `gif` 特性（`crates/app/Cargo.toml` 一行依赖），
-        写入历史时解首帧作缩略图/副本，无额外文件
-      - MP4：**无解码器**（openh264 只暴露编码、mp4 crate 只封装，仓库无视频
-        解码能力），只能**录制时顺带留首帧**——`record_mp4` 逐帧采 RGBA 时把
-        第一帧另存一张 PNG sidecar，历史和它并排放，缩略图/点开均用该 PNG。
-        （`record_gif` 也可同机制存首帧 PNG，让两格式缩略图读取路径统一，取舍
-        待实现时定；倾向统一存 sidecar）
-      - **录屏条目不做复制**（用户定稿）：剪贴板只收静态图，GIF/MP4 复制出去
-        没有意义，**复制动作整个移除**（不置灰、不出现）。**单击 = 「打开目录
-        并选中文件」**——这是录屏条目真正有用的动作
-- [ ] **打开目录并选中（新能力）**：`export.rs` 现 `open_in_file_manager(dir)`
-      只开目录不定位（注释明言「定位接口三平台不一致」）。新增
-      `export::open_and_select(path: &Path)`，三平台定位文件：
-      - Windows：`explorer /select,<path>`
-      - macOS：`open -R <path>`
-      - Linux：`org.freedesktop.FileManager1` D-Bus `ShowItems`（Nautilus/Dolphin
-        /Nemo 等通用）；zbus 从「仅钉版本」升为 app 直接依赖（已随 ashpd 在
-        依赖树内，不增体积；blocking + async-io 与 capture 同款）；D-Bus 调用
-        失败或服务不存在时**降级** `xdg-open <目录>`（不定位，同现状行为）。
-      截图/贴图条目的「打开目录」动作也复用此函数（从开目录升级为定位文件）
-- [ ] **配置**：`config.rs` 增 `history_max: usize`（默认 10，`serde(default)` +
-      `#[serde(default)]` 兼容旧配置缺失字段）；`settings_ui.rs`「保存」卡片
-      增一行「历史条数」（DragValue 1–50 或 ComboBox 5/10/20/50，校验非法
-      落回默认，沿用「非法只提示不落盘」）。
-- [ ] **CLI / README 同步**：`main.rs` 增 `History` 子命令；README 托盘菜单
-      与 CLI 表补 `history`；`docs/PLAN.md` §6 目录规范补 `app/src/history.rs`。
-- [ ] 待定：滚动长图是否入历史（倾向不入——长图进历史会挤占有限名额，保持
-      历史以「单屏截图 / 贴图 / 录屏」为界）；历史条数上限是否进热加载（同
-      config 其余项，面板保存后托盘 1s 内生效，历史窗口下次打开即读新值）
+        `pin_from_clipboard`）——贴图本不落盘，这条是「贴图历史」的唯一来源
+      - **录屏落盘时**（`main.rs` `run_record`，GIF/MP4 都入）
+- [x] **存储形态（小而美）**：独立历史目录 `~/.config/lscreen/history/`
+      （三平台 config_dir 下），每项存一份**全尺寸 PNG 副本**，索引 `index.toml`
+      记录（时间戳、来源类型、尺寸，按时间倒序）。上限 `history_max`（默认 10，
+      1-50），append 超限裁最旧。**存副本而非只记路径**：再复制/贴图必须能读到
+      原图，源文件可能被移动或删除；自包含副本保证历史永远可点开。代价：磁盘约
+      N×单张 PNG 大小（10 张 1080p 截图约 20–40MB，可控）。无历史时子菜单显示
+      「暂无历史」占位，不报错不落盘。
+- [x] **托盘子菜单（Linux ksni）**：`tray.rs` 的 `Action` 增
+      `HistoryItem(Item)`；根菜单固定顺序里在「滚动截图」与「配置」之间插
+      「历史」`SubMenu`，子项 = 最近 N 条历史。**每次展开前刷新**：覆盖
+      `menu_about_to_show`（空实现即触发 ksni 重建菜单，默认实现会置静态标志），
+      从磁盘重读 `history::list()`。单击子项 → `dispatch` 按 kind 分流：
+      Shot/Pin 复制、Record 打开目录并选中。子菜单文案：图片 = `MM-DD HH:MM ·
+      WxH`，录屏 = `[录] MM-DD HH:MM`。
+- [x] **托盘子菜单（Win/mac tray-icon + muda）**：`NativeApp` 持 `Submenu` 句柄
+      与 `history_items` 表；历史签名（条目数 + 最新 filename）变化才清空重建
+      子项（`Submenu::remove_at` 逐条移除 + `append`）。菜单事件按
+      `hist:<filename>` id 查表路由，与固定动作 id 分离。
+- [x] **录屏缩略图**：GIF/MP4 均**录制时留首帧**——`record_mp4`/`record_gif`
+      采帧时把第一帧 RGBA 存入共享槽，录毕另存 `_poster.png` 并记一条，
+      `source` 指向实际 GIF/MP4 文件。**不做复制**（用户定稿）：剪贴板只收
+      静态图，录屏子项单击 = `open_and_select(source)` 定位源文件。
+- [x] **打开目录并选中**：`export::open_and_select(path)` 三平台定位文件：
+      Windows `explorer /select`、macOS `open -R`、Linux FileManager1 D-Bus
+      `ShowItems`（失败降级 `xdg-open` 目录）。zbus 升为 app 直接依赖（已随
+      ashpd 在依赖树，不增体积）。
+- [x] **配置**：`config.rs` 增 `history_max: usize`（默认 10）；`settings_ui.rs`
+      「保存」卡片增「历史条数」（DragValue 1–50，保存时校验非法提示不落盘）。
+- [x] **README 同步**：托盘菜单文案补「历史」子菜单；CLI 表不含 history
+      （无独立子命令）。`docs/PLAN.md` §6 目录规范补 `app/src/history.rs`。
 
 ### 遗留 TODO（review 2026-08-17）
 
@@ -519,5 +491,5 @@ doc/          设计与计划文档（迁移后为 docs/）
 crates/       所有库与可执行 crate
   core/src/   model.rs(图元) history.rs(撤销) render.rs(导出) color.rs qr.rs
   capture/    lib.rs
-  app/src/    main.rs(CLI入口) ui/(覆盖层、工具栏、画布交互) history.rs(截图历史窗口) tray.rs(托盘) settings_ui.rs(配置面板)
+  app/src/    main.rs(CLI入口) ui/(覆盖层、工具栏、画布交互) history.rs(截图历史) tray.rs(托盘) settings_ui.rs(配置面板)
 ```

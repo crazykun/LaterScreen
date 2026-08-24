@@ -1,8 +1,8 @@
 //! 截图历史（M11）：`~/.config/lscreen/history/` 下存全尺寸 PNG 副本 +
-//! `index.toml` 索引，托盘「历史」窗口据此回看最近截图/贴图/录屏。
+//! `index.toml` 索引，托盘「历史」子菜单据此回看最近截图/贴图/录屏。
 //!
 //! 设计取舍：
-//! - 存副本而非只记路径：历史窗口要「再贴图 / 复制」必须能读到原图，而源文件
+//! - 存副本而非只记路径：历史要「再贴图 / 复制」必须能读到原图，而源文件
 //!   可能被用户移动或删除；自包含副本保证历史永远可点开。
 //! - 副本统一 PNG：录屏（GIF/MP4）本身无法进剪贴板/贴图，录制时另存一张首帧
 //!   PNG（poster）作为副本，原文件路径存 `source` 供「打开目录并选中」定位。
@@ -10,16 +10,14 @@
 //! - 上限 `history_max`（默认 10，钳 1-50），追加后裁最旧；副本文件名按
 //!   unix 毫秒时间戳，天然排序且无需计数器。
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use eframe::egui;
 use serde::{Deserialize, Serialize};
 
 use crate::export;
 
-/// 历史条目来源类型，决定窗口里单击的默认动作：
+/// 历史条目来源类型，决定托盘子菜单里单击的默认动作：
 /// 截图/贴图 = 复制，录屏 = 打开目录并选中。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -30,7 +28,7 @@ pub enum Kind {
 }
 
 /// 一条历史记录。
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Item {
     /// 全尺寸 PNG 副本文件名（位于 history 目录内，不含路径）。
     pub filename: String,
@@ -96,20 +94,6 @@ pub fn list() -> Vec<Item> {
 /// 某条记录对应的副本文件路径（history 目录内）。
 pub fn file_path(item: &Item) -> PathBuf {
     history_dir().join(&item.filename)
-}
-
-/// 删除一条记录（索引 + 副本文件），不动源文件。
-pub fn remove(item: &Item) {
-    let mut index = load_index();
-    index.items.retain(|i| i.filename != item.filename);
-    save_index(&index);
-    let _ = std::fs::remove_file(history_dir().join(&item.filename));
-}
-
-/// 清空历史：删除索引与全部副本文件。
-pub fn clear() {
-    let dir = history_dir();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 记录一张已编码为 RGBA 的图片到历史。`source` 为可选源文件路径
@@ -192,217 +176,44 @@ fn trim(index: &mut Index) {
     }
 }
 
-// ---------------------------------------------------------------- 历史窗口
+// ---------------------------------------------------------------- 托盘子菜单
 
-/// 缩略图边长上限（长边缩到 256，等比缩放）。
-const THUMB: u32 = 256;
-
-/// 截图历史窗口（M11）：网格展示最近 N 项，单击按类型分动作，
-/// 右键菜单贴图/打开目录/删除。
-pub struct HistoryApp {
-    items: Vec<Item>,
-    /// 文件名 → 纹理缓存（缩略图，首次显示时加载）
-    thumbs: HashMap<String, egui::TextureHandle>,
-    /// 单帧 toast（复制/删除反馈），下一帧清空
-    toast: Option<String>,
-    /// 待删除项（帧末统一刷新，避免遍历中改列表）
-    pending_remove: Option<String>,
-    pending_clear: bool,
-}
-
-impl HistoryApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        crate::apply_window_class(cc);
-        // 历史窗口是独立进程，必须自己挂中文字体，否则按钮/toast 中文会显示
-        // 为方框（egui 内置字体无 CJK）。与 pin.rs 同一套校验再安装。
-        if let Some(bytes) = crate::font::load_system_font() {
-            if lscreen_core::render::Renderer::new(Some(bytes.clone())).has_font() {
-                crate::font::setup_egui_fonts(&cc.egui_ctx, bytes);
-            }
+impl Item {
+    /// 托盘子菜单里该条目的文案。录屏用「[录]」前缀与图片区分，
+    /// 单击录屏是「打开目录并选中」，图片是「复制」。
+    pub fn label(&self) -> String {
+        match self.kind {
+            Kind::Record => format!("[录] {}", fmt_time(self.timestamp)),
+            Kind::Shot | Kind::Pin => format!(
+                "{} · {}×{}",
+                fmt_time(self.timestamp),
+                self.width,
+                self.height
+            ),
         }
-        Self {
-            items: list(),
-            thumbs: HashMap::new(),
-            toast: None,
-            pending_remove: None,
-            pending_clear: false,
-        }
-    }
-
-    fn refresh(&mut self) {
-        self.items = list();
-        self.thumbs.clear();
-    }
-
-    /// 缩略图纹理（懒加载 + 缓存）。
-    fn thumb(&mut self, ctx: &egui::Context, item: &Item) -> egui::TextureHandle {
-        if let Some(t) = self.thumbs.get(&item.filename) {
-            return t.clone();
-        }
-        let path = file_path(item);
-        let color = match image::open(&path).ok() {
-            Some(img) => {
-                // DynamicImage 的 GenericImageView 像素即 Rgba<u8>，
-                // thumbnail 直接回 ImageBuffer<Rgba<u8>>，无需 to_rgba8
-                let img = image::imageops::thumbnail(&img, THUMB, THUMB);
-                let (w, h) = (img.width() as usize, img.height() as usize);
-                egui::ColorImage::from_rgba_unmultiplied([w, h], img.as_raw())
-            }
-            None => egui::ColorImage::from_rgba_unmultiplied([1, 1], &[0x44, 0x44, 0x44, 0xff]),
-        };
-        let tex = ctx.load_texture(&item.filename, color, Default::default());
-        self.thumbs.insert(item.filename.clone(), tex.clone());
-        tex
-    }
-
-    fn copy_item(&mut self, item: &Item) {
-        match image::open(file_path(item)) {
-            Ok(img) => {
-                let img = img.into_rgba8();
-                let (w, h) = (img.width(), img.height());
-                match export::copy_to_clipboard(img.as_raw(), w, h) {
-                    Ok(()) => self.toast = Some("已复制".to_string()),
-                    Err(e) => self.toast = Some(format!("复制失败: {e}")),
-                }
-            }
-            Err(e) => self.toast = Some(format!("读取失败: {e}")),
-        }
-    }
-
-    fn pin_item(&self, item: &Item) {
-        // spawn 独立贴图进程（与托盘同款：用完即退，脱离本窗口生命周期）
-        let exe = match std::env::current_exe() {
-            Ok(e) => e,
-            Err(_) => return,
-        };
-        let _ = std::process::Command::new(exe)
-            .args(["pin", "-i"])
-            .arg(file_path(item))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
-
-    fn open_item(&self, item: &Item) {
-        // 源文件优先（录屏指向实际 GIF/MP4）；无源或已不存在则回退副本
-        if !item.source.is_empty() {
-            let p = PathBuf::from(&item.source);
-            if p.exists() {
-                export::open_and_select(&p);
-                return;
-            }
-        }
-        export::open_and_select(&file_path(item));
     }
 }
 
-impl eframe::App for HistoryApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
+/// 把某条历史复制进剪贴板（读副本 PNG）。X11 走 clipd 守护。
+pub fn copy_item(item: &Item) {
+    if let Ok(img) = image::open(file_path(item)) {
+        let img = img.into_rgba8();
+        let (w, h) = (img.width(), img.height());
+        let _ = export::copy_to_clipboard(img.as_raw(), w, h);
+    }
+}
 
-        // 顶栏：标题 + 清空/打开历史目录（Panel::top，eframe 0.35 新 API）
-        egui::Panel::top(egui::Id::new("history_top"))
-            .exact_size(40.0)
-            .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 0)))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.heading(format!("最近 {} 张", self.items.len()));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("清空").clicked() {
-                            self.pending_clear = true;
-                        }
-                        if ui.button("打开历史目录").clicked() {
-                            export::open_in_file_manager(&history_dir());
-                        }
-                    });
-                });
-            });
-
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.inner_margin(egui::Margin::same(12)))
-            .show(ui, |ui| {
-                if self.items.is_empty() {
-                    ui.centered_and_justified(|ui| {
-                        ui.label("暂无历史：保存截图或贴图后会出现在这里");
-                    });
-                    return;
-                }
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    // 每行 3 个，不足靠左。先物化一行（克隆）：循环体要调
-                    // self.thumb（可变借用），与 items 的切片借用冲突
-                    let mut idx = 0;
-                    while idx < self.items.len() {
-                        let row: Vec<Item> = self.items[idx..].iter().take(3).cloned().collect();
-                        ui.horizontal(|ui| {
-                            for item in row {
-                                ui.vertical(|ui| {
-                                    let thumb = self.thumb(&ctx, &item);
-                                    let size = thumb.size_vec2();
-                                    let resp = ui.add(egui::Image::from_texture(
-                                        egui::load::SizedTexture::new(&thumb, size),
-                                    ));
-                                    // 单击按类型分动作
-                                    if resp.clicked() {
-                                        match item.kind {
-                                            Kind::Record => self.open_item(&item),
-                                            Kind::Shot | Kind::Pin => self.copy_item(&item),
-                                        }
-                                    }
-                                    // 右键菜单：贴图 / 打开目录 / 删除
-                                    resp.context_menu(|ui| {
-                                        if ui.button("贴图").clicked() {
-                                            self.pin_item(&item);
-                                            ui.close();
-                                        }
-                                        if ui.button("打开目录").clicked() {
-                                            self.open_item(&item);
-                                            ui.close();
-                                        }
-                                        if ui.button("删除").clicked() {
-                                            self.pending_remove = Some(item.filename.clone());
-                                            ui.close();
-                                        }
-                                    });
-                                    ui.label(format!(
-                                        "{} · {}×{}",
-                                        fmt_time(item.timestamp),
-                                        item.width,
-                                        item.height
-                                    ));
-                                });
-                            }
-                        });
-                        idx += 3;
-                    }
-                });
-            });
-
-        // 帧末统一处理删除/清空，避免遍历中改列表
-        if let Some(name) = self.pending_remove.take() {
-            if let Some(item) = self.items.iter().find(|i| i.filename == name).cloned() {
-                remove(&item);
-                self.refresh();
-                self.toast = Some("已删除".to_string());
-            }
-        }
-        if self.pending_clear {
-            self.pending_clear = false;
-            clear();
-            self.refresh();
-            self.toast = Some("已清空历史".to_string());
-        }
-
-        // toast：每次动作后展示一帧（置于 bottom area）
-        if let Some(t) = self.toast.take() {
-            egui::Area::new(egui::Id::new("history_toast"))
-                .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -8.0])
-                .show(&ctx, |ui| {
-                    ui.label(egui::RichText::new(t).size(13.0));
-                });
+/// 在文件管理器中定位并选中某条历史：源文件优先（录屏=实际 GIF/MP4），
+/// 无源或已不存在则回退副本自身。
+pub fn open_item(item: &Item) {
+    if !item.source.is_empty() {
+        let p = PathBuf::from(&item.source);
+        if p.exists() {
+            export::open_and_select(&p);
+            return;
         }
     }
+    export::open_and_select(&file_path(item));
 }
 
 /// unix 秒 → 本地 "MM-DD HH:MM"。

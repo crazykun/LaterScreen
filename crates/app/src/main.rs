@@ -175,8 +175,6 @@ enum Cmd {
     },
     /// 打开配置面板（保存后托盘进程自动热加载）
     Config,
-    /// 打开截图历史窗口（最近保存的截图/贴图/录屏，单击复制或定位文件）
-    History,
 }
 
 fn main() {
@@ -270,7 +268,6 @@ fn main() {
         }
         Some(Cmd::Pin { input, pos, scale }) => run_pin(input, pos, scale),
         Some(Cmd::Config) => run_settings(),
-        Some(Cmd::History) => run_history(),
     };
     if let Err(e) = result {
         eprintln!("lscreen: {e}");
@@ -315,27 +312,6 @@ fn run_settings() -> Result<(), String> {
         "lscreen 配置",
         options,
         Box::new(|cc| Ok(Box::new(settings_ui::SettingsApp::new(cc)))),
-    )
-    .map_err(|e| e.to_string())
-}
-
-/// 截图历史窗口（M11）：最近保存的截图/贴图/录屏，网格缩略图展示。
-/// 单击按类型分动作（截图/贴图=复制，录屏=打开目录并选中），右键菜单贴图/
-/// 打开/删除。有边框、可缩放、非置顶——与托盘/贴图/结果面板都不同。
-fn run_history() -> Result<(), String> {
-    let viewport = eframe::egui::ViewportBuilder::default()
-        .with_app_id("lscreen")
-        .with_inner_size([560.0, 420.0])
-        .with_min_inner_size([360.0, 280.0])
-        .with_resizable(true);
-    let options = eframe::NativeOptions {
-        viewport,
-        ..Default::default()
-    };
-    eframe::run_native(
-        "lscreen 历史",
-        options,
-        Box::new(|cc| Ok(Box::new(history::HistoryApp::new(cc)))),
     )
     .map_err(|e| e.to_string())
 }
