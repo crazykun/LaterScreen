@@ -63,6 +63,69 @@ fn index_path() -> PathBuf {
     history_dir().join("index.toml")
 }
 
+/// 历史窗口单例锁：`~/.config/lscreen/history.lock` 存本进程 PID。
+/// 打开历史面板前先抢锁；已有活着的进程则直接返回 false（该进程应立即退出，
+/// 不再开第二个窗口——快捷键/菜单连按会不断 spawn 新进程）。
+/// 锁文件含 PID 而非纯存在性：进程崩溃留下的 stale 锁，下一次启动读到死 PID
+/// 会覆盖它，不会把用户锁死。
+pub fn acquire_single_instance() -> bool {
+    let lock = crate::config::config_dir()
+        .map(|d| d.join("history.lock"))
+        .unwrap_or_else(|| PathBuf::from("history.lock"));
+    // 已有锁：先判断是否是活着的进程
+    if let Ok(text) = std::fs::read_to_string(&lock) {
+        if let Ok(pid) = text.trim().parse::<u32>() {
+            if pid_alive(pid) && pid != std::process::id() {
+                return false; // 另一个历史面板在跑，别开新的
+            }
+        }
+    }
+    // 拿到锁（覆盖 stale 锁）：写出自己的 PID
+    let _ = std::fs::write(&lock, format!("{}\n", std::process::id()));
+    true
+}
+
+/// 释放单例锁（窗口正常关闭时调用）。只删本进程持有的锁——先比对 PID，
+/// 避免误删刚被下一个实例重新写入的锁。
+pub fn release_single_instance() {
+    let lock = crate::config::config_dir()
+        .map(|d| d.join("history.lock"))
+        .unwrap_or_else(|| PathBuf::from("history.lock"));
+    if let Ok(text) = std::fs::read_to_string(&lock) {
+        if text.trim().parse::<u32>() == Ok(std::process::id()) {
+            let _ = std::fs::remove_file(&lock);
+        }
+    }
+}
+
+/// 该 PID 是否还活着。Linux/mac 走 `kill(pid, 0)`（信号 0 只探测存活，
+/// 不投递信号）；Windows 走 OpenProcess 探测。
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    // 0 = 存活；EPERM = 存活但无权投递信号（同样视为活着）；ESRCH = 不存在
+    if r == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(not(unix))]
+fn pid_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER};
+    use windows_sys::Win32::System::Threading::OpenProcess;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if !h.is_null() {
+            let _ = CloseHandle(h);
+            return true;
+        }
+        // 进程不存在报 ERROR_INVALID_PARAMETER；存在但权限不足则是别的错误
+        GetLastError() != ERROR_INVALID_PARAMETER
+    }
+}
+
 fn now() -> (u64, u64) {
     let d = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -361,6 +424,14 @@ impl HistoryApp {
                     });
             });
         ctx.request_repaint();
+    }
+}
+
+impl Drop for HistoryApp {
+    fn drop(&mut self) {
+        // 正常关闭时释放单例锁，让下一次快捷键能立刻重开；只剩 PID 比对，
+        // 误读不到别的实例刚写入的锁。
+        release_single_instance();
     }
 }
 

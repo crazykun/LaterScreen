@@ -323,6 +323,11 @@ fn run_settings() -> Result<(), String> {
 /// 单击按类型分动作（截图/贴图=复制，录屏=打开目录并选中）；右键贴图/打开/删除。
 /// 摆放靠近托盘：主屏右下角、桌面底部上方几个像素（Deepin 托盘在右下）。
 fn run_history() -> Result<(), String> {
+    // 单例：快捷键/菜单连按会不断 spawn 新历史进程，这里先抢锁，已有活着的
+    // 历史窗口则本进程直接退出，不再弹第二个面板。
+    if !history::acquire_single_instance() {
+        return Ok(());
+    }
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_app_id("lscreen")
         .with_inner_size([280.0, 420.0])

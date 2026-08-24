@@ -150,20 +150,65 @@ pub fn save_png(rgba: &[u8], w: u32, h: u32, path: &Path) -> Result<PathBuf, Str
 /// 用系统默认程序打开文件（录屏点击播放、图片等按默认应用打开）。
 /// 尽力而为，失败不报错。与 `open_in_file_manager` 的区别是这里把
 /// 文件本身交给默认处理程序（如视频→播放器），而非只打开所在目录。
+///
+/// Linux 下对录屏产物（gif/mp4）优先用真正的视频播放器：`xdg-open` 把 GIF
+/// 按 MIME 交给图像查看器，看到的只有首帧,和缩略图一模一样；先试常见
+/// 播放器，失败再退回 xdg-open。
 pub fn open_with_default(path: &Path) {
-    let prog = if cfg!(target_os = "windows") {
-        "explorer"
-    } else if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
-    let _ = std::process::Command::new(prog)
-        .arg(path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    #[cfg(target_os = "linux")]
+    {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if matches!(ext.as_str(), "gif" | "mp4" | "webm" | "mkv") {
+            for player in ["mpv", "vlc", "celluloid"] {
+                if let Ok(mut c) = std::process::Command::new(player)
+                    .arg(path)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                {
+                    std::thread::spawn(move || {
+                        let _ = c.wait();
+                    });
+                    return;
+                }
+            }
+            // 常见播放器都没有：退回系统默认（Deepin 对 GIF 仍会开图片查看器，
+            // 但至少尽力）
+            let _ = std::process::Command::new("xdg-open")
+                .arg(path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            return;
+        }
+        // 非视频（图片等）：直接 xdg-open
+        let _ = std::process::Command::new("xdg-open")
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let prog = if cfg!(target_os = "windows") {
+            "explorer"
+        } else {
+            "open"
+        };
+        let _ = std::process::Command::new(prog)
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
 }
 
 /// 在文件管理器中打开文件所在目录（尽力而为，失败不报错）。
