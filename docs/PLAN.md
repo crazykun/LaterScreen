@@ -323,10 +323,10 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
 
 两条来自实际使用的体验缺口：录制时看不见录的是哪块、识别结果框钉死在屏幕正中。
 
-- [ ] **录制期间常显选区边框**：现在 `run_record` 只开一个 320×150 的状态窗口
-      （main.rs:715），选区本身没有任何视觉标记——录到第 10 秒已经不记得框的是哪里，
-      也无法确认目标窗口有没有移出框外。目标：录制全程在选区周围显示常亮/虚线边框，
-      停止即消失。
+- [x] **录制期间常显选区边框**（✅ 2026-08-24）：现在 `run_record` 只开一个
+      320×150 的状态窗口（main.rs:715），选区本身没有任何视觉标记——录到第 10 秒
+      已经不记得框的是哪里，也无法确认目标窗口有没有移出框外。目标：录制全程在
+      选区周围显示常亮/虚线边框，停止即消失。
       - **关键约束：边框不能被录进帧里**。`capture_region` 抓的是屏幕实际像素，
         任何压在选区内的装饰都会出现在成品里。因此边框画在选区**外侧一圈**
         （矩形向外扩 2px），选区内像素一个不碰。同理状态窗口若与选区重叠也会被录进去，
@@ -342,6 +342,13 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
         panic 都要销毁，绝不留残影窗口在屏幕上
       - Win/mac 与 Wayland：先不做，同滚动截图的平台策略（Wayland portal 无法
         创建 override-redirect 覆盖窗）；缺失时录制行为不变，仅无边框
+      - **落地记录**：`capture::record_border(x,y,w,h) -> Option<RecordBorder>`，
+        guard Drop 即销毁（连接随 guard 存活）。`monitor_bounds()` 一并导出。
+        `run_record` 用 `status_window_pos` 把状态窗摆到不与选区重叠的桌面角落
+        （右下优先逆时针，纯函数有单测；仅 Linux——Win/mac 多屏 DPI 逻辑坐标
+        换算不可靠，维持 WM 默认摆放），四角都避不开（如全屏录制）时显示
+        「会被录入成品」橙色提示。实测（Deepin/X11）：边条约 200ms 后可见
+        （合成器重绘延迟，录制场景无影响），选区内 0 边条像素、drop 后 0 残影。
 - [x] **识别结果面板可拖动 + 可缩放**（✅ 2026-08-21）：QR / OCR 结果窗口
       （ui/mod.rs:683 `show_results`）原先 `.anchor(Align2::CENTER_CENTER)` +
       `.resizable(false)`。**anchor 就是拖不动的根因**——egui 对锚定窗口每帧强制
@@ -359,6 +366,75 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       - 覆盖层是全屏窗口，拖动在其内部完成，不涉及系统窗口移动；结果面板打开期间
         的按键屏蔽逻辑（ui/mod.rs:496，只留 Esc）保持不变
       - 滚动截图预览复用同一个 SnipApp 会话，自动同步受益
+
+### 录制体验增强（2026-08-24，实际使用反馈）
+
+- [x] **录制不直接开始（armed 状态）**：状态窗先显示「● 待开始」+
+      「开始录制 (Enter)」按钮，点按钮或按 Enter 才开录；Esc/关窗/Ctrl+C
+      在 armed 阶段 = 取消，静默退出（退出码 0，不产文件）。实现：
+      `started: Arc<AtomicBool>`，录制线程进入采帧前先轮询等待（50ms 步进），
+      stop 先到即取消；时长从真正开录起算。滚动截图无 armed（一进就滚）
+- [x] **录制中边框红/蓝闪烁**：`RecordBorder::set_color`（改
+      background_pixel + clear_area 强制重绘），run_record 的闪烁线程在
+      started 后每 400ms 红蓝交替；armed 阶段保持静态红边。真机采样
+      验证红蓝交替正确、边条仍在选区外侧
+- [x] **录制格式进配置**：`config.toml` 新增 `record_format`（gif/mp4，
+      默认 gif，非法值按 gif；旧配置无此字段走默认）。CLI `--mp4` 显式
+      指定优先于配置。配置面板「保存」卡片加「录制格式」下拉。
+      quality 缺省值改为按合并后的格式取（mp4=4000kbps / gif=90）
+- [x] **`open_dir_after_save` 未覆盖录制/滚动**：原先只有 GUI 截图保存
+      走自动打开目录；record（GIF/MP4）与 scroll `-o` 落盘后同样按配置
+      打开所在目录
+
+### M11 截图历史（托盘查看最近 10 张，规划中）
+
+从托盘打开「历史」面板，回看最近保存的截图 / 贴图，点开即可复制、再贴图、
+或打开所在目录——解决「刚截的图找不到去哪了」的高频痛点。对齐 Snipaste 的
+「最近」体验，但收在独立窗口里（egui），不塞进托盘菜单子项（菜单是静态的，
+无法随每次截图动态更新）。
+
+- [ ] **记录时机（核心决策）**：历史 = 每次「产出图片」时追加一条记录，而非
+      事后扫目录。原因：保存目录是用户任意指定的、可能混入非 lscreen 图片；
+      贴图目前**完全不落盘**（M7 的独立进程只持有内存位图，`pin_and_exit` 与
+      托盘 `pin_from_clipboard` 都不写文件），不新增写入点就无从「回看贴图」。
+      写入点收敛在现有 `export` 出口，各产出路径统一调用一次
+      `history::record(path_or_rgba)`：
+      - 截图保存（`ui/mod.rs:385` `save_and_exit`）
+      - 贴图保存按钮（`pin.rs:123` `do_save`）
+      - CLI 直出（`main.rs` `run_shot` / `run_scroll` 显式 -o 分支）
+      - **贴图创建时**（`ui/mod.rs` `pin_and_exit` + 托盘 `pin_from_clipboard`）
+        自动记一条——这是「贴图历史」的唯一来源；属行为变更，需确认
+- [ ] **存储形态（小而美）**：独立历史目录 `~/.config/lscreen/history/`
+      （三平台 config_dir 下），每项存一份**全尺寸 PNG 副本** + 可选缩略图，
+      由索引 `index.json` 记录（时间戳、源、尺寸，按时间倒序）。上限 N 条
+      （默认 10，配置项），append 时超限裁最旧。**为什么要副本而非只记路径**：
+      历史窗口要「再贴图 / 复制」必须能读到原图，而源文件可能被用户移动或删除；
+      自包含副本保证历史永远可点开。代价：磁盘约 N×单张 PNG 大小（10 张 1080p
+      截图约 20–40MB，可控）。缩略图可即时从副本生成（`image` 库 resize 到
+      长边 256，`image::imageops::thumbnail`），启动读 10 张缩略图远快于读原图。
+      无历史（目录不存在/为空）时窗口显示空态提示，不报错不落盘。
+- [ ] **托盘入口**：`tray.rs` 的 `Action` 增 `History`，`MENU_ACTIONS` 在
+      「滚动截图」与「配置」之间插「历史」，`dispatch` 走
+      `spawn_detached(&["history"])`——沿用「独立子进程、用完即退」的既有模式，
+      不常驻新进程、不增托盘空闲内存。Win/mac 的 `native_impl` 同步补
+      `action_id` 映射与菜单项。
+- [ ] **历史窗口（`lscreen history`）**：新 `history.rs`（`HistoryApp` eframe
+      窗口，有边框、可缩放、非置顶——与托盘/贴图/结果面板都不同，是普通窗口）。
+      网格列出最近 N 项（缩略图 + 时间戳/尺寸），单击选中 → 底部动作条：
+      「贴图」（spawn `lscreen pin -i <副本路径>`，独立进程）、「复制」
+      （读副本进剪贴板，走 `export::copy_to_clipboard`，X11 复用 clipd 守护）、
+      「打开目录」（`export::open_in_file_manager` 指向源文件目录）、「删除」
+      （从历史移除该项，不动源文件）。空历史显示引导文案（「保存截图或贴图后
+      会出现在这里」）。
+- [ ] **配置**：`config.rs` 增 `history_max: usize`（默认 10，`serde(default)` +
+      `#[serde(default)]` 兼容旧配置缺失字段）；`settings_ui.rs`「保存」卡片
+      增一行「历史条数」（DragValue 1–50 或 ComboBox 5/10/20/50，校验非法
+      落回默认，沿用「非法只提示不落盘」）。
+- [ ] **CLI / README 同步**：`main.rs` 增 `History` 子命令；README 托盘菜单
+      与 CLI 表补 `history`；`docs/PLAN.md` §6 目录规范补 `app/src/history.rs`。
+- [ ] 待定：GIF/MP4 录屏与滚动长图是否入历史（倾向不入——体积大、非「图片」，
+      保持窗口语义纯粹）；历史条数上限是否进热加载（同 config 其余项，面板
+      保存后托盘 1s 内生效，历史窗口下次打开即读新值）
 
 ### 遗留 TODO（review 2026-08-17）
 
@@ -418,5 +494,5 @@ doc/          设计与计划文档（迁移后为 docs/）
 crates/       所有库与可执行 crate
   core/src/   model.rs(图元) history.rs(撤销) render.rs(导出) color.rs qr.rs
   capture/    lib.rs
-  app/src/    main.rs(CLI入口) ui/(覆盖层、工具栏、画布交互)
+  app/src/    main.rs(CLI入口) ui/(覆盖层、工具栏、画布交互) history.rs(截图历史窗口) tray.rs(托盘) settings_ui.rs(配置面板)
 ```
