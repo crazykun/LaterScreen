@@ -367,6 +367,9 @@ impl SnipApp {
         };
         match export::copy_to_clipboard(&rgba, w, h) {
             Ok(()) => {
+                // 复制也入历史（用户最常用的出图方式就是 Ctrl+C 复制退出，
+                // 不记历史的话菜单永远只有录屏/贴图）
+                history::record_rgba(&rgba, w, h, history::Kind::Shot, None);
                 if self.config.copy_auto_exit {
                     self.request_close(ctx);
                 } else {

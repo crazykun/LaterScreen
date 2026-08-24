@@ -96,6 +96,11 @@ pub fn file_path(item: &Item) -> PathBuf {
     history_dir().join(&item.filename)
 }
 
+/// 历史索引 `index.toml` 的 mtime：托盘据此检测历史变化、触发菜单刷新。
+pub fn index_mtime() -> Option<std::time::SystemTime> {
+    index_path().metadata().ok().and_then(|m| m.modified().ok())
+}
+
 /// 记录一张已编码为 RGBA 的图片到历史。`source` 为可选源文件路径
 /// （录屏传实际视频文件，其余传 None 即用副本自身）。
 pub fn record_rgba(rgba: &[u8], w: u32, h: u32, kind: Kind, source: Option<&std::path::Path>) {

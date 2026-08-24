@@ -587,6 +587,7 @@ mod linux_impl {
         .map_err(|e| format!("托盘启动失败（D-Bus / StatusNotifierWatcher 不可用）: {e}"))?;
 
         let mut last_mtime = config_mtime();
+        let mut last_hist_mtime = crate::history::index_mtime();
         let mut last_poll = std::time::Instant::now();
 
         'main: loop {
@@ -615,6 +616,15 @@ mod linux_impl {
                     let cfg = Config::load();
                     hotkeys.apply(&cfg);
                     handle.update(move |t: &mut LscreenTray| t.cfg = cfg);
+                }
+                // 历史变化：截图/贴图/录屏落盘会改 index.toml 的 mtime。
+                // 不能只靠 menu_about_to_show（Deepin 等面板对 activate 打开的
+                // 菜单不回调该信号），轮询检测到变化就重建子菜单。
+                let hist_mtime = crate::history::index_mtime();
+                if hist_mtime != last_hist_mtime {
+                    last_hist_mtime = hist_mtime;
+                    let history = crate::history::list();
+                    handle.update(move |t: &mut LscreenTray| t.history = history);
                 }
             }
             std::thread::park_timeout(std::time::Duration::from_millis(150));
