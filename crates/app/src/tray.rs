@@ -62,12 +62,16 @@ fn dispatch(a: Action) -> bool {
         Action::Record => spawn_detached(&["record", "--select"]),
         Action::Scroll => spawn_detached(&["scroll"]),
         Action::Config => spawn_detached(&["config"]),
-        Action::HistoryItem(item) => match item.kind {
-            crate::history::Kind::Record => crate::history::open_item(&item),
-            crate::history::Kind::Shot | crate::history::Kind::Pin => {
-                crate::history::copy_item(&item)
-            }
-        },
+        Action::HistoryItem(item) => {
+            // 复制/定位可能阻塞（复制走 clipd 子进程同步等回执、定位走 D-Bus），
+            // 必须放到后台线程——否则卡住托盘主循环，整个托盘失去响应。
+            std::thread::spawn(move || match item.kind {
+                crate::history::Kind::Record => crate::history::open_item(&item),
+                crate::history::Kind::Shot | crate::history::Kind::Pin => {
+                    crate::history::copy_item(&item)
+                }
+            });
+        }
         Action::Pin => {
             if let Err(e) = pin_from_clipboard() {
                 eprintln!("lscreen tray: {e}");
@@ -478,13 +482,6 @@ mod linux_impl {
             let _ = self.tx.send(Action::Screenshot);
         }
 
-        /// 根菜单即将显示：刷新历史缓存，让「历史」子菜单每次展开都是最新。
-        /// 注意必须覆盖（空实现）才能让 ksni 在显示前重建菜单——默认实现会
-        /// 置 NO_ABOUT_TO_SHOW 标志，菜单被视为静态不刷新。
-        fn menu_about_to_show(&mut self) {
-            self.history = crate::history::list();
-        }
-
         fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
             // 固定顺序：五个动作 + 历史子菜单 + 配置 + 退出（退出前加分隔线）
             let mut all: Vec<ksni::MenuItem<Self>> = Vec::new();
@@ -752,12 +749,13 @@ mod native_impl {
                 // 历史条目 id 走独立路由（带 filename 载荷，不能套固定映射）
                 UserEvent::Menu(id) if id.starts_with(HIST_PREFIX) => {
                     if let Some(item) = self.history_items.get(&id).cloned() {
-                        match item.kind {
+                        // 后台线程执行：复制/定位可能阻塞，不能卡住事件循环
+                        std::thread::spawn(move || match item.kind {
                             crate::history::Kind::Record => crate::history::open_item(&item),
                             crate::history::Kind::Shot | crate::history::Kind::Pin => {
                                 crate::history::copy_item(&item)
                             }
-                        }
+                        });
                     }
                     return;
                 }
