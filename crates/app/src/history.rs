@@ -196,6 +196,8 @@ const THUMB_H: f32 = 120.0;
 /// 此上限的较小值：横版图填满行宽时右栏收到上限，竖版窄图时右栏跟着
 /// 收窄——图片永远是行内最大元素，文字只是配角。
 const META_W: f32 = 76.0;
+/// 行与行之间的垂直间距：红框悬停会外扩 2px，无间距时会压到相邻行。
+const ROW_GAP: f32 = 12.0;
 
 /// 历史面板（Snipaste 式自绘弹窗）：无边框浮窗 + 缩略图列表，悬停 Tooltip +
 /// 右键菜单（贴图/打开目录/删除），单击按类型复制或定位；鼠标可拖拽滚动。
@@ -594,6 +596,9 @@ impl eframe::App for HistoryApp {
                                     ui.close();
                                 }
                             });
+
+                            // 行间隔：给红框悬停外扩留出空间，不压到相邻行。
+                            ui.add_space(ROW_GAP);
                         }
                         if let Some(name) = remove {
                             if let Some(idx) = items.iter().position(|i| i.filename == name) {
