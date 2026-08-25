@@ -210,6 +210,44 @@ fn report_fatal(msg: &str) {
     }
 }
 
+/// 统一跑 eframe 窗口，把 GL 环境类失败翻译成用户可自救的提示。
+///
+/// eframe 的 `OpenGL` / `NoGlutinConfigs` / `Glutin` 三个变体都指向同一件事：
+/// 这台机器没有可用的 OpenGL 上下文（虚拟机、精简系统、只装了显卡的
+/// 「显示驱动」而无 OpenGL 部分）。原始文案是 `egui_glow requires opengl
+/// 2.0+.`——对开发者够用，对用户等于没说，所以这里补上出路。
+///
+/// 不在此处静默回退到软件渲染：glutin 的 `prefer_hardware_accelerated`
+/// 默认就是「不表态」，已经允许挑软件实现；走到这个错误说明连软件 GL 都
+/// 没有，切 `HardwareAcceleration::Off` 也救不回来。
+fn run_eframe(
+    title: &str,
+    options: eframe::NativeOptions,
+    app: eframe::AppCreator<'static>,
+) -> Result<(), String> {
+    eframe::run_native(title, options, app).map_err(|e| match e {
+        eframe::Error::OpenGL(_)
+        | eframe::Error::NoGlutinConfigs(..)
+        | eframe::Error::Glutin(_) => {
+            format!("{e}\n\n{GL_HINT}")
+        }
+        other => other.to_string(),
+    })
+}
+
+/// GL 不可用时的自救指引。Windows 单列：这是实际反馈来源，且 ANGLE 那条
+/// 路子只在 Windows 存在（Qt 同款做法，放同目录即可被 EGL 探测到）。
+#[cfg(windows)]
+const GL_HINT: &str = "这台电脑没有可用的 OpenGL 驱动，可任选一条解决：\n\
+     1. 安装/更新显卡驱动（推荐，去显卡厂商官网，Windows 更新给的版本常缺 OpenGL）\n\
+     2. 虚拟机里请在设置中开启 3D 加速并装好增强工具（VMware Tools / VBox Guest Additions）\n\
+     3. 放一份软件渲染的 opengl32sw.dll 到 lscreen.exe 同目录（可从 Qt 发行包取得）";
+
+#[cfg(not(windows))]
+const GL_HINT: &str = "当前环境没有可用的 OpenGL 驱动：\n\
+     - 桌面会话请确认已安装显卡驱动与 mesa（Debian 系：libgl1-mesa-dri）\n\
+     - 远程/无显卡环境可用软件渲染兜底：LIBGL_ALWAYS_SOFTWARE=1 lscreen";
+
 fn main() {
     // GUI 子系统下从终端启动时附回父控制台：--help/qr/ocr 输出与报错仍可见。
     // 双击/快捷方式启动没有父控制台，此时致命错误改走 report_fatal 的弹窗。
@@ -350,12 +388,11 @@ fn run_settings() -> Result<(), String> {
         viewport,
         ..Default::default()
     };
-    eframe::run_native(
+    run_eframe(
         "lscreen 配置",
         options,
         Box::new(|cc| Ok(Box::new(settings_ui::SettingsApp::new(cc)))),
     )
-    .map_err(|e| e.to_string())
 }
 
 /// 截图历史面板（M11）：无边框置顶浮窗，缩略图网格展示最近截图/贴图/录屏。
@@ -387,12 +424,11 @@ fn run_history() -> Result<(), String> {
         viewport,
         ..Default::default()
     };
-    eframe::run_native(
+    run_eframe(
         "lscreen 历史",
         options,
         Box::new(|cc| Ok(Box::new(history::HistoryApp::new(cc)))),
     )
-    .map_err(|e| e.to_string())
 }
 
 /// 交互框选录制区域：复用截图覆盖层（Mode::Record），框完即关窗；
@@ -426,7 +462,7 @@ fn pick_region_interactive() -> Result<Option<String>, String> {
     };
     let shared: SharedRegion = std::sync::Arc::new(std::sync::Mutex::new(None));
     let out = shared.clone();
-    eframe::run_native(
+    run_eframe(
         "lscreen-record",
         options,
         Box::new(move |cc| {
@@ -444,8 +480,7 @@ fn pick_region_interactive() -> Result<Option<String>, String> {
                 },
             )))
         }),
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     let region = (*out.lock().unwrap()).map(|r| {
         format!(
             "{},{},{},{}",
@@ -490,7 +525,7 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
         viewport,
         ..Default::default()
     };
-    eframe::run_native(
+    run_eframe(
         "lscreen",
         options,
         Box::new(move |cc| {
@@ -509,7 +544,6 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
             )))
         }),
     )
-    .map_err(|e| e.to_string())
 }
 
 /// 覆盖层的窗口吸附列表（M9）：窗口矩形换算到图像像素坐标（含与屏幕求交），
@@ -937,7 +971,7 @@ fn run_record(
     let app_stop = stop.clone();
     let app_start = started.clone();
     let app_status = status.clone();
-    eframe::run_native(
+    run_eframe(
         "lscreen-record-status",
         options,
         Box::new(move |cc| {
@@ -951,8 +985,7 @@ fn run_record(
                 overlap_hint,
             )))
         }),
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
 
     // 事件循环退出（用户停止/窗口关闭/录制完成自动关）：确保录制线程收尾
     stop.store(true, Ordering::Relaxed);
@@ -1139,7 +1172,7 @@ fn run_scroll(
     };
     let app_stop = stop.clone();
     let app_status = status.clone();
-    eframe::run_native(
+    run_eframe(
         "lscreen-scroll-status",
         options,
         Box::new(move |cc| {
@@ -1153,8 +1186,7 @@ fn run_scroll(
                 false,
             )))
         }),
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
 
     // 事件循环退出（用户停止/窗口关闭）：收尾拼接线程
     stop.store(true, Ordering::Relaxed);
@@ -1214,7 +1246,7 @@ fn run_scroll(
                 scale: 1.0,
                 is_primary: true,
             };
-            eframe::run_native(
+            run_eframe(
                 "lscreen-scroll-preview",
                 options,
                 Box::new(move |cc| {
@@ -1233,7 +1265,6 @@ fn run_scroll(
                     )))
                 }),
             )
-            .map_err(|e| e.to_string())
         }
     }
 }
@@ -1284,7 +1315,7 @@ fn run_pin(input: Option<PathBuf>, pos: Option<String>, scale: f32) -> Result<()
         viewport,
         ..Default::default()
     };
-    eframe::run_native(
+    run_eframe(
         "lscreen-pin",
         options,
         Box::new(move |cc| {
@@ -1294,7 +1325,6 @@ fn run_pin(input: Option<PathBuf>, pos: Option<String>, scale: f32) -> Result<()
             )))
         }),
     )
-    .map_err(|e| e.to_string())
 }
 
 /// stdin 是否为交互终端（tty）：是则没有管道数据可读，直接报错而非阻塞。
