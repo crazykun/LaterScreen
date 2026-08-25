@@ -43,8 +43,10 @@ winit = "0.30"
 
 # GUI 子系统下附回父控制台（AttachConsole），保证终端里 CLI 输出可见
 # Win32_System_Threading + Win32_Foundation：单例锁探测进程存活（OpenProcess）
+# Win32_UI_WindowsAndMessaging：无控制台时用 MessageBoxW 报致命错误
+# （GUI 子系统的 stderr 没有接收方，否则启动失败完全静默）
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_System_Threading", "Win32_Foundation"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_System_Threading", "Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 # build.rs：packaging/icon.png → 多尺寸 ICO 嵌入 Windows exe
 [build-dependencies]

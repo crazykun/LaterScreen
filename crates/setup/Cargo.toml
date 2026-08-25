@@ -15,5 +15,7 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_System_Com",
+    # MessageBoxW：GUI 子系统的 stderr 没有接收方，启动失败必须靠弹窗才可见
+    "Win32_UI_WindowsAndMessaging",
 ] }
 windows-registry = "0.6"

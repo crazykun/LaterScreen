@@ -39,9 +39,16 @@ fn main() {
     }
     #[cfg(target_os = "windows")]
     {
+        // panic = "abort" 下 panic 仍会先跑 hook。安装器是 GUI 子系统，
+        // stderr 没有接收方——没有这个 hook，启动期 panic 的表现就是
+        // 「双击后转一下圈，什么都没发生」，用户与开发者都无从下手。
+        std::panic::set_hook(Box::new(|info| {
+            win::error_dialog(&format!("内部错误：{info}"));
+        }));
         let uninstall = std::env::args_os().any(|a| a == std::ffi::OsStr::new("--uninstall"));
         if let Err(e) = app::run(uninstall) {
             eprintln!("启动失败: {e}");
+            win::error_dialog(&format!("启动失败：{e}"));
             std::process::exit(1);
         }
     }

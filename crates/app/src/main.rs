@@ -179,15 +179,54 @@ enum Cmd {
     History,
 }
 
+/// 是否附上了父控制台（从 cmd 启动）。决定致命错误走 stderr 还是弹窗。
+#[cfg(windows)]
+static HAS_CONSOLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(windows)]
+fn win_message_box(msg: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let (text, title) = (wide(msg), wide("LaterScreen 启动失败"));
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+/// 致命错误上报。GUI 子系统下 stderr 没有接收方——双击启动失败的表现就是
+/// 「转圈一下什么都没发生」，用户和开发者都无从下手（v0.5.1 的实际反馈）。
+/// 有控制台（cmd 启动）时只走 stderr，保持 CLI 的管道与重定向语义；
+/// 没有控制台时弹系统对话框，保证失败原因一定能被看到。
+fn report_fatal(msg: &str) {
+    eprintln!("{msg}");
+    #[cfg(windows)]
+    if !HAS_CONSOLE.load(std::sync::atomic::Ordering::Relaxed) {
+        win_message_box(msg);
+    }
+}
+
 fn main() {
     // GUI 子系统下从终端启动时附回父控制台：--help/qr/ocr 输出与报错仍可见。
-    // 双击/快捷方式启动没有父控制台，调用失败即静默——正是想要的行为。
+    // 双击/快捷方式启动没有父控制台，此时致命错误改走 report_fatal 的弹窗。
     // （已知取舍：cmd 不等待 GUI 进程，输出会与下一个提示符交错）
     #[cfg(windows)]
     unsafe {
         use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
-        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+        let attached = AttachConsole(ATTACH_PARENT_PROCESS) != 0;
+        HAS_CONSOLE.store(attached, std::sync::atomic::Ordering::Relaxed);
     }
+
+    // panic = "abort" 下 panic 依然先跑 hook。没有它，启动期 panic（字体解析、
+    // 窗口/GL 上下文创建等）在 GUI 子系统下是彻底静默的死亡。
+    #[cfg(windows)]
+    std::panic::set_hook(Box::new(|info| {
+        report_fatal(&format!("内部错误：{info}"));
+    }));
 
     // 剪贴板守护进程（内部机制，见 export::clipd_main）：在 clap 之前拦截，
     // 不出现在 --help 中
@@ -273,7 +312,7 @@ fn main() {
         Some(Cmd::History) => run_history(),
     };
     if let Err(e) = result {
-        eprintln!("lscreen: {e}");
+        report_fatal(&format!("lscreen: {e}"));
         std::process::exit(1);
     }
 }

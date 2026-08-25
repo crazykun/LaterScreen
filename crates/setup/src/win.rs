@@ -25,6 +25,25 @@ pub struct InstallPlan {
     pub start_menu: bool,
 }
 
+/// 弹系统错误对话框。安装器是 GUI 子系统，stderr 没有接收方——不弹窗的话
+/// 启动失败就是「双击后转一下圈什么都没发生」，没有任何可诊断信息。
+///
+/// 用 MessageBoxW 而非已有的 rfd：本函数要在 panic hook 里调用，此时不能
+/// 假设 COM 已初始化或事件循环还活着，MessageBoxW 是最不挑环境的那条路。
+pub fn error_dialog(msg: &str) {
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+    let text = HSTRING::from(msg);
+    let title = HSTRING::from("LaterScreen 安装程序");
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
 pub fn default_dir() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .map(|p| PathBuf::from(p).join("Programs").join("LaterScreen"))
