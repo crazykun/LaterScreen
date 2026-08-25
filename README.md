@@ -41,7 +41,13 @@ lscreen config                           # 配置面板
 
 ## 安装
 
-从 [Releases](https://github.com/crazykun/LaterScreen/releases) 下载：
+**macOS（Homebrew）**：
+
+```bash
+brew install crazykun/ailater/lscreen
+```
+
+或从 [Releases](https://github.com/crazykun/LaterScreen/releases) 下载：
 
 - **Linux**：Debian 系 `*.deb`（`sudo apt install ./lscreen_*.deb`）、Fedora 系 `*.rpm`，或通用的 `*.AppImage` / `*.tar.gz`
 - **Windows 10+**：`*-setup.exe`（自绘安装器，per-user 免 UAC），或免安装 `*.zip`
