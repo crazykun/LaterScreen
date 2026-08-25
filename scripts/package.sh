@@ -160,6 +160,31 @@ make_appimage() { # $1=target $2=bin
     echo "    $out ($(du -h "$out" | cut -f1))"
 }
 
+check_win_deps() { # $1=exe —— 校验 Windows 产物没有外部运行时 DLL 依赖
+    # v0.5.0 的教训：MSVC 默认动态链接 CRT，产物依赖 VCRUNTIME140.dll，
+    # 干净的 Windows 10 没装 VC++ 运行库就直接打不开。这类缺陷在打包机上
+    # 永远测不出来（开发机装过运行库），只能靠扫描导入表在出包时拦住。
+    #
+    # 用 grep -a 扫字符串而非 objdump：本函数要在 Windows runner 的 git bash
+    # 里跑，那里没有 binutils。注意必须带 -a，否则 grep 把 exe 当二进制文件
+    # 直接跳过、静默返回「没找到」（实测假阴性）。
+    local exe=$1 target=${2:-} bad=""
+    for dll in VCRUNTIME140 VCRUNTIME140_1 MSVCP140 libstdc++-6 libgcc_s_seh-1 libwinpthread-1; do
+        grep -aqi "$dll\.dll" "$exe" && bad="$bad $dll.dll"
+    done
+    [[ -z $bad ]] && return 0
+    # MSVC 是发布目标（release.yml 的 Windows 矩阵只有它），必须硬失败；
+    # windows-gnu 只是「本地没有 Windows 时的编译替身」（见 usable()），
+    # 它的 libstdc++ 压不掉是已知取舍，给警告不阻断本地打包。
+    if [[ $target == *msvc* || -z $target ]]; then
+        echo "错误：$(basename "$exe") 依赖外部运行时 DLL:$bad" >&2
+        echo "      违反「无动态库依赖、拷走即用」硬约束，用户机器上会缺 DLL 打不开。" >&2
+        echo "      修复：确认 .cargo/config.toml 的 +crt-static 对该目标生效。" >&2
+        exit 1
+    fi
+    echo "    警告：$(basename "$exe") 依赖$bad（$target 仅供本地验证，勿分发）" >&2
+}
+
 make_setup() { # $1=target $2=bin(已构建的 lscreen.exe)
     # 自绘安装器：把 lscreen.exe 内嵌进 lscreen-setup.exe 再构建
     # （build.rs 经 LSCREEN_EMBED_STAMP 指纹保证内容变化触发重编译）
@@ -167,6 +192,9 @@ make_setup() { # $1=target $2=bin(已构建的 lscreen.exe)
     out="$DIST/lscreen-v$VERSION-$1-setup.exe"
     setup_bin="target/$1/release/lscreen-setup.exe"
     LSCREEN_BIN="$PWD/$2" cargo build --release -p lscreen-setup --target "$1" --quiet
+    # 安装器自身也要能在干净系统上跑——它是用户双击的第一个 exe，
+    # 缺 DLL 的话连"安装"这一步都到不了（内嵌的主程序已在上游校验过）
+    check_win_deps "$setup_bin" "$1"
     cp "$setup_bin" "$out"
     echo "    $out ($(du -h "$out" | cut -f1))"
 }
@@ -214,7 +242,10 @@ build_and_pack() {
     cargo build --release --target "$t"
 
     bin="target/$t/release/lscreen"
-    [[ $t == *windows* ]] && bin="$bin.exe"
+    if [[ $t == *windows* ]]; then
+        bin="$bin.exe"
+        check_win_deps "$bin" "$t"
+    fi
     name="lscreen-v$VERSION-$t"
     stage="$DIST/.stage/$name"
     rm -rf "$stage" && mkdir -p "$stage"

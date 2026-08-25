@@ -416,6 +416,10 @@ fn icon_rgba(size: u32) -> Option<image::RgbaImage> {
 
 /// 窗口级图标（`_NET_WM_ICON` 用），与托盘共用同一内嵌 PNG。
 /// 取 64px 足够任务栏/alt-tab 显示，也省去大图的内存开销。
+///
+/// 仅 Linux：唯一调用方是 `main::apply_window_class`（X11 专属），
+/// 不加 cfg 门控则 Win/mac 构建报 dead_code。
+#[cfg(target_os = "linux")]
 pub(crate) fn window_icon() -> Option<image::RgbaImage> {
     icon_rgba(64)
 }

@@ -1,0 +1,31 @@
+# Windows 运行时静态链接。
+#
+# 「单文件、无动态库依赖、拷走即用」是项目硬约束（见 docs/PLAN.md §1），
+# 但 Windows 两个目标默认都会漏外部 DLL：
+#   - MSVC 默认动态链接 CRT → 依赖 VCRUNTIME140.dll，干净的 Windows 10
+#     没装 VC++ 运行库就直接打不开（v0.5.0 实测缺陷）
+#   - GNU 的 openh264（vendored C++ 源）→ 依赖 libstdc++-6.dll
+# 两者都靠 +crt-static 收敛进 exe。openh264 的 C++ 侧不会与 Rust 侧撞
+# LNK2038：cc crate 读 CARGO_CFG_TARGET_FEATURE，见到 crt-static 会自动
+# 把 /MD 换成 /MT，与 Rust 侧一致。
+#
+# 代价：exe 体积增大约 1-2MB（预算 20MB 内），且 CRT 安全更新不再随系统
+# 走——对一个本地截图工具可接受，换来的是「下载即能跑」。
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.i686-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# GNU 目标只做编译验证，不出发布包（见 scripts/package.sh 的说明）：
+# crt-static 能静态化 C 运行时，但压不掉 libstdc++-6.dll——cc 显式发出动态的
+# `cargo:rustc-link-lib=stdc++`，而 mingw 同时装了 libstdc++.dll.a 与 .a，
+# 链接器优先挑导入库；`-static-libstdc++` 只改写 GCC 驱动的隐式链接，管不到
+# 这个显式 -lstdc++，改喂静态归档又会因链接顺序缺 realloc/strcmp 等符号。
+# 发布用 MSVC 目标（上面那条已完整静态化），不为 mingw 硬塞 GCC 版本相关路径。
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "target-feature=+crt-static"]

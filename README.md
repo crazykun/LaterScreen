@@ -85,7 +85,7 @@ cargo test --workspace                # 单元测试（无需显示器）
 
 产物：Linux tar.gz / deb / rpm / AppImage，Windows zip / 自绘安装器 exe，macOS tar.gz / dmg（仅 CI 出包）。交叉编译需装对应 gcc / g++（openh264 为 C++ 源）；rpm 格式需 `apt install rpm`；AppImage 需 [appimagetool](https://github.com/AppImage/appimagetool)。
 
-全平台出包（含 macOS、Windows MSVC）走 GitHub Actions：`git tag v0.5.0 && git push --tags`。
+全平台出包（含 macOS、Windows MSVC）走 GitHub Actions：`git tag v0.5.1 && git push --tags`。
 
 ## 架构
 
