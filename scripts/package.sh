@@ -182,14 +182,17 @@ check_win_deps() { # $1=exe —— 校验 Windows 产物没有外部运行时 DL
         echo "      修复：确认 .cargo/config.toml 的 +crt-static 对该目标生效。" >&2
         exit 1
     fi
-    echo "    警告：$(basename "$exe") 依赖$bad（$target 仅供本地验证，勿分发）" >&2
+    echo "    警告：$(basename "$exe") 依赖$bad" >&2
+    echo "          $target 产物仅供本地编译验证，装到干净 Windows 上会报「找不到" >&2
+    echo "          libstdc++-6.dll」。发布包走 MSVC 目标（GitHub Actions 出）。" >&2
 }
 
 make_setup() { # $1=target $2=bin(已构建的 lscreen.exe)
     # 自绘安装器：把 lscreen.exe 内嵌进 lscreen-setup.exe 再构建
     # （build.rs 经 LSCREEN_EMBED_STAMP 指纹保证内容变化触发重编译）
-    local out setup_bin
-    out="$DIST/lscreen-v$VERSION-$1-setup.exe"
+    local out setup_bin suffix=""
+    [[ $1 == *windows-gnu* ]] && suffix="-localtest"
+    out="$DIST/lscreen-v$VERSION-$1$suffix-setup.exe"
     setup_bin="target/$1/release/lscreen-setup.exe"
     LSCREEN_BIN="$PWD/$2" cargo build --release -p lscreen-setup --target "$1" --quiet
     # 安装器自身也要能在干净系统上跑——它是用户双击的第一个 exe，
@@ -246,7 +249,12 @@ build_and_pack() {
         bin="$bin.exe"
         check_win_deps "$bin" "$t"
     fi
+    # windows-gnu 是「本地没有 Windows 时的编译替身」，产物带 libstdc++-6.dll
+    # 外部依赖（openh264 的 C++ 侧，mingw 下压不掉，详见 .cargo/config.toml）。
+    # 文件名打上 -localtest：check_win_deps 的警告会淹在构建输出里，但 dist/
+    # 下的文件名不会——实测有人装了本地 GNU 包，在干净虚拟机上报缺 DLL。
     name="lscreen-v$VERSION-$t"
+    [[ $t == *windows-gnu* ]] && name="$name-localtest"
     stage="$DIST/.stage/$name"
     rm -rf "$stage" && mkdir -p "$stage"
     cp "$bin" README.md LICENSE "$stage/"
@@ -257,7 +265,10 @@ build_and_pack() {
         if command -v zip >/dev/null; then
             (cd "$stage" && zip -qr "$OLDPWD/$out" .)
         elif command -v 7z >/dev/null; then
-            7z a -bso0 -bsp0 "$out" "$stage"/*
+            # 必须先 cd 进 stage：`7z a out "$stage"/*` 会把 dist/.stage/<name>/
+            # 整条路径写进归档，用户解压出四层空目录套一个 exe（v0.5.1 的
+            # windows-msvc.zip 实际如此——Windows runner 没有 zip，走的这条分支）。
+            (cd "$stage" && 7z a -bso0 -bsp0 "$OLDPWD/$out" .)
         else
             echo "错误：打 zip 需要 zip 或 7z" >&2
             exit 1
