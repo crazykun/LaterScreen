@@ -21,6 +21,8 @@ lscreen gui    # 不常驻，直接进入交互截图（框选 → 标注 → �
 
 交互标注含 8 种工具（矩形 / 椭圆 / 箭头 / 画笔 / 自增标号 / 文本 / 马赛克 / 橡皮擦），元素可再编辑（拖拽 / 控制点 / 双击改文本），支持撤销重做、贴图（Ctrl+P）、二维码 / OCR 识别、复制（Ctrl+C）与保存（Ctrl+S）。
 
+托盘常驻时菜单含截图 / 取色 / 贴图 / 录屏 / 滚动截图 / 历史 / 配置，六个动作可各自绑定全局热键（默认只有 F1 截图）。其中**「历史」是一个缩略图浮窗**，列出最近的截图 / 贴图 / 录屏：点击缩略图复制，录屏则用默认播放器播放；右键可贴图 / 打开目录 / 删除；顶栏显示条数与占用体积，可一键清空。同一时刻只有一个面板，面板在后台时再按热键会把它唤到前台。
+
 其余功能均可无界面调用，完整选项以 `lscreen <子命令> --help` 为准：
 
 ```bash
@@ -31,6 +33,7 @@ lscreen ocr --region 0,0,800,600         # OCR 识别（-i 指定图片，--lang
 lscreen qr -i photo.png                  # 识别图片中的二维码
 lscreen pick                             # 屏幕取色器
 lscreen pin -i img.png                   # 把图片钉在屏幕上
+lscreen history                          # 历史面板（最近截图 / 贴图 / 录屏）
 lscreen config                           # 配置面板
 ```
 
@@ -53,7 +56,9 @@ cargo install --path crates/app
 
 ## 配置
 
-零配置可用，不生成文件。`lscreen config` 打开面板调整（保存目录、文件名模板、默认工具/颜色、全局热键等），运行中的托盘 1 秒内自动热加载。配置文件：Linux `~/.config/lscreen/config.toml`、Windows `%APPDATA%\lscreen\config.toml`、macOS `~/Library/Application Support/lscreen/config.toml`。
+零配置可用，不生成文件。`lscreen config` 打开面板调整（保存目录、文件名模板、默认工具/颜色、录制格式、历史条数、六个全局热键等），运行中的托盘 1 秒内自动热加载。配置文件：Linux `~/.config/lscreen/config.toml`、Windows `%APPDATA%\lscreen\config.toml`、macOS `~/Library/Application Support/lscreen/config.toml`。
+
+历史副本不放配置目录，而是缓存目录（Linux `~/.cache/lscreen/history/`、Windows `%LOCALAPPDATA%\lscreen\history\`、macOS `~/Library/Caches/lscreen/history/`）：那是可随时删掉、不影响配置的派生数据，嫌占地方直接删整个目录即可。面板顶栏也能看到占用体积并一键清空。
 
 ## 运行环境
 
@@ -80,7 +85,7 @@ cargo test --workspace                # 单元测试（无需显示器）
 
 产物：Linux tar.gz / deb / rpm / AppImage，Windows zip / 自绘安装器 exe，macOS tar.gz / dmg（仅 CI 出包）。交叉编译需装对应 gcc / g++（openh264 为 C++ 源）；rpm 格式需 `apt install rpm`；AppImage 需 [appimagetool](https://github.com/AppImage/appimagetool)。
 
-全平台出包（含 macOS、Windows MSVC）走 GitHub Actions：`git tag v0.4.0 && git push --tags`。
+全平台出包（含 macOS、Windows MSVC）走 GitHub Actions：`git tag v0.5.0 && git push --tags`。
 
 ## 架构
 

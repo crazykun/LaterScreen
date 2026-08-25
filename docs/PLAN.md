@@ -85,6 +85,16 @@ crates/
 
 ## 4. 里程碑
 
+### 版本历程
+
+| 版本 | 日期 | 交付内容 |
+|---|---|---|
+| v0.1.0 | 2026-08-18 | M1 截图标注、M2 取色/二维码/CLI、M3 OCR（Linux tesseract）、M4a GIF 录屏、M6 工具栏图标化；四种原生包格式 + dmg |
+| v0.2.0 | 2026-08-19 | M7 贴图（独立进程 + 缩放/拖拽/工具条）、Win/mac 系统 OCR、内置 ocrs 兜底、Windows 自绘安装器替代 NSIS |
+| v0.3.0 | 2026-08-20 | M8 托盘常驻 + 配置面板 + 全局热键（空闲 RSS ≈ 9MB） |
+| v0.4.0 | 2026-08-21 | M4 MP4 录屏（openh264 静态链接）、滚动长截图、M5 Wayland portal 整屏、M9 窗口截图（默认截当前窗口）；任务栏图标归属修复 |
+| **v0.5.0** | **2026-08-25** | **M10 录制选区边框 + 识别结果面板可拖拽缩放、M11 截图历史面板；录制 armed 待开始 + 边框闪烁 + 录制格式进配置** |
+
 ### M1 截图 + 标注 ✅（核心价值）
 - [x] workspace 骨架 + 体积优化 profile
 - [x] core：图元模型（矩形/椭圆/箭头/直线/曲线/标号/文本/马赛克/橡皮擦）、
@@ -166,9 +176,9 @@ crates/
       fullscreen 可能忽略 position hint 落错屏（CI 测不了，需双屏手动确认）
       ——✅ Deepin 25 (KWin/X11) 双屏实测通过（2026-08-17）：覆盖层正确落在
       鼠标所在屏；其他 WM（GNOME/i3 等）待社区反馈
-- [ ] CI：三平台构建产物 + 体积回归检查（✅ 已搭，见 .github/workflows/ci.yml）；
-      远期注意 ldd 白名单对全静态产物会误报；
-      ✅ openh264 静态链接后 release 12.4MB（预算 20MB 内，2026-08-20 实测）
+- [x] CI：三平台构建产物 + 体积回归检查（见 .github/workflows/ci.yml，含
+      fmt/clippy 门槛）；openh264 静态链接后 release 12.4MB（预算 20MB 内，
+      2026-08-20 实测）。远期注意：ldd 白名单对全静态产物会误报
 
 ### M6 界面打磨：图标化工具栏（✅ 2026-08-18）
 
@@ -319,7 +329,7 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       已实现待人工点验。Win/mac 待真机确认（CI 无桌面）；mac 窗口坐标
       走「CG 点 × 窗口中心所在显示器缩放比」换算，混合 DPI 场景随 M5 一并验证
 
-### M10 录制区域可视化 + 识别结果面板可拖动（规划中）
+### M10 录制区域可视化 + 识别结果面板可拖动 ✅ 2026-08-24
 
 两条来自实际使用的体验缺口：录制时看不见录的是哪块、识别结果框钉死在屏幕正中。
 
@@ -386,7 +396,7 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       走自动打开目录；record（GIF/MP4）与 scroll `-o` 落盘后同样按配置
       打开所在目录
 
-### M11 截图历史（托盘「历史」→ 缩略图面板，最近 10 张）
+### M11 截图历史（托盘「历史」→ 缩略图面板，最近 10 张）✅ 2026-08-25
 
 托盘菜单点「历史」打开一个**无边框置顶浮窗**（Snipaste 同款思路：原生菜单
 画不了缩略图，用自绘窗口展示缩略图网格）。单击缩略图**复制**（截图/贴图）或
@@ -402,7 +412,7 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       - CLI 直出（`main.rs` `run_shot` / `run_scroll` 显式 -o 分支）
       - **录屏落盘时**（`main.rs` `run_record`，GIF/MP4 都入）
 - [x] **存储形态（小而美）**：独立历史目录 `~/.cache/lscreen/history/`
-      （三平台 `config::cache_dir()`：Win `%LOCALAPPDATA%\lscreen\cache`、
+      （三平台 `config::cache_dir()`：Win `%LOCALAPPDATA%\lscreen`、
       mac `~/Library/Caches/lscreen`），每项存一份**全尺寸 PNG 副本**，索引 `index.toml`
       记录（时间戳、来源类型、尺寸，按时间倒序）。上限 `history_max`（默认 10，
       1-50），append 超限裁最旧。**存副本而非只记路径**：再复制/贴图必须能读到
@@ -466,7 +476,7 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       `settings_ui.rs`「保存」卡片增「历史条数」（DragValue 1–50，保存时校验
       非法提示不落盘）；「全局热键」增「历史」一行（`hotkey_history`）。
 - [x] **README 同步**：托盘菜单文案补「历史」面板；CLI 表补 `history` 子命令；
-      配置节补历史副本存缓存目录的三平台路径与迁移说明。
+      配置节补历史副本存缓存目录的三平台路径与「可直接删」说明。
       `docs/PLAN.md` §6 目录规范补 `app/src/history.rs`。
 
 ### 遗留 TODO（review 2026-08-17）
@@ -523,9 +533,18 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
 ## 6. 目录规范
 
 ```
-doc/          设计与计划文档（迁移后为 docs/）
-crates/       所有库与可执行 crate
-  core/src/   model.rs(图元) history.rs(撤销) render.rs(导出) color.rs qr.rs
-  capture/    lib.rs
-  app/src/    main.rs(CLI入口) ui/(覆盖层、工具栏、画布交互) history.rs(截图历史) tray.rs(托盘) settings_ui.rs(配置面板)
+docs/           设计与计划文档（PLAN.md）+ 项目主页（index.html）
+scripts/        package.sh 一键打包
+packaging/      图标、desktop、Info.plist 等打包素材
+crates/         所有库与可执行 crate
+  core/src/     model.rs(图元) history.rs(撤销栈) render.rs(导出渲染)
+                geom.rs color.rs qr.rs
+  capture/src/  lib.rs(平台分发) linux.rs(x11rb + ashpd portal) other.rs(xcap)
+  ocr/src/      lib.rs(trait) tesseract.rs win_ocr.rs vision.rs
+                ocrs_engine.rs(内置兜底) lang.rs
+  record/src/   lib.rs(GIF/MP4 编码 + 采帧) scroll.rs(滚动拼接)
+  app/src/      main.rs(CLI 入口) ui/(mod 覆盖层 / toolbar / canvas)
+                history.rs(截图历史面板) tray.rs(托盘) settings_ui.rs(配置面板)
+                pin.rs(贴图) record_ui.rs(录制状态窗) export.rs config.rs font.rs
+  setup/        Windows 自绘安装器
 ```
