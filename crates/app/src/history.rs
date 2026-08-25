@@ -53,10 +53,52 @@ struct Index {
     items: Vec<Item>,
 }
 
+/// 历史副本目录：缓存目录下的 `history/`（见 `config::cache_dir` 的理由）。
+/// 首次调用时把旧的 `<config>/history/` 整体搬过来，老用户无感迁移。
 fn history_dir() -> PathBuf {
-    crate::config::config_dir()
+    let dir = crate::config::cache_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("history")
+        .join("history");
+    migrate_legacy_dir(&dir);
+    dir
+}
+
+/// 旧版历史目录（`<config>/history/`）→ 新缓存目录的一次性迁移。
+/// 只在新目录尚不存在、旧目录存在时执行；`rename` 失败（跨文件系统）则逐个
+/// 复制后删源。任一步失败都静默放弃——历史丢失不该阻断截图主流程。
+fn migrate_legacy_dir(new_dir: &std::path::Path) {
+    if new_dir.exists() {
+        return;
+    }
+    let Some(old) = crate::config::config_dir().map(|d| d.join("history")) else {
+        return;
+    };
+    if !old.is_dir() {
+        return;
+    }
+    if let Some(parent) = new_dir.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if std::fs::rename(&old, new_dir).is_ok() {
+        return;
+    }
+    // 跨设备：逐文件搬
+    if std::fs::create_dir_all(new_dir).is_err() {
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(&old) {
+        for entry in entries.flatten() {
+            let from = entry.path();
+            if from.is_file() {
+                if let Some(name) = from.file_name() {
+                    if std::fs::copy(&from, new_dir.join(name)).is_ok() {
+                        let _ = std::fs::remove_file(&from);
+                    }
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_dir(&old);
 }
 
 fn index_path() -> PathBuf {
@@ -234,6 +276,32 @@ fn record_png(png: &[u8], kind: Kind, source: Option<&std::path::Path>, w: u32, 
     save_index(&index);
 }
 
+/// 历史副本占用的总字节数（用于面板顶栏显示「历史 · 12 张 · 3.4 MB」，
+/// 让「该清了」这件事在 UI 上可见，而不是等用户自己去翻磁盘）。
+pub fn total_bytes() -> u64 {
+    let dir = history_dir();
+    load_index()
+        .items
+        .iter()
+        .filter_map(|i| dir.join(&i.filename).metadata().ok())
+        .map(|m| m.len())
+        .sum()
+}
+
+/// 清空全部历史：删掉所有副本文件与索引。返回删掉的条目数。
+/// 只删索引里登记过的文件，不 `rm -rf` 整个目录——避免误删同目录下的
+/// 其它东西（例如未来可能加的缩略图缓存）。
+pub fn clear_all() -> usize {
+    let dir = history_dir();
+    let index = load_index();
+    let n = index.items.len();
+    for item in &index.items {
+        let _ = std::fs::remove_file(dir.join(&item.filename));
+    }
+    save_index(&Index::default());
+    n
+}
+
 /// 裁到 history_max：按时间戳倒序保留前 N，删除被裁条目的副本文件。
 fn trim(index: &mut Index) {
     let max = crate::config::Config::load().history_max();
@@ -276,6 +344,10 @@ pub struct HistoryApp {
     toast: Option<(String, f64)>,
     /// 上次读到索引 mtime（每小时/每次变更才重载）
     last_mtime: Option<std::time::SystemTime>,
+    /// 副本总体积（顶栏显示，随索引变更刷新）
+    bytes: u64,
+    /// 「清空」已按一次，等二次确认（再点一次才真删；移开鼠标即取消）
+    confirm_clear: bool,
 }
 
 impl HistoryApp {
@@ -295,6 +367,8 @@ impl HistoryApp {
             close_after_copy: crate::config::Config::load().history_close_after_copy,
             toast: None,
             last_mtime: index_mtime(),
+            bytes: total_bytes(),
+            confirm_clear: false,
         }
     }
 
@@ -305,6 +379,18 @@ impl HistoryApp {
             self.last_mtime = m;
             self.items = list();
             self.thumbs.clear();
+            self.bytes = total_bytes();
+        }
+    }
+
+    /// 体积人类可读（顶栏用，只到 MB 量级够了）。
+    fn human_size(bytes: u64) -> String {
+        const MB: f64 = 1024.0 * 1024.0;
+        const KB: f64 = 1024.0;
+        if bytes as f64 >= MB {
+            format!("{:.1} MB", bytes as f64 / MB)
+        } else {
+            format!("{:.0} KB", (bytes as f64 / KB).max(1.0))
         }
     }
 
@@ -372,9 +458,28 @@ impl HistoryApp {
         if let Some(path) = resolve_source(item) {
             export::open_with_default(&path);
             self.toast(ctx, format!("已在默认播放器打开: {}", short_dir(&path)));
-        } else {
-            // 视频丢了：退化为打开目录（让用户看到原始序列或清理）
-            self.open_item(ctx, item);
+            return;
+        }
+        // 视频已被移动/删除：明确说清原因再退化。之前只说「文件不存在」，
+        // 用户看到的是打开了缩略图目录，会误以为「录屏点击又坏了」
+        if item.source.is_empty() {
+            self.toast(ctx, "该条无视频记录（旧版历史），已打开副本目录");
+            let copy = file_path(item);
+            if let Some(dir) = copy.parent().filter(|d| d.is_dir()) {
+                export::open_in_file_manager(dir);
+            }
+            return;
+        }
+        let src = PathBuf::from(&item.source);
+        match src.parent().filter(|d| d.is_dir()) {
+            Some(dir) => {
+                export::open_in_file_manager(dir);
+                self.toast(
+                    ctx,
+                    format!("视频已删除，已打开原目录: {}", short_dir(&src)),
+                );
+            }
+            None => self.toast(ctx, "视频已删除，原目录也不存在了"),
         }
     }
 
@@ -482,19 +587,79 @@ impl eframe::App for HistoryApp {
                 if btn_resp.clicked() {
                     self.close = true;
                 }
-                // 标题 + 计数（左对齐，避开右侧关闭按钮）
+                // 标题 + 计数 + 体积（左对齐，避开右侧按钮）。体积可见 = 用户知道
+                // 该清了，不用自己去翻磁盘
                 p.text(
                     Pos2::new(ui.min_rect().left(), ui.max_rect().center().y),
                     egui::Align2::LEFT_CENTER,
-                    format!("历史 · {} 张", self.items.len()),
+                    format!(
+                        "历史 · {} 张 · {}",
+                        self.items.len(),
+                        Self::human_size(self.bytes)
+                    ),
                     egui::FontId::proportional(14.0),
                     egui::Color32::from_rgb(0xec, 0xec, 0xf0),
                 );
+                // 「清空」按钮（X 左侧）：首点进入待确认态、二次点才真删；
+                // 鼠标移开自动取消，避免误触清光历史
+                let clear_w = 52.0;
+                let clear = Rect::from_center_size(
+                    Pos2::new(btn.left() - 6.0 - clear_w / 2.0, btn.center().y),
+                    Vec2::new(clear_w, 22.0),
+                );
+                let clear_resp =
+                    ui.interact(clear, egui::Id::new("history-clear"), egui::Sense::click());
+                if !clear_resp.hovered() {
+                    self.confirm_clear = false;
+                }
+                let (label, fg, bg) = if self.confirm_clear {
+                    (
+                        "确认?",
+                        egui::Color32::WHITE,
+                        egui::Color32::from_rgb(0xc0, 0x39, 0x2b),
+                    )
+                } else if clear_resp.hovered() {
+                    (
+                        "清空",
+                        egui::Color32::WHITE,
+                        egui::Color32::from_rgb(0x3a, 0x3a, 0x44),
+                    )
+                } else {
+                    (
+                        "清空",
+                        egui::Color32::from_rgb(0x9e, 0x9e, 0xaa),
+                        egui::Color32::TRANSPARENT,
+                    )
+                };
+                let p = ui.painter();
+                p.rect_filled(clear, 6.0, bg);
+                p.text(
+                    clear.center(),
+                    egui::Align2::CENTER_CENTER,
+                    label,
+                    egui::FontId::proportional(12.0),
+                    fg,
+                );
+                if clear_resp.clicked() {
+                    if self.confirm_clear {
+                        let n = clear_all();
+                        self.confirm_clear = false;
+                        self.items.clear();
+                        self.thumbs.clear();
+                        self.bytes = 0;
+                        self.last_mtime = index_mtime();
+                        self.toast(&ctx, format!("已清空 {n} 条历史"));
+                    } else {
+                        self.confirm_clear = true;
+                    }
+                }
+                clear_resp.on_hover_cursor(egui::CursorIcon::PointingHand);
                 // 其余区域拖动 = 移窗。只在 drag_started 帧发一次 StartDrag，
                 // 否则 WM 交互式移动反复被重启，窗口停不下来（见 record_ui 同款坑）
                 let drag_area = Rect::from_min_size(
                     ui.min_rect().left_top(),
-                    Vec2::new((avail - 28.0).max(0.0), 30.0),
+                    // 右侧让出「清空」(52) + 间距(6) + X(28)
+                    Vec2::new((avail - 86.0).max(0.0), 30.0),
                 );
                 let drag_resp = ui.interact(
                     drag_area,
@@ -566,17 +731,33 @@ impl eframe::App for HistoryApp {
                                     egui::Layout::top_down(egui::Align::LEFT),
                                     |ui| {
                                         ui.vertical_centered(|ui| {
+                                            // 录屏且源视频已丢失：标签打叉 + 变灰，
+                                            // 让用户点之前就知道这条播不了
+                                            let lost = item.kind == Kind::Record
+                                                && resolve_source(item).is_none();
+                                            let (text, color) = match item.kind {
+                                                Kind::Record if lost => (
+                                                    "录屏 ✕",
+                                                    egui::Color32::from_rgb(0x8a, 0x8a, 0x94),
+                                                ),
+                                                Kind::Record => (
+                                                    "录屏",
+                                                    egui::Color32::from_rgb(0xec, 0xec, 0xf0),
+                                                ),
+                                                Kind::Pin => (
+                                                    "贴图",
+                                                    egui::Color32::from_rgb(0xec, 0xec, 0xf0),
+                                                ),
+                                                Kind::Shot => (
+                                                    "截图",
+                                                    egui::Color32::from_rgb(0xec, 0xec, 0xf0),
+                                                ),
+                                            };
                                             ui.label(
-                                                egui::RichText::new(if item.kind == Kind::Record {
-                                                    "录屏"
-                                                } else if item.kind == Kind::Pin {
-                                                    "贴图"
-                                                } else {
-                                                    "截图"
-                                                })
-                                                .size(13.0)
-                                                .strong()
-                                                .color(egui::Color32::from_rgb(0xec, 0xec, 0xf0)),
+                                                egui::RichText::new(text)
+                                                    .size(13.0)
+                                                    .strong()
+                                                    .color(color),
                                             );
                                             ui.add_space(2.0);
                                             ui.label(

@@ -195,6 +195,36 @@ pub fn config_dir() -> Option<PathBuf> {
     }
 }
 
+/// 平台缓存目录：Linux `$XDG_CACHE_HOME`/`~/.cache`、Win `%LOCALAPPDATA%`、
+/// mac `~/Library/Caches` 下的 `lscreen/`。
+///
+/// 历史副本（可能几十 MB 的 PNG）属于「可再生的体积数据」，放配置目录不合规：
+/// 配置目录常被同步/备份工具整体带走，且用户清理时不敢删。放缓存目录后系统
+/// 清理工具能识别，用户也能安全地 `rm -rf ~/.cache/lscreen` 而不丢配置。
+pub fn cache_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .map(|d| d.join("lscreen"))
+            .or_else(|| home_dir().map(|h| h.join("AppData/Local/lscreen")))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        home_dir().map(|h| h.join("Library/Caches/lscreen"))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
+            let p = PathBuf::from(dir);
+            if p.is_absolute() {
+                return Some(p.join("lscreen"));
+            }
+        }
+        home_dir().map(|h| h.join(".cache/lscreen"))
+    }
+}
+
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))

@@ -401,13 +401,24 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
         `pin_from_clipboard`）
       - CLI 直出（`main.rs` `run_shot` / `run_scroll` 显式 -o 分支）
       - **录屏落盘时**（`main.rs` `run_record`，GIF/MP4 都入）
-- [x] **存储形态（小而美）**：独立历史目录 `~/.config/lscreen/history/`
-      （三平台 config_dir 下），每项存一份**全尺寸 PNG 副本**，索引 `index.toml`
+- [x] **存储形态（小而美）**：独立历史目录 `~/.cache/lscreen/history/`
+      （三平台 `config::cache_dir()`：Win `%LOCALAPPDATA%\lscreen\cache`、
+      mac `~/Library/Caches/lscreen`），每项存一份**全尺寸 PNG 副本**，索引 `index.toml`
       记录（时间戳、来源类型、尺寸，按时间倒序）。上限 `history_max`（默认 10，
       1-50），append 超限裁最旧。**存副本而非只记路径**：再复制/贴图必须能读到
       原图，源文件可能被移动或删除；自包含副本保证历史永远可点开。代价：磁盘约
       N×单张 PNG 大小（10 张 1080p 截图约 20–40MB，可控）。无历史时面板显示
       「暂无历史」占位，不报错不落盘。
+      **为何是缓存目录而非配置目录**：历史副本是可再生的派生数据，删掉只丢便利、
+      不丢设置；放 config 会让备份/同步工具连着几十 MB 图片一起搬，也违反 XDG
+      语义（config 存"用户的选择"，cache 存"可随时丢弃的中间产物"）。老用户的
+      `<config>/history/` 由 `migrate_legacy_dir` 首次访问时 `rename` 搬迁，
+      跨文件系统失败则逐个复制后删源，任一步失败静默放弃（历史丢失不该阻断截图）。
+- [x] **可见的体积 + 一键清空**：面板顶栏显示「历史 · N 张 · X MB」
+      （`total_bytes()` 累加索引内文件 size），旁边「清空」按钮走二次确认
+      （`confirm_clear` 状态，再点一次才执行）→ `clear_all()` 删所有副本 + 重写
+      空索引。**只删索引登记过的文件**，不 `rm -rf` 目录，避免误删同目录他物。
+      让"该清了"在 UI 上可见，而不是等用户自己翻磁盘发现几百 MB。
 - [x] **面板浮窗（`history.rs` `HistoryApp`）**：`egui::Panel::top`(标题+计数+
       ✕) + `CentralPanel` 里 `ScrollArea` 缩略图列表。每行一张**满宽卡片**：左缩略图
       固定高 120px、按图高比缩放并**吃满行内剩余宽度**（横版图不再"框宽 item
@@ -425,6 +436,13 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       `Cmd::History` + `run_history`（280×420 无边框置顶窗 + `HistoryApp`），
       摆放改为**主屏右下**（`primary_monitor_bounds`）——Deepin 的 dock 在主屏，
       历史面板贴主屏而非虚拟桌面右边界。
+- [x] **单实例（PID 锁）**：热键/菜单连按会不断 spawn 新 `lscreen history` 进程，
+      叠出一堆面板。`acquire_single_instance()` 在 `run_history` 最开头抢
+      `<config>/history.lock`（内容 = 本进程 PID）：锁内 PID 仍存活则本进程直接
+      退出，不建窗口；正常关闭时 `release_single_instance()` 比对 PID 后删锁。
+      **存 PID 而非纯文件存在性**：进程崩溃留下的 stale 锁会被下次启动识别为死
+      PID 并覆盖，不会把用户永久锁在门外。存活探测 `kill(pid, 0)`（unix，
+      EPERM 也算活）/ `OpenProcess`（Windows）。
 - [x] **录屏缩略图**：GIF/MP4 均**录制时留首帧**——`record_mp4`/`record_gif`
       采帧时把第一帧 RGBA 存入共享槽，录毕另存 `_poster.png` 并记一条，
       `source` 指向实际 GIF/MP4 文件。**录屏点击不复制也不定位**：`source`
@@ -438,7 +456,8 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       `history_close_after_copy: bool`（默认 false，历史面板复制后自动收）；
       `settings_ui.rs`「保存」卡片增「历史条数」（DragValue 1–50，保存时校验
       非法提示不落盘）；「全局热键」增「历史」一行（`hotkey_history`）。
-- [x] **README 同步**：托盘菜单文案补「历史」面板；CLI 表补 `history` 子命令。
+- [x] **README 同步**：托盘菜单文案补「历史」面板；CLI 表补 `history` 子命令；
+      配置节补历史副本存缓存目录的三平台路径与迁移说明。
       `docs/PLAN.md` §6 目录规范补 `app/src/history.rs`。
 
 ### 遗留 TODO（review 2026-08-17）
