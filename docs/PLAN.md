@@ -537,6 +537,7 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
 
 ```
 docs/           设计与计划文档（PLAN.md）+ 项目主页（index.html）
+  release-notes/  每个版本一个 <tag>.md，release.yml 直接取作 GitHub Release 正文
 scripts/        package.sh 一键打包
 packaging/      图标、desktop、Info.plist 等打包素材
 crates/         所有库与可执行 crate
@@ -551,3 +552,32 @@ crates/         所有库与可执行 crate
                 pin.rs(贴图) record_ui.rs(录制状态窗) export.rs config.rs font.rs
   setup/        Windows 自绘安装器
 ```
+
+## 7. 发布规范
+
+每个版本在 `docs/release-notes/<tag>.md` 留一份变更日志。这不是归档习惯，而是
+release.yml 的输入：tag 触发时它 `cp docs/release-notes/$GITHUB_REF_NAME.md`
+作为 GitHub Release 正文，文件不存在就落兜底文案「此版本未提供发布说明，详见提交历史」。
+
+**发布说明必须先于 tag 提交**——工作流读的是 tag 指向的那次提交的工作树，
+事后补文件不会回填线上正文（v0.6.0 即如此，只能用 `gh release edit --notes-file` 手工修）。
+
+发布顺序（不可逆的步骤放最后）：
+
+1. 写 `docs/release-notes/<tag>.md`
+2. 改版本号：根 `Cargo.toml` 的 `[workspace.package] version`、各 crate 间
+   path 依赖的 `version` 引脚（不一致 cargo 直接报错）、`cargo update -w` 刷 lock
+3. 同步 README 的 tag 示例与 `docs/index.html` 的兜底版本号（正常由 GitHub API
+   覆盖，这里只是接口不可用时的回退）、PLAN 的版本历程表
+4. 验证：`cargo fmt --all --check`、`cargo clippy --all-targets --all-features`、
+   `cargo test --workspace`
+5. commit + push main
+6. `git tag -a <tag> && git push origin <tag>`，触发 Release 工作流出全平台包
+
+撤回已发布的版本：`gh release delete <tag> --yes` 之后**还要**
+`git push origin :refs/tags/<tag>`——`--cleanup-tag` 实测不可靠会留下远端 tag。
+被撤回的版本在版本历程表里保留并标注去向，不要删行；已删 release 的
+`<tag>.md` 也一并删除，避免留下指向不存在 release 的说明。
+
+写什么：按「用户看得见的影响」而不是提交分类组织。修复类写清**为什么此前没暴露**
+（多数是环境差异：打包机装过运行库、开发机有显卡驱动），这比罗列改了哪个文件有用。
