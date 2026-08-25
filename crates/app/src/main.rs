@@ -177,6 +177,14 @@ enum Cmd {
     Config,
     /// 打开截图历史面板（最近截图/贴图/录屏，缩略图网格）
     History,
+    /// 标注预览：把图片开进带完整工具栏的标注窗口（内部命令，滚动截图
+    /// 拼接结果的预览走它，--help 不显示）
+    #[command(hide = true)]
+    Annotate {
+        /// 图片文件路径（PNG）；缺省从 stdin 读 PNG
+        #[arg(short, long)]
+        input: Option<PathBuf>,
+    },
 }
 
 /// 是否附上了父控制台（从 cmd 启动）。决定致命错误走 stderr 还是弹窗。
@@ -303,19 +311,41 @@ fn main() {
             output,
         }) => {
             // --select 优先：先框选再录；取消框选则静默退出（非错误）
-            let region = if select {
+            if select {
                 match pick_region_interactive() {
-                    Ok(Some(r)) => Some(r),
-                    Ok(None) => return,
+                    Ok(Some(r)) => {
+                        // 框选覆盖层已消耗本进程唯一的事件循环额度：macOS 的
+                        // winit/NSApplication 同进程跑不了第二个 eframe 循环，
+                        // 状态窗会直接拉不起来（表现=选完区一切消失）。带显式
+                        // --region 转交新进程执行，保证每进程恰好一个循环
+                        //（与托盘 spawn 子进程同款模式）。
+                        let mut extra: Vec<String> = Vec::new();
+                        if mp4 {
+                            extra.push("--mp4".into());
+                        }
+                        extra.extend([
+                            "--duration".to_string(),
+                            duration.to_string(),
+                            "--fps".to_string(),
+                            fps.to_string(),
+                        ]);
+                        if let Some(q) = quality {
+                            extra.extend(["--quality".to_string(), q.to_string()]);
+                        }
+                        if let Some(o) = output {
+                            extra.extend(["--output".to_string(), o.display().to_string()]);
+                        }
+                        reexec_after_pick("record", &r, &extra)
+                    }
+                    Ok(None) => Ok(()),
                     Err(e) => {
                         eprintln!("lscreen: {e}");
                         std::process::exit(1);
                     }
                 }
             } else {
-                region
-            };
-            run_record(region, mp4, duration, fps, quality, output)
+                run_record(region, mp4, duration, fps, quality, output)
+            }
         }
         Some(Cmd::Shot {
             region,
@@ -332,22 +362,37 @@ fn main() {
             output,
         }) => {
             // 交互框选优先（与 record --select 同体验）；取消则静默退出
-            let region = match region {
-                Some(r) => Some(r),
+            match region {
+                Some(r) => run_scroll(Some(r), steps, clicks, pause_ms, output),
                 None => match pick_region_interactive() {
-                    Ok(Some(r)) => Some(r),
-                    Ok(None) => return,
+                    Ok(Some(r)) => {
+                        // 同 record --select：框选覆盖层已消耗本进程的事件循环
+                        // 额度，拼接/状态窗转交新进程（详见那边的注释）
+                        let mut extra: Vec<String> = vec![
+                            "--steps".to_string(),
+                            steps.to_string(),
+                            "--clicks".to_string(),
+                            clicks.to_string(),
+                            "--pause-ms".to_string(),
+                            pause_ms.to_string(),
+                        ];
+                        if let Some(o) = output {
+                            extra.extend(["--output".to_string(), o.display().to_string()]);
+                        }
+                        reexec_after_pick("scroll", &r, &extra)
+                    }
+                    Ok(None) => Ok(()),
                     Err(e) => {
                         eprintln!("lscreen: {e}");
                         std::process::exit(1);
                     }
                 },
-            };
-            run_scroll(region, steps, clicks, pause_ms, output)
+            }
         }
         Some(Cmd::Pin { input, pos, scale }) => run_pin(input, pos, scale),
         Some(Cmd::Config) => run_settings(),
         Some(Cmd::History) => run_history(),
+        Some(Cmd::Annotate { input }) => run_annotate(input),
     };
     if let Err(e) = result {
         report_fatal(&format!("lscreen: {e}"));
@@ -411,13 +456,19 @@ fn run_history() -> Result<(), String> {
         .with_resizable(true)
         .with_decorations(false)
         .with_always_on_top();
-    // 主屏右下、贴托盘上方。Deepin 的 dock 在主屏右下角，历史面板应贴主屏
-    // 而非虚拟桌面右边界——多屏时后者会落在最右那块屏上（monitor_bounds 是
-    // 全部显示器并集）。X11 下逻辑点=物理像素（scale=1），无需换算。
+    // 贴托盘摆放：Linux（Deepin dock 在右下）贴主屏右下角；macOS 状态栏在
+    // 顶部，贴主屏右上角、菜单栏下方（菜单栏高 24-37pt，取 32 安全）。
+    // 多屏时贴主屏而非虚拟桌面边界——monitor_bounds 是全部显示器并集，
+    // 后者会落在最右那块屏上。
     if let Some((dx, dy, dw, dh)) = lscreen_capture::primary_monitor_bounds() {
         let (pw, ph) = (280.0, 420.0);
         let x = (dx as f32 + dw as f32 - pw - 8.0).max(dx as f32);
-        let y = (dy as f32 + dh as f32 - ph - 8.0).max(dy as f32);
+        let y = if cfg!(target_os = "macos") {
+            // 菜单栏高 24pt（标准）/37pt（刘海屏），取 36 保证不压
+            dy as f32 + 36.0
+        } else {
+            (dy as f32 + dh as f32 - ph - 8.0).max(dy as f32)
+        };
         viewport = viewport.with_position(eframe::egui::Pos2::new(x, y));
     }
     let options = eframe::NativeOptions {
@@ -429,6 +480,29 @@ fn run_history() -> Result<(), String> {
         options,
         Box::new(|cc| Ok(Box::new(history::HistoryApp::new(cc)))),
     )
+}
+
+/// 框选完成后的转交：带显式 `--region` 重启自身执行剩余工作（状态窗/
+/// 录制/拼接）。原因：框选覆盖层已跑过一个 eframe 事件循环，macOS 的
+/// winit（NSApplication）同进程无法再跑第二个——状态窗直接拉不起来，
+/// 表现就是「选完区一切消失」。转交后每进程恰好一个事件循环，与托盘
+/// spawn 子进程的既有模式一致。参数原样经 argv 转发，语义不变。
+fn reexec_after_pick(sub: &str, region: &str, extra: &[String]) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg(sub).arg("--region").arg(region);
+    for a in extra {
+        cmd.arg(a);
+    }
+    match cmd.spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            Ok(())
+        }
+        Err(e) => Err(format!("转交子进程失败（{sub}）: {e}")),
+    }
 }
 
 /// 交互框选录制区域：复用截图覆盖层（Mode::Record），框完即关窗；
@@ -1221,52 +1295,109 @@ fn run_scroll(
             Ok(())
         }
         // 默认：打开标注预览窗口（复用截图标注会话：全工具标注 +
-        // 保存/复制/贴图/OCR/二维码，Esc 退出）
+        // 保存/复制/贴图/OCR/二维码，Esc 退出）。预览放独立进程：本进程
+        // 已跑过状态窗的事件循环，macOS 同进程跑不了第二个循环（同
+        // pick_region_interactive 的转交理由）；PNG 经 stdin 传递，不落
+        // 临时文件（与托盘贴图同款通道）
         false => {
-            // 宽度下限要容得下底部标注工具栏（预览模式约 560 逻辑点）
-            let (vw, vh) = (
-                (iw as f32 * 0.6).clamp(640.0, 960.0),
-                (ih as f32 * 0.5).clamp(420.0, 720.0),
-            );
-            let viewport = eframe::egui::ViewportBuilder::default()
-                .with_app_id("lscreen")
-                .with_inner_size([vw, vh])
-                .with_min_inner_size([640.0, 360.0])
-                .with_title("lscreen 滚动截图 - 标注");
-            let options = eframe::NativeOptions {
-                viewport,
-                ..Default::default()
-            };
-            let config = config::Config::load();
+            let full = image::RgbaImage::from_raw(iw, ih, img)
+                .ok_or_else(|| "拼接结果尺寸不一致".to_string())?;
+            let mut png = Vec::new();
+            full.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                .map_err(|e| format!("编码预览 PNG 失败: {e}"))?;
+            spawn_annotate_stdin(&png)
+        }
+    }
+}
+
+/// 把拼接结果 PNG 经 stdin 交给独立的标注预览进程（见 run_annotate）。
+/// 子进程先读完 stdin 再开窗，write_all 阻塞到对端读走为止，无死锁。
+fn spawn_annotate_stdin(png: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut child = Command::new(exe)
+        .arg("annotate")
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("启动预览进程失败: {e}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "无法写入预览进程".to_string())?
+        .write_all(png)
+        .map_err(|e| format!("写入预览进程失败: {e}"))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+/// 标注预览窗口：把已有图片开进带完整工具栏的标注窗（保存/复制/贴图/
+/// OCR/二维码）。滚动截图拼接结果的内部预览入口——独立进程跑，因为拼接
+/// 进程已消耗过自己的事件循环额度（macOS 限制），见 run_scroll。
+fn run_annotate(input: Option<PathBuf>) -> Result<(), String> {
+    let img = match input {
+        Some(path) => image::open(&path)
+            .map_err(|e| format!("无法读取 {}: {e}", path.display()))?
+            .into_rgba8(),
+        None => {
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)
+                .map_err(|e| format!("读取 stdin 失败: {e}"))?;
+            image::load_from_memory(&buf)
+                .map_err(|e| format!("stdin 不是有效图片: {e}"))?
+                .into_rgba8()
+        }
+    };
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return Err("空图片".into());
+    }
+    let rgba = img.into_raw();
+    // 窗口尺寸与原先进程内预览同款：缩到 60%/50% 并夹到可用范围；宽度
+    // 下限要容得下底部标注工具栏（预览模式约 560 逻辑点）
+    let (vw, vh) = (
+        (w as f32 * 0.6).clamp(640.0, 960.0),
+        (h as f32 * 0.5).clamp(420.0, 720.0),
+    );
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_app_id("lscreen")
+        .with_inner_size([vw, vh])
+        .with_min_inner_size([640.0, 360.0])
+        .with_title("lscreen 滚动截图 - 标注");
+    let options = eframe::NativeOptions {
+        viewport,
+        ..Default::default()
+    };
+    let config = config::Config::load();
+    run_eframe(
+        "lscreen-annotate",
+        options,
+        Box::new(move |cc| {
             let shot = lscreen_capture::Screenshot {
-                rgba: img,
-                width: iw,
-                height: ih,
+                rgba,
+                width: w,
+                height: h,
                 origin: (0, 0),
                 scale: 1.0,
                 is_primary: true,
             };
-            run_eframe(
-                "lscreen-scroll-preview",
-                options,
-                Box::new(move |cc| {
-                    Ok(Box::new(ui::SnipApp::new(
-                        cc,
-                        ui::OverlayInit {
-                            shot,
-                            font: font::load_system_font(),
-                            mode: ui::Mode::Snip,
-                            config,
-                            record_region: None,
-                            windows: Vec::new(),
-                            initial_region: None,
-                            preview: true,
-                        },
-                    )))
-                }),
-            )
-        }
-    }
+            Ok(Box::new(ui::SnipApp::new(
+                cc,
+                ui::OverlayInit {
+                    shot,
+                    font: font::load_system_font(),
+                    mode: ui::Mode::Snip,
+                    config,
+                    record_region: None,
+                    windows: Vec::new(),
+                    initial_region: None,
+                    preview: true,
+                },
+            )))
+        }),
+    )
 }
 
 /// 贴图入口：读图（文件或 stdin）→ 置顶无边框窗口。

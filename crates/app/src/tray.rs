@@ -607,12 +607,17 @@ mod native_impl {
             let icon = icon_rgba(32)
                 .and_then(|img| tray_icon::Icon::from_rgba(img.into_raw(), 32, 32).ok())
                 .expect("托盘图标解码失败");
-            let tray = TrayIconBuilder::new()
+            let mut builder = TrayIconBuilder::new()
                 .with_menu(Box::new(menu))
                 .with_tooltip(base_tooltip())
-                .with_icon(icon)
-                .build()
-                .expect("创建托盘失败");
+                .with_icon(icon);
+            // Windows：右键才弹菜单，左键保留为快速截图入口（tray-icon 的
+            // menu_on_left_click 默认开——左键会同时弹菜单并触发快速动作）。
+            // macOS 保持默认：左键弹菜单符合系统惯例，见 handle() 的 TrayClick。
+            if cfg!(windows) {
+                builder = builder.with_menu_on_left_click(false);
+            }
+            let tray = builder.build().expect("创建托盘失败");
             self.hotkeys = Hotkeys::new();
             self.hotkeys.apply(&self.cfg);
             self.tray = Some(tray);
@@ -632,8 +637,13 @@ mod native_impl {
                     "quit" => Some(Action::Quit),
                     _ => None,
                 },
-                // 左键/双击托盘 = 快速截图（完整菜单在右键）
+                // 左键/双击托盘 = 快速截图（完整菜单在右键）。macOS 例外：
+                // 左键弹菜单是系统惯例（menu_on_left_click 默认开启），若再派发
+                // 截图会「弹菜单的同时又开了截图覆盖层」
+                #[cfg(not(target_os = "macos"))]
                 UserEvent::TrayClick => Some(Action::Screenshot),
+                #[cfg(target_os = "macos")]
+                UserEvent::TrayClick => None,
                 UserEvent::Hotkey(id) => self.hotkeys.action_for_id(id),
             };
             if let Some(a) = action {
@@ -712,7 +722,16 @@ mod native_impl {
 
     pub fn run_native() -> Result<(), String> {
         let cfg = Config::load();
-        let event_loop = EventLoop::<UserEvent>::with_user_event()
+        let mut builder = EventLoop::<UserEvent>::with_user_event();
+        // macOS：常驻托盘用 Accessory（菜单栏应用）形态——不占 Dock。否则
+        // Dock 常驻一个点了没反应的图标。功能窗口（截图覆盖层/配置/历史）
+        // 都是独立子进程、各自的事件循环与 Dock 形态，不受此影响。
+        #[cfg(target_os = "macos")]
+        {
+            use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+            builder = builder.with_activation_policy(ActivationPolicy::Accessory);
+        }
+        let event_loop = builder
             .build()
             .map_err(|e| format!("创建事件循环失败: {e}"))?;
 
