@@ -1,4 +1,4 @@
-//! 截图历史（M11）：`~/.config/lscreen/history/` 下存全尺寸 PNG 副本 +
+//! 截图历史（M11）：`~/.cache/lscreen/history/` 下存全尺寸 PNG 副本 +
 //! `index.toml` 索引。托盘「历史」菜单项打开一个无边框自绘面板窗（Snipaste
 //! 同款思路：原生菜单画不了缩略图，用自绘窗口展示缩略图网格）。
 //!
@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
 use egui::{Pos2, Rect, Vec2};
@@ -54,75 +54,60 @@ struct Index {
 }
 
 /// 历史副本目录：缓存目录下的 `history/`（见 `config::cache_dir` 的理由）。
-/// 首次调用时把旧的 `<config>/history/` 整体搬过来，老用户无感迁移。
 fn history_dir() -> PathBuf {
-    let dir = crate::config::cache_dir()
+    crate::config::cache_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("history");
-    migrate_legacy_dir(&dir);
-    dir
-}
-
-/// 旧版历史目录（`<config>/history/`）→ 新缓存目录的一次性迁移。
-/// 只在新目录尚不存在、旧目录存在时执行；`rename` 失败（跨文件系统）则逐个
-/// 复制后删源。任一步失败都静默放弃——历史丢失不该阻断截图主流程。
-fn migrate_legacy_dir(new_dir: &std::path::Path) {
-    if new_dir.exists() {
-        return;
-    }
-    let Some(old) = crate::config::config_dir().map(|d| d.join("history")) else {
-        return;
-    };
-    if !old.is_dir() {
-        return;
-    }
-    if let Some(parent) = new_dir.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if std::fs::rename(&old, new_dir).is_ok() {
-        return;
-    }
-    // 跨设备：逐文件搬
-    if std::fs::create_dir_all(new_dir).is_err() {
-        return;
-    }
-    if let Ok(entries) = std::fs::read_dir(&old) {
-        for entry in entries.flatten() {
-            let from = entry.path();
-            if from.is_file() {
-                if let Some(name) = from.file_name() {
-                    if std::fs::copy(&from, new_dir.join(name)).is_ok() {
-                        let _ = std::fs::remove_file(&from);
-                    }
-                }
-            }
-        }
-    }
-    let _ = std::fs::remove_dir(&old);
+        .join("history")
 }
 
 fn index_path() -> PathBuf {
     history_dir().join("index.toml")
 }
 
-/// 历史窗口单例锁：`~/.config/lscreen/history.lock` 存本进程 PID。
-/// 打开历史面板前先抢锁；已有活着的进程则直接返回 false（该进程应立即退出，
-/// 不再开第二个窗口——快捷键/菜单连按会不断 spawn 新进程）。
+/// 缓存目录下的运行期小文件（单例锁 / 唤起信号）。锁与信号都是纯运行期
+/// 状态，和历史副本一样属于「可随时删掉」的东西，放 cache 而非 config。
+fn runtime_path(name: &str) -> PathBuf {
+    crate::config::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(name)
+}
+
+/// 单例锁：内容为持锁进程 PID。
+fn lock_path() -> PathBuf {
+    runtime_path("history.lock")
+}
+
+/// 「把已开的面板提到前台」的信号文件。第二个进程发现单例已被占用时创建它，
+/// 运行中的面板轮询到就把自己 Focus 出来并删掉它。
+///
+/// 用文件而不是 D-Bus/socket：面板本就靠轮询 `index.toml` mtime 刷新列表，
+/// 复用同一条轮询即可，不必为一个「跳到前台」的信号引入 IPC 依赖。
+fn raise_path() -> PathBuf {
+    runtime_path("history.raise")
+}
+
+/// 打开历史面板前先抢单例锁。已有活着的面板则**留下唤起信号**并返回 false，
+/// 调用方应立即退出——那个面板会自己跳到前台（连按热键不再像「没反应」）。
+///
 /// 锁文件含 PID 而非纯存在性：进程崩溃留下的 stale 锁，下一次启动读到死 PID
 /// 会覆盖它，不会把用户锁死。
 pub fn acquire_single_instance() -> bool {
-    let lock = crate::config::config_dir()
-        .map(|d| d.join("history.lock"))
-        .unwrap_or_else(|| PathBuf::from("history.lock"));
+    let lock = lock_path();
+    if let Some(dir) = lock.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
     // 已有锁：先判断是否是活着的进程
     if let Ok(text) = std::fs::read_to_string(&lock) {
         if let Ok(pid) = text.trim().parse::<u32>() {
             if pid_alive(pid) && pid != std::process::id() {
-                return false; // 另一个历史面板在跑，别开新的
+                let _ = std::fs::write(raise_path(), b"1");
+                return false; // 另一个历史面板在跑，让它自己上前台
             }
         }
     }
-    // 拿到锁（覆盖 stale 锁）：写出自己的 PID
+    // 拿到锁（覆盖 stale 锁）：写出自己的 PID。顺手清掉上次会话残留的唤起
+    // 信号，免得新面板刚开就自我 Focus 一次。
+    let _ = std::fs::remove_file(raise_path());
     let _ = std::fs::write(&lock, format!("{}\n", std::process::id()));
     true
 }
@@ -130,14 +115,24 @@ pub fn acquire_single_instance() -> bool {
 /// 释放单例锁（窗口正常关闭时调用）。只删本进程持有的锁——先比对 PID，
 /// 避免误删刚被下一个实例重新写入的锁。
 pub fn release_single_instance() {
-    let lock = crate::config::config_dir()
-        .map(|d| d.join("history.lock"))
-        .unwrap_or_else(|| PathBuf::from("history.lock"));
+    let lock = lock_path();
     if let Ok(text) = std::fs::read_to_string(&lock) {
         if text.trim().parse::<u32>() == Ok(std::process::id()) {
             let _ = std::fs::remove_file(&lock);
+            // 连带清掉可能刚落下、已经没人消费的唤起信号
+            let _ = std::fs::remove_file(raise_path());
         }
     }
+}
+
+/// 轮询唤起信号：有则消费掉（删文件）并返回 true。
+fn take_raise_request() -> bool {
+    let p = raise_path();
+    if p.exists() {
+        let _ = std::fs::remove_file(&p);
+        return true;
+    }
+    false
 }
 
 /// 该 PID 是否还活着。Linux/mac 走 `kill(pid, 0)`（信号 0 只探测存活，
@@ -348,6 +343,8 @@ pub struct HistoryApp {
     bytes: u64,
     /// 「清空」已按一次，等二次确认（再点一次才真删；移开鼠标即取消）
     confirm_clear: bool,
+    /// 上次轮询唤起信号的时刻（限流，别每帧都去戳文件系统）
+    last_raise_poll: Instant,
 }
 
 impl HistoryApp {
@@ -369,6 +366,7 @@ impl HistoryApp {
             last_mtime: index_mtime(),
             bytes: total_bytes(),
             confirm_clear: false,
+            last_raise_poll: Instant::now(),
         }
     }
 
@@ -381,6 +379,26 @@ impl HistoryApp {
             self.thumbs.clear();
             self.bytes = total_bytes();
         }
+    }
+
+    /// 轮询唤起信号：热键再次按下时第二个进程会留下信号文件，这里读到就把
+    /// 窗口提到前台（取消最小化 + 显示 + Focus）。
+    ///
+    /// 必须自己 `request_repaint_after` 保持心跳：窗口在后台时没有输入事件，
+    /// eframe 不会主动重绘，光靠事件驱动永远轮询不到信号——这正是「按了热键
+    /// 像没反应」的根因。300ms 一次对用户是即时的，开销也只是一次 stat。
+    fn poll_raise(&mut self, ctx: &egui::Context) {
+        const POLL: Duration = Duration::from_millis(300);
+        if self.last_raise_poll.elapsed() >= POLL {
+            self.last_raise_poll = Instant::now();
+            if take_raise_request() {
+                // 顺序有讲究：先取消最小化并确保可见，Focus 才有窗口可聚焦
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+        }
+        ctx.request_repaint_after(POLL);
     }
 
     /// 体积人类可读（顶栏用，只到 MB 量级够了）。
@@ -544,6 +562,7 @@ impl eframe::App for HistoryApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.refresh_if_changed();
         let ctx = ui.ctx().clone();
+        self.poll_raise(&ctx);
 
         // 顶栏：标题 + 计数（左）· 关闭（右，Painter 手绘 X——✕ 字符在 egui 内置
         // 字体里无字形会渲染成方框，和 CJK 缺失同源）。整条可拖动（无系统标题栏）。

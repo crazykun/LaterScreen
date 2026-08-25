@@ -411,9 +411,10 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       「暂无历史」占位，不报错不落盘。
       **为何是缓存目录而非配置目录**：历史副本是可再生的派生数据，删掉只丢便利、
       不丢设置；放 config 会让备份/同步工具连着几十 MB 图片一起搬，也违反 XDG
-      语义（config 存"用户的选择"，cache 存"可随时丢弃的中间产物"）。老用户的
-      `<config>/history/` 由 `migrate_legacy_dir` 首次访问时 `rename` 搬迁，
-      跨文件系统失败则逐个复制后删源，任一步失败静默放弃（历史丢失不该阻断截图）。
+      语义（config 存"用户的选择"，cache 存"可随时丢弃的中间产物"）。**不做旧目录
+      迁移**（用户定稿）：历史是易失数据，为它写一套跨文件系统搬迁+回滚不值得，
+      老的 `<config>/history/` 用户自行删除即可。运行期小文件（单例锁、唤起信号）
+      同样落 cache——它们也是「随时可丢」的状态。
 - [x] **可见的体积 + 一键清空**：面板顶栏显示「历史 · N 张 · X MB」
       （`total_bytes()` 累加索引内文件 size），旁边「清空」按钮走二次确认
       （`confirm_clear` 状态，再点一次才执行）→ `clear_all()` 删所有副本 + 重写
@@ -438,11 +439,19 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       历史面板贴主屏而非虚拟桌面右边界。
 - [x] **单实例（PID 锁）**：热键/菜单连按会不断 spawn 新 `lscreen history` 进程，
       叠出一堆面板。`acquire_single_instance()` 在 `run_history` 最开头抢
-      `<config>/history.lock`（内容 = 本进程 PID）：锁内 PID 仍存活则本进程直接
+      `<cache>/history.lock`（内容 = 本进程 PID）：锁内 PID 仍存活则本进程直接
       退出，不建窗口；正常关闭时 `release_single_instance()` 比对 PID 后删锁。
       **存 PID 而非纯文件存在性**：进程崩溃留下的 stale 锁会被下次启动识别为死
       PID 并覆盖，不会把用户永久锁在门外。存活探测 `kill(pid, 0)`（unix，
       EPERM 也算活）/ `OpenProcess`（Windows）。
+- [x] **再按热键把面板唤到前台**：单例只是「不开第二个」，面板在后台时用户会
+      觉得按了没反应。第二个进程退出前留下 `<cache>/history.raise` 信号文件，
+      运行中的面板 `poll_raise` 每 300ms 读一次，命中就消费掉并依次发
+      `Minimized(false)` → `Visible(true)` → `Focus`（顺序有讲究：先恢复可见
+      才有窗口可聚焦）。**关键是 `request_repaint_after(300ms)` 保持心跳**——
+      窗口在后台没有输入事件，eframe 不会主动重绘，纯事件驱动永远轮询不到信号，
+      这正是「按了热键像没反应」的根因。用文件而非 D-Bus/socket：面板本就轮询
+      `index.toml` mtime 刷新列表，复用同一条轮询，不为一个信号引入 IPC 依赖。
 - [x] **录屏缩略图**：GIF/MP4 均**录制时留首帧**——`record_mp4`/`record_gif`
       采帧时把第一帧 RGBA 存入共享槽，录毕另存 `_poster.png` 并记一条，
       `source` 指向实际 GIF/MP4 文件。**录屏点击不复制也不定位**：`source`

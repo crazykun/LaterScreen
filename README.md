@@ -169,7 +169,7 @@ lscreen tray --foreground              # 托盘前台运行（调试/自启动�
 | Windows | `%APPDATA%\lscreen\config.toml` |
 | macOS | `~/Library/Application Support/lscreen/config.toml` |
 
-历史副本不放配置目录，改放缓存目录（Linux `~/.cache/lscreen/history/`、Windows `%LOCALAPPDATA%\lscreen\cache\history\`、macOS `~/Library/Caches/lscreen/history/`）：那是「可随时删掉、不影响配置」的数据，系统清理工具与备份工具也会照规矩跳过。旧版装过的 `~/.config/lscreen/history/` 会在首次打开历史时自动搬过去。
+历史副本不放配置目录，改放缓存目录（Linux `~/.cache/lscreen/history/`、Windows `%LOCALAPPDATA%\lscreen\cache\history\`、macOS `~/Library/Caches/lscreen/history/`）：那是「可随时删掉、不影响配置」的数据，系统清理工具与备份工具也会照规矩跳过。嫌占地方直接删掉整个目录即可，不影响任何设置。
 
 可配置项：保存目录、文件名模板（默认 `lscreen_{YYYYMMDD}_{HHMMSS}`）、默认工具/颜色/线宽、复制后是否自动退出、保存后是否打开目录、历史保留条数（默认 10，1–50）、历史面板点击复制后是否自动关闭、六个全局热键（截图 / 取色 / 贴图 / 录屏 / 滚动截图 / 历史）。
 
