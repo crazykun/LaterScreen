@@ -729,7 +729,7 @@ mod native_impl {
         #[cfg(target_os = "macos")]
         {
             use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
-            builder = builder.with_activation_policy(ActivationPolicy::Accessory);
+            builder.with_activation_policy(ActivationPolicy::Accessory);
         }
         let event_loop = builder
             .build()
