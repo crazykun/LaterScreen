@@ -86,6 +86,24 @@ fn raise_path() -> PathBuf {
     runtime_path("history.raise")
 }
 
+/// 「退出面板」信号文件。托盘退出时创建它，运行中的面板轮询到就关自己——
+/// 面板是托盘 spawn 的独立进程，托盘退出不会自动带走它（用户困惑「退出了
+/// 托盘历史还在」）。复用面板已有的轮询，不引入额外 IPC。
+fn quit_path() -> PathBuf {
+    runtime_path("history.quit")
+}
+
+/// 请求关闭正在运行的历史面板（托盘退出时调用）。留下信号文件，面板轮询到
+/// 即自行关闭。无面板运行时该文件由下一次 `acquire_single_instance` 清掉，
+/// 不会误关新面板。
+pub fn request_quit() {
+    let p = quit_path();
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&p, b"1");
+}
+
 /// 打开历史面板前先抢单例锁。已有活着的面板则**留下唤起信号**并返回 false，
 /// 调用方应立即退出——那个面板会自己跳到前台（连按热键不再像「没反应」）。
 ///
@@ -106,8 +124,9 @@ pub fn acquire_single_instance() -> bool {
         }
     }
     // 拿到锁（覆盖 stale 锁）：写出自己的 PID。顺手清掉上次会话残留的唤起
-    // 信号，免得新面板刚开就自我 Focus 一次。
+    // 与退出信号，免得新面板刚开就自我 Focus 或立刻自关。
     let _ = std::fs::remove_file(raise_path());
+    let _ = std::fs::remove_file(quit_path());
     let _ = std::fs::write(&lock, format!("{}\n", std::process::id()));
     true
 }
@@ -128,6 +147,16 @@ pub fn release_single_instance() {
 /// 轮询唤起信号：有则消费掉（删文件）并返回 true。
 fn take_raise_request() -> bool {
     let p = raise_path();
+    if p.exists() {
+        let _ = std::fs::remove_file(&p);
+        return true;
+    }
+    false
+}
+
+/// 轮询退出信号：有则消费掉（删文件）并返回 true。
+fn take_quit_request() -> bool {
+    let p = quit_path();
     if p.exists() {
         let _ = std::fs::remove_file(&p);
         return true;
@@ -391,6 +420,11 @@ impl HistoryApp {
         const POLL: Duration = Duration::from_millis(300);
         if self.last_raise_poll.elapsed() >= POLL {
             self.last_raise_poll = Instant::now();
+            // 退出信号优先：托盘退出时留下，面板轮询到即自关（Drop 会清锁）
+            if take_quit_request() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
             if take_raise_request() {
                 // 顺序有讲究：先取消最小化并确保可见，Focus 才有窗口可聚焦
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));

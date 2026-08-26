@@ -1296,6 +1296,11 @@ fn run_scroll(
         }
     };
 
+    // 选区边框：静态红边标出正在滚动截取的区域（与录屏同款 override-redirect
+    // 边条，画在选区外侧 2px 绝不污染采帧）。guard 存活整个滚动+拼接过程，
+    // run_scroll 返回（拼接完成、预览已 spawn）时 Drop 销毁。平台不支持则 None。
+    let _border = lscreen_capture::record_border(x, y, w, h);
+
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     let stop = Arc::new(AtomicBool::new(false));

@@ -648,8 +648,10 @@ fn on_press(app: &mut SnipApp, view: View, p: P2, pos_pt: Pos2, shift: bool) {
             return;
         }
         app.selected = None;
-        // 4. 选区内空白 → 移动选区
-        if inside {
+        // 4. 选区内空白 → 移动选区。预览模式选区固定整图（不可移），此时
+        // 空白左键拖拽要留给平移长图（见 editing 的预览平移分支）——
+        // 若在此设 MoveRegion，app.drag 非空会挡掉平移条件，长图拖不动。
+        if inside && !app.preview {
             app.drag = Some(DragOp::MoveRegion { last: p });
         }
         return;

@@ -69,7 +69,12 @@ fn dispatch(a: Action) -> bool {
                 eprintln!("lscreen tray: {e}");
             }
         }
-        Action::Quit => return false,
+        Action::Quit => {
+            // 托盘退出时带走它 spawn 的历史面板（独立进程，不会自动跟随退出）。
+            // 留信号文件，运行中的面板轮询到即自关；无面板则下次开面板时清掉。
+            crate::history::request_quit();
+            return false;
+        }
     }
     true
 }
