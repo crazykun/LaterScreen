@@ -38,6 +38,16 @@ pub fn capture_all() -> Result<Vec<Screenshot>> {
     Monitor::all().map_err(err)?.iter().map(shoot).collect()
 }
 
+/// Win/mac 无 Wayland 概念，恒 false。
+pub fn is_wayland() -> bool {
+    false
+}
+
+/// 交互式截图仅 Wayland portal 路径需要；Win/mac 走自绘覆盖层。
+pub fn capture_interactive() -> Result<Screenshot> {
+    Err(CaptureError("当前平台不支持交互式 portal 截图".into()))
+}
+
 /// Win/mac：xcap 未暴露指针查询；返回 None 时上层回退主显示器。
 /// TODO(M5): windows-rs GetCursorPos / objc2 NSEvent.mouseLocation
 pub fn cursor_position() -> Option<(i32, i32)> {

@@ -2545,6 +2545,7 @@ version = "0.6.1"
 dependencies = [
  "ashpd",
  "async-io",
+ "futures-util",
  "image",
  "x11rb",
  "xcap",

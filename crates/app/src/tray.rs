@@ -370,6 +370,94 @@ impl Hotkeys {
     }
 }
 
+/// 全局热键动作的稳定 id（Wayland GlobalShortcuts 用；与配置字段同名，
+/// 便于排查）。只覆盖可绑热键的动作（Config/Quit 不绑）。
+#[cfg(target_os = "linux")]
+fn action_shortcut_id(a: &Action) -> Option<&'static str> {
+    Some(match a {
+        Action::Screenshot => "screenshot",
+        Action::Picker => "picker",
+        Action::Pin => "pin",
+        Action::Record => "record",
+        Action::Scroll => "scroll",
+        Action::History => "history",
+        _ => return None,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn action_from_shortcut_id(id: &str) -> Option<Action> {
+    Some(match id {
+        "screenshot" => Action::Screenshot,
+        "picker" => Action::Picker,
+        "pin" => Action::Pin,
+        "record" => Action::Record,
+        "scroll" => Action::Scroll,
+        "history" => Action::History,
+        _ => return None,
+    })
+}
+
+/// 把配置里的热键字符串（如 "Ctrl+Alt+A"）转成 XDG shortcuts 规范的建议
+/// 触发键（如 "CTRL+ALT+a"）。Wayland 下这只是**建议值**，最终由合成器/
+/// 用户定夺。无法解析/为空返回 None（不给建议，让合成器用默认）。
+#[cfg(target_os = "linux")]
+fn to_preferred_trigger(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for tok in raw.split('+') {
+        let t = tok.trim();
+        if t.is_empty() {
+            return None;
+        }
+        let up = t.to_ascii_uppercase();
+        match up.as_str() {
+            "CTRL" | "CONTROL" => parts.push("CTRL".into()),
+            "ALT" => parts.push("ALT".into()),
+            "SHIFT" => parts.push("SHIFT".into()),
+            "SUPER" | "META" | "WIN" => parts.push("SUPER".into()),
+            // 末段是主键：XDG 规范里字母用小写、功能键保留原样
+            other => {
+                if other.len() == 1 {
+                    parts.push(other.to_ascii_lowercase());
+                } else {
+                    parts.push(other.to_string());
+                }
+            }
+        }
+    }
+    Some(parts.join("+"))
+}
+
+/// 按配置构建 Wayland 全局热键规格列表（描述用中文菜单文案）。
+#[cfg(target_os = "linux")]
+fn shortcut_specs(cfg: &Config) -> Vec<lscreen_capture::ShortcutSpec> {
+    let mut out = Vec::new();
+    for (action, label) in MENU_ACTIONS {
+        let Some(id) = action_shortcut_id(action) else {
+            continue;
+        };
+        let raw = match action {
+            Action::Screenshot => &cfg.hotkey_screenshot,
+            Action::Picker => &cfg.hotkey_picker,
+            Action::Pin => &cfg.hotkey_pin,
+            Action::Record => &cfg.hotkey_record,
+            Action::Scroll => &cfg.hotkey_scroll,
+            Action::History => &cfg.hotkey_history,
+            _ => continue,
+        };
+        out.push(lscreen_capture::ShortcutSpec {
+            id: id.to_string(),
+            description: label.to_string(),
+            preferred_trigger: to_preferred_trigger(raw),
+        });
+    }
+    out
+}
+
 /// 菜单文案：带热键后缀（如「截图  Ctrl+Alt+A」）。
 fn menu_label(cfg: &Config, a: &Action) -> String {
     let base = MENU_ACTIONS
@@ -516,6 +604,30 @@ mod linux_impl {
         hotkeys.apply(&cfg);
 
         let (tx, rx) = std::sync::mpsc::channel::<Action>();
+
+        // Wayland：X11 全局热键不可用，改经 GlobalShortcuts portal 监听。
+        // 在独立线程跑（run_global_shortcuts 阻塞到会话结束），触发时把
+        // Action 塞进同一条 tx 通道，与菜单动作走同一 dispatch。
+        // portal 不支持/用户拒绝时线程内 Err 退出，托盘菜单不受影响。
+        if lscreen_capture::is_wayland() {
+            let specs = shortcut_specs(&cfg);
+            if !specs.is_empty() {
+                let gs_tx = tx.clone();
+                std::thread::spawn(move || {
+                    let r = lscreen_capture::run_global_shortcuts(&specs, |id| {
+                        if let Some(a) = super::action_from_shortcut_id(id) {
+                            let _ = gs_tx.send(a);
+                        }
+                    });
+                    if let Err(e) = r {
+                        eprintln!(
+                            "lscreen tray: Wayland 全局热键不可用（合成器不支持 GlobalShortcuts？菜单仍可用）: {e}"
+                        );
+                    }
+                });
+            }
+        }
+
         let handle = LscreenTray { cfg, tx }
             .spawn()
             .map_err(|e| format!("托盘启动失败（D-Bus / StatusNotifierWatcher 不可用）: {e}"))?;

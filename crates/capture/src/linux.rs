@@ -21,7 +21,7 @@ fn err<E: std::fmt::Display>(e: E) -> CaptureError {
 }
 
 /// 当前会话是否纯 Wayland（无 X11 可用）
-fn is_wayland() -> bool {
+pub fn is_wayland() -> bool {
     let session_wayland = std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland");
     let no_x11 = std::env::var_os("DISPLAY").is_none();
     session_wayland || (no_x11 && std::env::var_os("WAYLAND_DISPLAY").is_some())
@@ -37,10 +37,16 @@ fn ensure_x11() -> Result<()> {
     Ok(())
 }
 
-/// 经 xdg-desktop-portal 截整屏（M5 Wayland 路径）。
-/// portal 只回整幅 PNG 文件（可能是全部显示器的拼接，视 DE 而定），
-/// origin 固定 (0,0)。首次调用可能触发权限确认（视 DE 的 portal 后端策略）。
-fn portal_screenshot() -> Result<Screenshot> {
+/// 经 xdg-desktop-portal 截屏（M5 Wayland 路径）。
+///
+/// `interactive=false`：整屏快照（合成器直接给全桌面 PNG，origin(0,0)，
+/// 无对话框）——无头/整屏路径用。
+/// `interactive=true`：合成器弹**原生框选/选窗 UI**，用户选完只回选中区域的
+/// PNG——覆盖层在 Wayland 下用它替代自绘框选（合成器坐标一定对，绕开
+/// 多屏混合 DPI 的坐标映射难题）。用户取消返回 Err。
+///
+/// 首次调用可能触发权限确认（视 DE 的 portal 后端策略）。
+fn portal_screenshot(interactive: bool) -> Result<Screenshot> {
     async_io::block_on(async {
         use ashpd::desktop::screenshot::{ScreenshotOptions, ScreenshotProxy};
 
@@ -49,15 +55,16 @@ fn portal_screenshot() -> Result<Screenshot> {
             .map_err(|e| CaptureError(format!("连接 xdg-desktop-portal 失败: {e}")))?;
         // request() 内部已 await Response 信号；response() 同步取结果
         let opts = ScreenshotOptions::default()
-            .set_interactive(false)
+            .set_interactive(interactive)
             .set_modal(true);
         let request = proxy
             .screenshot(None, opts)
             .await
             .map_err(|e| CaptureError(format!("portal 请求失败: {e}")))?;
-        let response = request
-            .response()
-            .map_err(|e| CaptureError(format!("portal 响应失败（未授权？）: {e}")))?;
+        let response = request.response().map_err(|e| {
+            // interactive 下用户取消也走这条：合成器返回 cancelled
+            CaptureError(format!("portal 响应失败（未授权或已取消？）: {e}"))
+        })?;
         let uri = response.uri().as_str();
         let path = uri.strip_prefix("file://").unwrap_or(uri);
         let data = std::fs::read(path)
@@ -76,6 +83,15 @@ fn portal_screenshot() -> Result<Screenshot> {
             is_primary: true,
         })
     })
+}
+
+/// Wayland 交互式截图：合成器弹原生框选 UI，回选中区域。仅 Wayland 有意义
+/// （X11 应走自绘覆盖层，返回 Err 让上层用老路径）。用户取消返回 Err。
+pub fn capture_interactive() -> Result<Screenshot> {
+    if !is_wayland() {
+        return Err(CaptureError("非 Wayland 会话，请走自绘覆盖层".into()));
+    }
+    portal_screenshot(true)
 }
 
 fn monitors(conn: &impl Connection, screen: &Screen) -> Result<Vec<MonitorInfo>> {
@@ -175,7 +191,7 @@ fn with_conn<T>(
 
 pub fn capture_primary() -> Result<Screenshot> {
     if is_wayland() {
-        return portal_screenshot();
+        return portal_screenshot(false);
     }
     with_conn(|conn, screen| {
         let mons = monitors(conn, screen)?;
@@ -191,7 +207,7 @@ pub fn capture_primary() -> Result<Screenshot> {
 pub fn capture_at(x: i32, y: i32) -> Result<Screenshot> {
     // portal 无显示器区分：Wayland 下任何坐标都给整幅快照
     if is_wayland() {
-        return portal_screenshot();
+        return portal_screenshot(false);
     }
     with_conn(|conn, screen| {
         let mons = monitors(conn, screen)?;
@@ -206,7 +222,7 @@ pub fn capture_at(x: i32, y: i32) -> Result<Screenshot> {
 
 pub fn capture_all() -> Result<Vec<Screenshot>> {
     if is_wayland() {
-        return Ok(vec![portal_screenshot()?]);
+        return Ok(vec![portal_screenshot(false)?]);
     }
     with_conn(|conn, screen| {
         monitors(conn, screen)?
@@ -814,4 +830,76 @@ pub fn record_border(x: i32, y: i32, w: u32, h: u32) -> Option<RecordBorder> {
         return None;
     }
     Some(RecordBorder { conn, wins })
+}
+
+// --------------------------------------------- Wayland 全局热键（GlobalShortcuts）
+
+/// 要注册的全局热键：(应用内 id, 人类可读描述, 建议触发键)。
+/// 建议触发键按 XDG "shortcuts" 规范写（如 "CTRL+ALT+a"）；**最终绑定由
+/// 合成器/用户在系统设置里决定**，与 X11 直接抢键的语义不同——所以配置里的
+/// 热键字符串在 Wayland 下只是「建议值」，可能被用户改掉。
+pub struct ShortcutSpec {
+    pub id: String,
+    pub description: String,
+    pub preferred_trigger: Option<String>,
+}
+
+/// 在 Wayland 下经 `org.freedesktop.portal.GlobalShortcuts` 注册全局热键并
+/// **阻塞监听** Activated 信号，每次触发用 `on_activated(id)` 回调（id 即
+/// `ShortcutSpec::id`）。整个会话（session + 信号流）在本调用内存活，函数
+/// 返回即结束监听——调用方应在独立线程里跑它。
+///
+/// 失败（非 Wayland / portal 不支持 GlobalShortcuts / 用户拒绝）返回 Err，
+/// 调用方据此降级（Wayland 下无全局热键，托盘菜单仍可用）。
+///
+/// 时序坑：`bind_shortcuts` 会弹一次系统确认对话框（首次），用户确认后合成器
+/// 才把键位交给自己；这期间 Activated 不会来，属正常。
+pub fn run_global_shortcuts(
+    specs: &[ShortcutSpec],
+    mut on_activated: impl FnMut(&str),
+) -> Result<()> {
+    if !is_wayland() {
+        return Err(CaptureError("非 Wayland 会话，走 X11 全局热键".into()));
+    }
+    async_io::block_on(async {
+        use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
+        use ashpd::desktop::CreateSessionOptions;
+        use futures_util::StreamExt;
+
+        let gs = GlobalShortcuts::new()
+            .await
+            .map_err(|e| CaptureError(format!("连接 GlobalShortcuts portal 失败: {e}")))?;
+        // 先订阅信号再 bind，避免 bind 到订阅之间的触发丢失
+        let mut activated = gs
+            .receive_activated()
+            .await
+            .map_err(|e| CaptureError(format!("订阅 Activated 失败: {e}")))?;
+        let session = gs
+            .create_session(CreateSessionOptions::default())
+            .await
+            .map_err(|e| CaptureError(format!("创建 GlobalShortcuts 会话失败: {e}")))?;
+
+        let shortcuts: Vec<NewShortcut> = specs
+            .iter()
+            .map(|s| {
+                let n = NewShortcut::new(s.id.clone(), s.description.clone());
+                match &s.preferred_trigger {
+                    Some(t) => n.preferred_trigger(t.as_str()),
+                    None => n,
+                }
+            })
+            .collect();
+        gs.bind_shortcuts(&session, &shortcuts, None, Default::default())
+            .await
+            .map_err(|e| CaptureError(format!("绑定全局热键失败: {e}")))?
+            .response()
+            .map_err(|e| CaptureError(format!("绑定全局热键被拒: {e}")))?;
+
+        // 阻塞消费 Activated 流：session 与 activated 都在本作用域存活
+        while let Some(ev) = activated.next().await {
+            on_activated(ev.shortcut_id());
+        }
+        // 流结束（portal 关闭会话）——正常退出
+        Ok(())
+    })
 }

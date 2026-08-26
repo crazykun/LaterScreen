@@ -172,6 +172,25 @@ crates/
       （GNOME/KDE/wlroots）的覆盖层 GUI 体验——portal 快照是「全部显示器
       拼接、origin(0,0)」，与单屏覆盖层窗口的坐标映射需逐 DE 验证，
       多屏混合 DPI 下可能错位（已知限制，随 M5 后续迭代）
+- [x] **Wayland 交互式截图**（✅ 2026-08-26）：不再拿全桌面拼接图硬套自绘
+      覆盖层（多屏混合 DPI 坐标必错）。Wayland 下 `run_gui`（Snip/Record）
+      改走 `capture_interactive`（portal Screenshot `interactive=true`）——由
+      **合成器弹原生框选/选窗 UI**，回来的就是裁好的选区，坐标由合成器保证，
+      逐 DE 天然正确。选区图直接进 `preview` 标注窗（复用滚动截图/`annotate`
+      的 SnipApp preview 路径：完整工具栏 + 保存/复制/贴图/OCR/二维码）。
+      用户在 portal 取消 = 静默退出（不弹错）。代价：初次框选是系统 UI，
+      没有自绘覆盖层的实时放大镜/取色（Pick 取色模式无对应 portal 交互，
+      仍走原降级路径）。`is_wayland()` 门控，X11 行为零改动（实测覆盖层仍
+      跨屏 3840×1080）。真机 Wayland 待验（本机 Deepin 是 X11 会话）
+- [x] **Wayland 全局热键**（✅ 2026-08-26）：X11 的 `global-hotkey` 在 Wayland
+      整体失效（原先只告警降级、无热键）。改经 `org.freedesktop.portal`
+      `.GlobalShortcuts`（ashpd `global_shortcuts` 特性）：`run_global_shortcuts`
+      在托盘的独立线程里 create_session + bind_shortcuts + 阻塞监听 Activated
+      信号，触发时把 Action 塞进与菜单同一条 tx 通道走同一 dispatch。配置里的
+      热键字符串转成 XDG 规范的**建议触发键**（最终绑定由合成器/用户在系统
+      设置里定夺，与 X11 直接抢键的语义不同）。合成器不支持 GlobalShortcuts
+      （如部分 DDE portal 后端）时线程内 Err 退出，托盘菜单不受影响。
+      `is_wayland()` 门控，X11 仍走 global-hotkey。真机 Wayland 待验
 - [ ] 多显示器混合 DPI：X11 下 scale 恒 1 自洽；Win/mac 经 xcap 的
       scale_factor 换算（M9 已处理 mac 窗口矩形）；X11 xrandr --scale
       的假混合 DPI 与 Wayland 多屏拼接映射待真机验证

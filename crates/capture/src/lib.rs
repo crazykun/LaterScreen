@@ -71,6 +71,31 @@ pub fn capture_all() -> Result<Vec<Screenshot>> {
     platform::capture_all()
 }
 
+/// 当前是否为纯 Wayland 会话（无 X11）。上层据此决定截图/热键走 portal
+/// 路径还是 X11 自绘路径。非 Linux 恒 false。
+pub fn is_wayland() -> bool {
+    platform::is_wayland()
+}
+
+/// Wayland 交互式截图：由合成器弹原生框选/选窗 UI，返回用户选中区域。
+/// 仅 Wayland 有意义——X11 会话返回 Err（应走自绘覆盖层）；用户取消也返回 Err。
+/// 合成器负责坐标，天然绕开多屏混合 DPI 的坐标映射难题。
+pub fn capture_interactive() -> Result<Screenshot> {
+    platform::capture_interactive()
+}
+
+/// 一条要注册的全局热键（Wayland GlobalShortcuts 用）。
+#[cfg(target_os = "linux")]
+pub use platform::ShortcutSpec;
+
+/// Wayland 下经 xdg-desktop-portal GlobalShortcuts 注册全局热键并阻塞监听，
+/// 每次触发回调 `on_activated(id)`。仅 Linux/Wayland 有意义；应在独立线程跑
+/// （函数阻塞到会话结束）。非 Wayland/portal 不支持返回 Err，调用方据此降级。
+#[cfg(target_os = "linux")]
+pub fn run_global_shortcuts(specs: &[ShortcutSpec], on_activated: impl FnMut(&str)) -> Result<()> {
+    platform::run_global_shortcuts(specs, on_activated)
+}
+
 /// 截取虚拟桌面上的任意矩形区域（物理像素坐标）。录屏采帧用。
 pub fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<Screenshot> {
     platform::capture_region(x, y, w, h)

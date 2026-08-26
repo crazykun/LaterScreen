@@ -663,6 +663,13 @@ fn capture_span() -> Option<OverlayShot> {
 }
 
 fn run_gui(mode: ui::Mode) -> Result<(), String> {
+    // Wayland：合成器禁止自绘覆盖层抓屏/框选，改走交互式 portal——由合成器
+    // 弹原生框选 UI，回选中区域，再进标注窗。坐标由合成器保证，绕开多屏
+    // 混合 DPI 的映射难题。Pick（取色）无对应 portal 交互，仍走原路径降级。
+    #[cfg(target_os = "linux")]
+    if lscreen_capture::is_wayland() && mode != ui::Mode::Pick {
+        return run_gui_wayland();
+    }
     // 先截屏再开窗口，避免把自己截进去。
     let OverlayShot {
         shot,
@@ -705,6 +712,57 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
                     initial_region: initial,
                     preview: false,
                     span_monitors: spanning,
+                },
+            )))
+        }),
+    )
+}
+
+/// Wayland 截图路径：交互式 portal 取选区 → 标注窗（复用 preview 标注流程）。
+///
+/// 合成器负责框选/选窗 UI 与坐标，回来的就是裁好的 RGBA；直接进带完整
+/// 工具栏的标注窗（与滚动截图预览、`annotate` 子命令同一套 SnipApp preview
+/// 路径）。用户在 portal 里取消 = 静默退出（返回 Ok，不报错）。
+#[cfg(target_os = "linux")]
+fn run_gui_wayland() -> Result<(), String> {
+    let shot = match lscreen_capture::capture_interactive() {
+        Ok(s) => s,
+        // 取消/未授权：不当错误弹窗，静默结束（与 X11 下 Esc 退出等价）
+        Err(_) => return Ok(()),
+    };
+    if shot.width == 0 || shot.height == 0 {
+        return Ok(());
+    }
+    let config = config::Config::load();
+    let (vw, vh) = (
+        (shot.width as f32 * 0.6).clamp(640.0, 960.0),
+        (shot.height as f32 * 0.5).clamp(420.0, 720.0),
+    );
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_app_id("lscreen")
+        .with_inner_size([vw, vh])
+        .with_min_inner_size([640.0, 360.0])
+        .with_title("lscreen 截图 - 标注");
+    let options = eframe::NativeOptions {
+        viewport,
+        ..Default::default()
+    };
+    run_eframe(
+        "lscreen",
+        options,
+        Box::new(move |cc| {
+            Ok(Box::new(ui::SnipApp::new(
+                cc,
+                ui::OverlayInit {
+                    shot,
+                    font: font::load_system_font(),
+                    mode: ui::Mode::Snip,
+                    config,
+                    record_region: None,
+                    windows: Vec::new(),
+                    initial_region: None,
+                    preview: true,
+                    span_monitors: false,
                 },
             )))
         }),

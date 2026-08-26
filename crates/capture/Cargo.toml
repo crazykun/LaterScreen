@@ -8,9 +8,12 @@ license.workspace = true
 x11rb = { version = "0.13", features = ["randr", "xtest", "shape"] }
 # Wayland portal（M5）：纯 D-Bus 调 xdg-desktop-portal Screenshot，
 # 不引 pipewire C 库；zbus 版本由 workspace/app 钉 =5.18 统一
-ashpd = { version = "0.13", default-features = false, features = ["screenshot", "async-io"] }
+ashpd = { version = "0.13", default-features = false, features = ["screenshot", "global_shortcuts", "async-io"] }
 # ashpd 是 async API，capture 是同步库：async-io 提供 block_on 驱动
 async-io = "2"
+# GlobalShortcuts 的 Activated 信号是 Stream，需 StreamExt::next 消费；
+# ashpd 自身即用 futures-util，版本随依赖树，不新增体积
+futures-util = { version = "0.3", default-features = false }
 # portal 返回截图文件（PNG/JPEG 视 DE 而定），需解码；与 app 共用同版本不增加体积
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
