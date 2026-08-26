@@ -52,6 +52,41 @@ pub(crate) fn apply_window_class(cc: &eframe::CreationContext<'_>) {
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn apply_window_class(_cc: &eframe::CreationContext<'_>) {}
 
+/// 取出 eframe 窗口的 X11 window id（跨屏 fullscreen 用）。非 X11 返回 None。
+#[cfg(target_os = "linux")]
+pub(crate) fn x11_window_id(cc: &eframe::CreationContext<'_>) -> Option<u32> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = cc.window_handle().ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::Xlib(h) => Some(h.window as u32),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn x11_window_id(_cc: &eframe::CreationContext<'_>) -> Option<u32> {
+    None
+}
+
+/// 跨屏覆盖层（Linux X11）：把一个 fullscreen 窗口从单块屏扩展到全部显示器。
+///
+/// 根因：`with_fullscreen(true)` 只让 WM 把窗口贴到**一块**屏（winit 无跨屏
+/// fullscreen API），去掉 fullscreen 改用手动 pos+size 又会被 WM 按工作区
+/// 钳回单屏（实测 3840→1920×1008）。EWMH 的 `_NET_WM_FULLSCREEN_MONITORS`
+/// 正是为此：给出 top/bottom/left/right 四个显示器编号，WM 让 fullscreen
+/// 窗口铺满这些显示器围成的矩形。WM 不支持时无副作用，退回单屏 fullscreen。
+///
+/// **时序**：必须在窗口 map 且进入 fullscreen 之后发 ClientMessage，
+/// CreationContext 阶段发会被 KWin 忽略——故由 SnipApp 在前几帧重发。
+#[cfg(target_os = "linux")]
+pub(crate) fn apply_fullscreen_span(window_id: u32) {
+    // 失败不致命：设置不生效时退回单屏 fullscreen（老行为）
+    let _ = lscreen_capture::set_fullscreen_span(window_id);
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn apply_fullscreen_span(_window_id: u32) {}
+
 #[derive(Parser)]
 #[command(
     name = "lscreen",
@@ -508,21 +543,17 @@ fn reexec_after_pick(sub: &str, region: &str, extra: &[String]) -> Result<(), St
 /// 交互框选录制区域：复用截图覆盖层（Mode::Record），框完即关窗；
 /// 返回绝对物理坐标的 "X,Y,W,H"；用户 Esc 取消返回 None。
 fn pick_region_interactive() -> Result<Option<String>, String> {
-    let shot = match lscreen_capture::cursor_position() {
-        Some((x, y)) => {
-            lscreen_capture::capture_at(x, y).or_else(|_| lscreen_capture::capture_primary())
-        }
-        None => lscreen_capture::capture_primary(),
-    }
-    .map_err(|e| e.to_string())?;
+    let OverlayShot {
+        shot,
+        pos,
+        size,
+        spanning,
+    } = capture_overlay()?;
     let (ox, oy) = shot.origin;
     let font = font::load_system_font();
     let config = config::Config::load();
     let (windows, initial) = overlay_window_list(&shot, ui::Mode::Record, &config);
 
-    let scale = if shot.scale > 0.0 { shot.scale } else { 1.0 };
-    let pos = eframe::egui::Pos2::new(ox as f32 / scale, oy as f32 / scale);
-    let size = eframe::egui::Vec2::new(shot.width as f32 / scale, shot.height as f32 / scale);
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_app_id("lscreen")
         .with_position(pos)
@@ -551,6 +582,7 @@ fn pick_region_interactive() -> Result<Option<String>, String> {
                     windows,
                     initial_region: initial,
                     preview: false,
+                    span_monitors: spanning,
                 },
             )))
         }),
@@ -567,9 +599,26 @@ fn pick_region_interactive() -> Result<Option<String>, String> {
     Ok(region)
 }
 
-fn run_gui(mode: ui::Mode) -> Result<(), String> {
-    // 先截屏再开窗口，避免把自己截进去。
-    // 多显示器：截鼠标所在屏，并把覆盖层窗口钉到同一块屏（指针查询不可用时回退主屏）。
+/// 覆盖层的截图来源 + 窗口几何。
+/// `spanning=true` 时截图缓冲覆盖整个虚拟桌面（多屏），窗口用显式 pos+size
+/// 铺满两块屏、**不设 fullscreen**（fullscreen 会被 WM 收敛到单块屏）；
+/// `spanning=false` 时是原「截鼠标所在屏 + fullscreen 钉该屏」路径。
+struct OverlayShot {
+    shot: lscreen_capture::Screenshot,
+    pos: eframe::egui::Pos2,
+    size: eframe::egui::Vec2,
+    spanning: bool,
+}
+
+/// 采集覆盖层截图。多显示器（仅 Linux X11，scale 恒 1，单缓冲即可覆盖整个
+/// 虚拟桌面）优先走跨屏路径，可跨两块屏框选/取色/吸附窗口；不可用时
+/// （单屏 / Wayland / Win/mac / 失败）回退到「截鼠标所在屏 + fullscreen」。
+fn capture_overlay() -> Result<OverlayShot, String> {
+    #[cfg(target_os = "linux")]
+    if let Some(span) = capture_span() {
+        return Ok(span);
+    }
+    // 回退：截鼠标所在屏，窗口 fullscreen 钉到该屏（指针查询不可用时回退主屏）。
     let shot = match lscreen_capture::cursor_position() {
         Some((x, y)) => {
             lscreen_capture::capture_at(x, y).or_else(|_| lscreen_capture::capture_primary())
@@ -577,17 +626,58 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
         None => lscreen_capture::capture_primary(),
     }
     .map_err(|e| e.to_string())?;
+    // origin 为物理像素；X11 下 winit 逻辑坐标与物理一致（scale=1），
+    // 其余平台按截屏缩放比换算
+    let scale = if shot.scale > 0.0 { shot.scale } else { 1.0 };
+    let pos = eframe::egui::Pos2::new(shot.origin.0 as f32 / scale, shot.origin.1 as f32 / scale);
+    let size = eframe::egui::Vec2::new(shot.width as f32 / scale, shot.height as f32 / scale);
+    Ok(OverlayShot {
+        shot,
+        pos,
+        size,
+        spanning: false,
+    })
+}
+
+/// 跨屏采集（Linux X11）：抓整个虚拟桌面为单缓冲。单显示器（union == 主屏）
+/// 时返回 None 交回 fullscreen 老路径——单屏行为保持不变（已验证）。
+/// 非 1 缩放（假混合 DPI）也返回 None，单缓冲映射在那种场景不可靠。
+#[cfg(target_os = "linux")]
+fn capture_span() -> Option<OverlayShot> {
+    let (mx, my, mw, mh) = lscreen_capture::monitor_bounds()?;
+    if let Some(primary) = lscreen_capture::primary_monitor_bounds() {
+        if primary == (mx, my, mw, mh) {
+            return None; // 单屏：union 即主屏，无需跨屏
+        }
+    }
+    let shot = lscreen_capture::capture_region(mx, my, mw, mh).ok()?;
+    if shot.scale != 1.0 {
+        return None;
+    }
+    Some(OverlayShot {
+        shot,
+        pos: eframe::egui::Pos2::new(mx as f32, my as f32),
+        size: eframe::egui::Vec2::new(mw as f32, mh as f32),
+        spanning: true,
+    })
+}
+
+fn run_gui(mode: ui::Mode) -> Result<(), String> {
+    // 先截屏再开窗口，避免把自己截进去。
+    let OverlayShot {
+        shot,
+        pos,
+        size,
+        spanning,
+    } = capture_overlay()?;
     let font = font::load_system_font();
     let config = config::Config::load();
     // 窗口列表同样必须先于覆盖层建窗采集（否则最前窗口就是自己）；
     // 失败（Wayland 等）返回空列表，覆盖层自动降级为纯手动框选
     let (windows, initial) = overlay_window_list(&shot, mode, &config);
 
-    // origin 为物理像素；X11 下 winit 逻辑坐标与物理一致（scale=1），
-    // 其余平台按截屏缩放比换算
-    let scale = if shot.scale > 0.0 { shot.scale } else { 1.0 };
-    let pos = eframe::egui::Pos2::new(shot.origin.0 as f32 / scale, shot.origin.1 as f32 / scale);
-    let size = eframe::egui::Vec2::new(shot.width as f32 / scale, shot.height as f32 / scale);
+    // fullscreen 让 WM 精确贴屏；跨屏时叠加 _NET_WM_FULLSCREEN_MONITORS
+    // 把这个 fullscreen 窗口从单屏扩展到全部显示器（span=true 时在建窗后设置）
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_app_id("lscreen")
         .with_position(pos)
@@ -614,6 +704,7 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
                     windows,
                     initial_region: initial,
                     preview: false,
+                    span_monitors: spanning,
                 },
             )))
         }),
@@ -1394,6 +1485,7 @@ fn run_annotate(input: Option<PathBuf>) -> Result<(), String> {
                     windows: Vec::new(),
                     initial_region: None,
                     preview: true,
+                    span_monitors: false,
                 },
             )))
         }),

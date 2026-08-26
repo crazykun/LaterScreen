@@ -163,6 +163,10 @@ pub fn set_window_icon(_window_id: u32, _rgba: &[u8], _w: u32, _h: u32) -> Resul
     Err(CaptureError("当前平台无 X11 窗口图标语义".into()))
 }
 
+pub fn set_fullscreen_span(_window_id: u32) -> Result<()> {
+    Err(CaptureError("当前平台无 X11 跨屏 fullscreen 语义".into()))
+}
+
 // --------------------------------------------- 录制选区边框（M10）
 
 /// Win/mac 暂无录制边框（与滚动截图同平台策略）：仅占位使 API 跨平台可用

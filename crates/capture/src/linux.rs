@@ -611,6 +611,55 @@ pub fn set_window_icon(window_id: u32, rgba: &[u8], w: u32, h: u32) -> Result<()
     })
 }
 
+/// 经 `_NET_WM_FULLSCREEN_MONITORS` 让 fullscreen 窗口跨全部显示器。
+/// EWMH 规定：向根窗口发 ClientMessage，data.l = [top, bottom, left, right,
+/// source]，四个整数是 RandR/Xinerama 的**显示器编号**（不是像素坐标）——
+/// WM 让窗口铺满「上边取 top 号屏、下边取 bottom 号屏、……」围成的矩形。
+/// 这里用整个虚拟桌面的四至各自对应的显示器编号，即铺满所有屏。
+fn set_fullscreen_span_conn(conn: &impl Connection, screen: &Screen, window_id: u32) -> Result<()> {
+    use x11rb::protocol::xproto::{ClientMessageEvent, EventMask};
+    let mons = monitors(conn, screen)?;
+    if mons.len() < 2 {
+        return Ok(()); // 单屏无需跨屏，也无 span 概念
+    }
+    // 四至各取对应显示器编号：top=y 最小、bottom=(y+h) 最大、
+    // left=x 最小、right=(x+w) 最大。编号即 mons 下标（与 randr_get_monitors 序一致）
+    let (mut top, mut bottom, mut left, mut right) = (0usize, 0usize, 0usize, 0usize);
+    for (i, m) in mons.iter().enumerate() {
+        if m.y < mons[top].y {
+            top = i;
+        }
+        if m.y + m.height as i32 > mons[bottom].y + mons[bottom].height as i32 {
+            bottom = i;
+        }
+        if m.x < mons[left].x {
+            left = i;
+        }
+        if m.x + m.width as i32 > mons[right].x + mons[right].width as i32 {
+            right = i;
+        }
+    }
+    let atom = intern(conn, "_NET_WM_FULLSCREEN_MONITORS");
+    if atom == 0 {
+        return Ok(()); // WM 无此原子：不支持，退回单屏 fullscreen
+    }
+    // source indication = 1（来自普通应用）
+    let data = [top as u32, bottom as u32, left as u32, right as u32, 1u32];
+    let event = ClientMessageEvent::new(32, window_id, atom, data);
+    conn.send_event(
+        false,
+        screen.root,
+        EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT,
+        event,
+    )
+    .map_err(err)?;
+    conn.sync().map_err(err)
+}
+
+pub fn set_fullscreen_span(window_id: u32) -> Result<()> {
+    with_conn(|conn, screen| set_fullscreen_span_conn(conn, screen, window_id))
+}
+
 // --------------------------------------------- 录制选区边框（M10）
 
 use x11rb::wrapper::ConnectionExt as _;

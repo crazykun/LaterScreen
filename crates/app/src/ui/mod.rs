@@ -131,6 +131,9 @@ pub struct OverlayInit {
     /// 标注预览模式（滚动长截图收尾）：普通窗口 + 可滚动画布 + 底部
     /// 标注工具栏，直接进 Editing、选区 = 整图
     pub preview: bool,
+    /// 跨屏覆盖层（仅 Linux X11）：建窗后设 _NET_WM_FULLSCREEN_MONITORS，
+    /// 让 fullscreen 窗口从单屏扩展到全部显示器，可跨屏框选
+    pub span_monitors: bool,
 }
 
 pub struct SnipApp {
@@ -179,6 +182,11 @@ pub struct SnipApp {
     /// 最近一帧画布的视图映射（文本编辑器定位用——预览模式下
     /// ctx.content_rect 与画布 rect 不再相等）
     pub last_view: View,
+    /// 跨屏覆盖层（Linux X11）：待发的 _NET_WM_FULLSCREEN_MONITORS 剩余帧数。
+    /// 大于 0 时每帧向 WM 重发（窗口 map+fullscreen 后才生效，故前几帧重试），
+    /// 归零即停。None 或 0 = 不跨屏。
+    span_wid: Option<u32>,
+    span_retries: u8,
 }
 
 impl SnipApp {
@@ -193,7 +201,15 @@ impl SnipApp {
             windows,
             initial_region,
             preview,
+            span_monitors,
         } = init;
+        // 跨屏覆盖层：记下 X11 window id，前几帧向 WM 重发
+        // _NET_WM_FULLSCREEN_MONITORS（此刻窗口尚未 map，发了也无效）
+        let span_wid = if span_monitors {
+            crate::x11_window_id(cc)
+        } else {
+            None
+        };
         // 先用 Renderer 解析一遍：epaint 内部同样用 ab_glyph，且解析失败是 panic!
         // 而非 Err。这里只把已确认可解析的字节交给 egui，坏字体退回内置字体。
         let renderer = Renderer::new(font.clone());
@@ -265,6 +281,29 @@ impl SnipApp {
                 origin: Pos2::ZERO,
                 scale: 1.0,
             },
+            span_wid,
+            // 前若干帧重发，覆盖 WM map+fullscreen 的延迟窗口
+            span_retries: if span_wid.is_some() { 8 } else { 0 },
+        }
+    }
+
+    /// 跨屏覆盖层的 `_NET_WM_FULLSCREEN_MONITORS` 重发泵（Linux X11）。
+    ///
+    /// KWin 只在窗口已 map 且处于 fullscreen 状态时才理这条 ClientMessage，
+    /// 建窗阶段发会被直接丢弃（实测属性不落、窗口维持 1920 宽）。这里在前
+    /// 若干帧每帧重发一次，覆盖 WM 的 map/fullscreen 延迟；成功与否无法同步
+    /// 得知，故按固定次数重试后停手——WM 不支持时也就自然退回单屏 fullscreen。
+    fn pump_span(&mut self, ctx: &egui::Context) {
+        if self.span_retries == 0 {
+            return;
+        }
+        if let Some(wid) = self.span_wid {
+            crate::apply_fullscreen_span(wid);
+        }
+        self.span_retries -= 1;
+        // 窗口刚起时可能没有输入事件驱动重绘，主动排下一帧把重试走完
+        if self.span_retries > 0 {
+            ctx.request_repaint();
         }
     }
 
@@ -801,6 +840,7 @@ impl eframe::App for SnipApp {
         if self.close_requested {
             return;
         }
+        self.pump_span(&ctx);
         self.handle_keys(&ctx);
         self.poll_scan(&ctx);
 

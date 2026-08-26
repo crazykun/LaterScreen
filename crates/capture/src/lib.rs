@@ -105,6 +105,14 @@ pub fn set_window_icon(window_id: u32, rgba: &[u8], w: u32, h: u32) -> Result<()
     platform::set_window_icon(window_id, rgba, w, h)
 }
 
+/// 让一个 fullscreen 窗口经 `_NET_WM_FULLSCREEN_MONITORS` 跨全部显示器
+/// （多屏覆盖层用）。给出四条边所在的显示器编号，WM 让窗口铺满其围成的
+/// 矩形。仅 Linux X11 有意义；WM 不支持时无副作用（窗口维持单屏 fullscreen），
+/// 其余平台返回 Err。窗口须已 map 且处于 fullscreen 状态时调用。
+pub fn set_fullscreen_span(window_id: u32) -> Result<()> {
+    platform::set_fullscreen_span(window_id)
+}
+
 // ---------------------------------------------------------------- 录制选区边框（M10）
 
 /// 录制期间的选区边框 guard：Linux X11 在选区外侧显示 4 条置顶、点击穿透的

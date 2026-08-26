@@ -179,6 +179,23 @@ crates/
       fullscreen 可能忽略 position hint 落错屏（CI 测不了，需双屏手动确认）
       ——✅ Deepin 25 (KWin/X11) 双屏实测通过（2026-08-17）：覆盖层正确落在
       鼠标所在屏；其他 WM（GNOME/i3 等）待社区反馈
+- [x] **跨屏覆盖层**（✅ 2026-08-26，Linux X11）：原覆盖层只截「鼠标所在屏」+
+      `with_fullscreen` 钉该屏，双屏下无法跨屏框选、另一块屏既不变暗也不可交互、
+      窗口吸附只看得到本屏窗口。改法：`capture_overlay`（main.rs）在多屏 X11 下走
+      `monitor_bounds()`+`capture_region()` 抓整个虚拟桌面为**单缓冲**（X11 scale
+      恒 1，单缓冲即可覆盖全部屏；`window_rect_in_image` 对任意 origin 都正确，
+      吸附/取色/选区无需改坐标）。单屏（union==主屏）或非 1 缩放（假混合 DPI）
+      回退老路径，行为不变。**跨屏铺满靠 EWMH `_NET_WM_FULLSCREEN_MONITORS`**：
+      仅去 `with_fullscreen`+手动 pos/size 会被 WM 按工作区钳回单屏（实测
+      3840→1920×1008）；保留 fullscreen 再发这条 ClientMessage（data=四至各自
+      的显示器编号+source）让 WM 把 fullscreen 窗扩到全部屏。**时序坑**：建窗
+      （CreationContext）阶段发会被 KWin 丢弃（窗口尚未 map/fullscreen），故
+      SnipApp 在前 8 帧每帧重发（`pump_span`，配 `request_repaint`），成功即维持。
+      WM 不支持该原子时无副作用，自然退回单屏 fullscreen。实测 Deepin 25
+      (KWin/X11) 双屏 DP-1(0,0)+DP-3(1920,0)：`gui` 与 `record --select` 覆盖层
+      均铺满 3840×1080，`_NET_WM_FULLSCREEN_MONITORS=0,0,0,1`，两屏内容都在单缓冲里
+      （右屏非黑样本 5184）。Win/mac/Wayland 维持现状（混合 DPI 单缓冲不可靠，
+      见上「混合 DPI」条）；其他 WM 待社区反馈
 - [x] CI：三平台构建产物 + 体积回归检查（见 .github/workflows/ci.yml，含
       fmt/clippy 门槛）；openh264 静态链接后 release 12.4MB（预算 20MB 内，
       2026-08-20 实测）。远期注意：ldd 白名单对全静态产物会误报
