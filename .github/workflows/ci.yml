@@ -4,11 +4,24 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # 周一 03:00 UTC：依赖版本没变也会冒出新公告，纯 PR 触发看不见这类
+    - cron: '0 3 * * 1'
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # 供应链：RUSTSEC 安全公告扫描。只对真实漏洞失败；unmaintained/unsound
+  # 属警告不拦截（gtk 系警告来自 tray-icon 的 Win/mac 依赖，Linux 扫描
+  # 全量 lock 时必然出现）
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-audit
+      - run: cargo audit
   # 格式与 lint 门槛（快，先失败）
   lint:
     runs-on: ubuntu-latest

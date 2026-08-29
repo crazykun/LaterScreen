@@ -76,22 +76,34 @@ impl TextRecognizer for Tesseract {
             .spawn()
             .map_err(|e| OcrError(format!("启动 tesseract 失败: {e}")))?;
 
-        child
+        // stdin 写入放独立线程：父进程同步写完才 wait 的写法在「子进程
+        // stdout 输出超过管道缓冲（典型 64KiB，密集文本的 TSV 会超）」时
+        // 死锁——子进程阻塞在写 stdout 便不再读 stdin，父进程卡在 write_all，
+        // 互等对方。分开后 wait_with_output 的内部读线程与写入线程并行排水。
+        let mut stdin = child
             .stdin
             .take()
-            .ok_or_else(|| OcrError("无法写入 tesseract stdin".into()))?
-            .write_all(&png)
-            .map_err(|e| OcrError(format!("写入图像失败: {e}")))?;
+            .ok_or_else(|| OcrError("无法写入 tesseract stdin".into()))?;
+        let writer = std::thread::spawn(move || stdin.write_all(&png));
 
         let out = child
             .wait_with_output()
             .map_err(|e| OcrError(format!("等待 tesseract 失败: {e}")))?;
+        // 子进程退出状态更接近根因（如语言包缺失），先于写入错误上报；
+        // 子进程提前退出时 stdin 会得到 EPIPE，属预期路径
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             return Err(OcrError(format!(
                 "tesseract 退出异常: {}",
                 stderr.lines().last().unwrap_or("未知错误")
             )));
+        }
+        // join 传播写入结果；线程只做 write_all 不会 panic，仍兜底防毒锁
+        if let Err(e) = writer
+            .join()
+            .unwrap_or_else(|_| Err(std::io::Error::other("写入线程异常退出")))
+        {
+            return Err(OcrError(format!("写入图像失败: {e}")));
         }
 
         Ok(parse_tsv(&String::from_utf8_lossy(&out.stdout)))
@@ -216,5 +228,41 @@ mod tests {
         assert!((out.blocks[0].confidence.unwrap() - 0.93).abs() < 0.01);
         assert_eq!(out.blocks[1].text, "next");
         assert_eq!(out.plain_text(), "hello world\nnext");
+    }
+
+    /// 真机子进程冒烟（本机装了 tesseract 才跑；CI 无 tesseract 自动跳过）：
+    /// 走完整的「PNG 编码 → stdin 写入线程 → TSV 回读」链路，主要回归
+    /// stdin/stdout 双管道并发排水（写入挪独立线程）后不再可能互等死锁。
+    /// 大尺寸图像使 stdin 侧数据量远超管道缓冲，双向都压满过。
+    #[test]
+    fn recognize_via_local_tesseract_if_available() {
+        let t = Tesseract::new(&[]);
+        if !t.available() {
+            return;
+        }
+        // 1600×1200 渐变噪声图：足够大（7MB+ RGBA）逼真管道压力，
+        // 内容无文字则识别为空块，属正常结果——这里只验证链路不挂不错
+        let (w, h) = (1600u32, 1200u32);
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                rgba.extend_from_slice(&[(x % 251) as u8, (y % 241) as u8, 0x80, 0xff]);
+            }
+        }
+        let out = t.recognize(&rgba, w, h).expect("子进程链路应成功");
+        // 噪声图无文字：blocks 允许为空，但 plain_text 必须可调用不 panic
+        let _ = out.plain_text();
+    }
+
+    #[test]
+    fn recognize_reports_bad_language_clearly() {
+        // 语言包缺失：子进程非零退出，报错信息来自 stderr 且不 panic
+        let t = Tesseract::new(&["no_such_lang".to_string()]);
+        if !t.available() {
+            return;
+        }
+        let rgba = vec![0xffu8; 4 * 4 * 4];
+        let err = t.recognize(&rgba, 4, 4).unwrap_err();
+        assert!(err.0.contains("tesseract 退出异常"), "got: {}", err.0);
     }
 }

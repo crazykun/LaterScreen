@@ -55,6 +55,11 @@ struct Index {
 
 /// 历史副本目录：缓存目录下的 `history/`（见 `config::cache_dir` 的理由）。
 fn history_dir() -> PathBuf {
+    // 测试注入：指向独立临时目录，避免动到开发者本机真实历史
+    #[cfg(test)]
+    if let Some(d) = TEST_DIR.lock().unwrap().clone() {
+        return d;
+    }
     crate::config::cache_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("history")
@@ -207,13 +212,25 @@ fn load_index() -> Index {
     }
 }
 
+/// 索引落盘走「同目录临时文件 + rename 原子替换」：GUI 保存与 CLI 落盘
+/// 并发时，正在轮询 mtime 的历史面板只会看到旧版或新版完整 TOML，绝不会
+/// 读到半截内容（直接 write 是 truncate-再写，读者可能撞上空/残文件）。
+/// rename 在同一文件系统上原子（POSIX 语义；Windows 侧 std 底层用
+/// MOVEFILE_REPLACE_EXISTING，同样替换目标）。临时文件名带 PID：两个进程
+/// 同时写索引也不会互踩对方的临时文件。rename 失败（极端如目录只读）时
+/// 退回直接写，保留原先的尽力而为语义。
 fn save_index(index: &Index) {
     let path = index_path();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     if let Ok(text) = toml::to_string_pretty(index) {
-        let _ = std::fs::write(&path, text);
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        let renamed = std::fs::write(&tmp, &text).and_then(|_| std::fs::rename(&tmp, &path));
+        if renamed.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::write(&path, text);
+        }
     }
 }
 
@@ -247,7 +264,14 @@ pub fn record_rgba(rgba: &[u8], w: u32, h: u32, kind: Kind, source: Option<&std:
     {
         return;
     }
-    record_png(&png, kind, source, w, h);
+    record_png(
+        &png,
+        kind,
+        source,
+        w,
+        h,
+        crate::config::Config::load().history_max(),
+    );
 }
 
 /// 记录一个已落盘的图片文件（PNG）到历史：解码 → 复制为 PNG 副本。
@@ -266,11 +290,27 @@ pub fn record_file(path: &std::path::Path, kind: Kind, source: Option<&std::path
     {
         return;
     }
-    record_png(&png, kind, source, w, h);
+    record_png(
+        &png,
+        kind,
+        source,
+        w,
+        h,
+        crate::config::Config::load().history_max(),
+    );
 }
 
 /// 追加一条历史记录并裁到 `history_max` 上限。png 为副本字节。
-fn record_png(png: &[u8], kind: Kind, source: Option<&std::path::Path>, w: u32, h: u32) {
+/// max 由公开入口从配置读取后传入：内部函数不碰用户配置，
+/// 测试也因此不依赖宿主机的 config.toml（否则本机改过上限会漂移）。
+fn record_png(
+    png: &[u8],
+    kind: Kind,
+    source: Option<&std::path::Path>,
+    w: u32,
+    h: u32,
+    max: usize,
+) {
     let dir = history_dir();
     if std::fs::create_dir_all(&dir).is_err() {
         return;
@@ -296,7 +336,7 @@ fn record_png(png: &[u8], kind: Kind, source: Option<&std::path::Path>, w: u32, 
         height: h,
         source: source.map(|p| p.display().to_string()).unwrap_or_default(),
     });
-    trim(&mut index);
+    trim(&mut index, max);
     save_index(&index);
 }
 
@@ -327,8 +367,9 @@ pub fn clear_all() -> usize {
 }
 
 /// 裁到 history_max：按时间戳倒序保留前 N，删除被裁条目的副本文件。
-fn trim(index: &mut Index) {
-    let max = crate::config::Config::load().history_max();
+/// max 由调用方传入（生产路径来自配置；测试直接给数，不依赖宿主机的
+/// 用户配置——否则开发者本机改过 history_max 会导致测试结果漂移）。
+fn trim(index: &mut Index, max: usize) {
     if index.items.len() <= max {
         return;
     }
@@ -970,4 +1011,381 @@ fn fmt_time(secs: u64) -> String {
     }
     // 非 unix / 转换失败：退化为秒数
     format!("{secs}s")
+}
+
+// ---------------------------------------------------------------- 测试
+
+/// 测试注入的历史目录：guard 存续期间 `history_dir()` 指向独立临时目录。
+/// 目录覆盖本身用一把锁、测试串行化用另一把——两者必须分开，否则
+/// guard 若持有目录锁，`history_dir()` 里的读取会自我死锁。
+#[cfg(test)]
+static TEST_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+#[cfg(test)]
+static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+struct TestDir {
+    /// 串行化所有用到目录注入的测试（并行测试会互踩同一个全局槽）
+    _serial: std::sync::MutexGuard<'static, ()>,
+    dir: PathBuf,
+}
+
+#[cfg(test)]
+impl TestDir {
+    fn new(tag: &str) -> Self {
+        let serial = TEST_SERIAL.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("lscreen-hist-test-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        *TEST_DIR.lock().unwrap() = Some(dir.clone());
+        Self {
+            _serial: serial,
+            dir,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        *TEST_DIR.lock().unwrap() = None;
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 2×2 的可辨识 RGBA（每像素值 = x + y*10 + i）。
+    fn rgba_3x2() -> Vec<u8> {
+        let mut v = Vec::new();
+        for y in 0..2u8 {
+            for x in 0..3u8 {
+                v.extend_from_slice(&[x * 40, y * 80, 0x11, 0xff]);
+            }
+        }
+        v
+    }
+
+    /// 编码好的最小 PNG 字节（供 record_png 直用）。
+    fn tiny_png() -> Vec<u8> {
+        let mut png = Vec::new();
+        image::RgbaImage::from_raw(3, 2, rgba_3x2())
+            .unwrap()
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        png
+    }
+
+    fn item(filename: &str, timestamp: u64) -> Item {
+        Item {
+            filename: filename.to_string(),
+            timestamp,
+            kind: Kind::Shot,
+            width: 1,
+            height: 1,
+            source: String::new(),
+        }
+    }
+
+    // ---- 记录 / 读取 ----
+
+    #[test]
+    fn record_rgba_roundtrip() {
+        let _t = TestDir::new("record-rgba");
+        record_rgba(&rgba_3x2(), 3, 2, Kind::Shot, None);
+        let items = list();
+        assert_eq!(items.len(), 1);
+        let it = &items[0];
+        assert_eq!((it.width, it.height), (3, 2));
+        assert_eq!(it.kind, Kind::Shot);
+        assert!(it.source.is_empty());
+        let copy = file_path(it);
+        assert!(copy.starts_with(history_dir()));
+        let head = std::fs::read(&copy).unwrap();
+        assert_eq!(&head[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn record_file_keeps_source() {
+        let _t = TestDir::new("record-file");
+        let src = _t.dir.join("src.png");
+        image::RgbaImage::from_raw(3, 2, rgba_3x2())
+            .unwrap()
+            .save_with_format(&src, image::ImageFormat::Png)
+            .unwrap();
+        record_file(&src, Kind::Pin, Some(&src));
+        let items = list();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, Kind::Pin);
+        assert_eq!(items[0].source, src.display().to_string());
+    }
+
+    #[test]
+    fn record_png_dedups_same_millis() {
+        let _t = TestDir::new("dedup");
+        let png = tiny_png();
+        // 直接经 record_png（显式 max，不读宿主机配置）连记两条：
+        // 核心承诺是「已存在的副本文件绝不被覆盖」
+        record_png(&png, Kind::Shot, None, 3, 2, 10);
+        let first = list()[0].filename.clone();
+        let before = std::fs::read(history_dir().join(&first)).unwrap();
+        record_png(&png, Kind::Shot, None, 3, 2, 10);
+        // 旧副本仍在且内容未被改动
+        assert_eq!(std::fs::read(history_dir().join(&first)).unwrap(), before);
+        assert_eq!(list().len(), 2);
+    }
+
+    #[test]
+    fn list_sorted_newest_first() {
+        let _t = TestDir::new("sort");
+        let mut index = Index::default();
+        for (name, ts) in [("a.png", 30u64), ("b.png", 10), ("c.png", 20)] {
+            index.items.push(item(name, ts));
+        }
+        save_index(&index);
+        let names: Vec<String> = list().iter().map(|i| i.filename.clone()).collect();
+        assert_eq!(names, ["a.png", "c.png", "b.png"]);
+    }
+
+    #[test]
+    fn corrupt_index_degrades_to_empty() {
+        let _t = TestDir::new("corrupt");
+        std::fs::write(index_path(), "not a toml {{{").unwrap();
+        assert!(list().is_empty());
+    }
+
+    #[test]
+    fn index_mtime_appears_after_save() {
+        let _t = TestDir::new("mtime");
+        assert!(index_mtime().is_none());
+        save_index(&Index::default());
+        assert!(index_mtime().is_some());
+    }
+
+    #[test]
+    fn save_index_is_atomic_replace() {
+        let _t = TestDir::new("atomic");
+        let mut index = Index::default();
+        index.items.push(item("x.png", 1));
+        save_index(&index);
+        // 原子写不留临时残留
+        let leftovers = std::fs::read_dir(history_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(leftovers, 0);
+        // 写出的内容可完整读回
+        let back = load_index();
+        assert_eq!(back.items.len(), 1);
+        assert_eq!(back.items[0].filename, "x.png");
+    }
+
+    // ---- 裁剪 / 清空 / 体积 ----
+
+    #[test]
+    fn trim_removes_oldest_and_files() {
+        let _t = TestDir::new("trim");
+        let dir = history_dir();
+        let mut index = Index::default();
+        for i in 0..5u64 {
+            let name = format!("{i}.png");
+            std::fs::write(dir.join(&name), b"x").unwrap();
+            index.items.push(item(&name, 100 + i));
+        }
+        trim(&mut index, 3);
+        assert_eq!(index.items.len(), 3);
+        // 保留时间戳最新的 3 条，且已按倒序排好
+        let ts: Vec<u64> = index.items.iter().map(|i| i.timestamp).collect();
+        assert_eq!(ts, [104, 103, 102]);
+        // 被裁条目的副本文件连带删除
+        assert!(!dir.join("0.png").exists());
+        assert!(!dir.join("1.png").exists());
+        assert!(dir.join("4.png").exists());
+    }
+
+    #[test]
+    fn trim_noop_when_within_max() {
+        let mut index = Index::default();
+        index.items.push(item("a.png", 1));
+        trim(&mut index, 10);
+        assert_eq!(index.items.len(), 1);
+    }
+
+    #[test]
+    fn clear_all_removes_registered_files_only() {
+        let _t = TestDir::new("clear");
+        let png = tiny_png();
+        record_png(&png, Kind::Shot, None, 3, 2, 10);
+        record_png(&png, Kind::Pin, None, 3, 2, 10);
+        let outsider = history_dir().join("keep-me.png");
+        std::fs::write(&outsider, b"not registered").unwrap();
+
+        let n = clear_all();
+        assert_eq!(n, 2);
+        assert!(list().is_empty());
+        assert_eq!(total_bytes(), 0);
+        // 索引外的文件不删（clear_all 只删登记过的）
+        assert!(outsider.exists());
+    }
+
+    #[test]
+    fn total_bytes_ignores_missing_and_unregistered() {
+        let _t = TestDir::new("bytes");
+        record_rgba(&rgba_3x2(), 3, 2, Kind::Shot, None);
+        std::fs::write(history_dir().join("unregistered.png"), vec![0u8; 777]).unwrap();
+        let items = list();
+        let expected: u64 = items
+            .iter()
+            .filter_map(|i| file_path(i).metadata().ok())
+            .map(|m| m.len())
+            .sum();
+        assert!(expected > 0);
+        assert_eq!(total_bytes(), expected);
+    }
+
+    // ---- 单例锁 / 信号 ----
+
+    #[test]
+    fn lock_with_stale_pid_taken_over() {
+        let _t = TestDir::new("lock-stale");
+        // 崩溃残留的 stale 锁：PID 远超三平台上限，必然不存在
+        std::fs::write(lock_path(), format!("{}\n", u32::MAX - 10)).unwrap();
+        assert!(acquire_single_instance());
+        assert_eq!(
+            std::fs::read_to_string(lock_path()).unwrap().trim(),
+            std::process::id().to_string()
+        );
+        release_single_instance();
+        assert!(!lock_path().exists());
+    }
+
+    #[test]
+    fn lock_with_own_pid_taken_over() {
+        // 残留锁的 PID 恰好被本进程复用：视为死锁残留，接管而非退出
+        let _t = TestDir::new("lock-own");
+        std::fs::write(lock_path(), format!("{}\n", std::process::id())).unwrap();
+        assert!(acquire_single_instance());
+        release_single_instance();
+        assert!(!lock_path().exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn lock_with_alive_pid_leaves_raise_signal() {
+        let _t = TestDir::new("lock-alive");
+        // 拉一个真活着的进程占锁（sleep 三平台可移植性差，仅 unix 验证）
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        std::fs::write(lock_path(), format!("{}\n", child.id())).unwrap();
+        // 第二实例：退出并留下唤起信号
+        assert!(!acquire_single_instance());
+        assert!(raise_path().exists());
+        // 信号被消费一次即失效
+        assert!(take_raise_request());
+        assert!(!take_raise_request());
+        let _ = child.kill();
+        let _ = child.wait();
+        // 持锁进程死后锁可被接管
+        assert!(acquire_single_instance());
+    }
+
+    #[test]
+    fn release_keeps_foreign_lock() {
+        let _t = TestDir::new("lock-foreign");
+        std::fs::write(lock_path(), "12345\n").unwrap();
+        release_single_instance();
+        assert!(lock_path().exists());
+        assert_eq!(std::fs::read_to_string(lock_path()).unwrap(), "12345\n");
+    }
+
+    #[test]
+    fn acquire_clears_stale_signals() {
+        // 新面板接锁时清掉残留的 raise/quit：否则刚开面板就会自 Focus / 自关
+        let _t = TestDir::new("lock-clear-signals");
+        std::fs::write(lock_path(), format!("{}\n", u32::MAX - 10)).unwrap();
+        std::fs::write(raise_path(), b"1").unwrap();
+        std::fs::write(quit_path(), b"1").unwrap();
+        assert!(acquire_single_instance());
+        assert!(!raise_path().exists());
+        assert!(!quit_path().exists());
+    }
+
+    #[test]
+    fn quit_signal_consumed_once() {
+        let _t = TestDir::new("quit-signal");
+        assert!(!take_quit_request());
+        assert!(!take_raise_request());
+        std::fs::write(quit_path(), b"1").unwrap();
+        assert!(take_quit_request());
+        assert!(!take_quit_request());
+    }
+
+    // ---- 纯函数 ----
+
+    #[test]
+    fn human_size_boundaries() {
+        assert_eq!(HistoryApp::human_size(0), "1 KB");
+        assert_eq!(HistoryApp::human_size(512), "1 KB");
+        assert_eq!(HistoryApp::human_size(2048), "2 KB");
+        assert_eq!(HistoryApp::human_size(3 * 1024 * 1024), "3.0 MB");
+        assert_eq!(HistoryApp::human_size(1024 * 1024), "1.0 MB");
+    }
+
+    #[test]
+    fn short_dir_variants() {
+        assert_eq!(
+            short_dir(std::path::Path::new("/home/u/pics/a.png")),
+            "pics/a.png"
+        );
+        // 无父目录名（相对路径）：退化为完整显示
+        assert_eq!(short_dir(std::path::Path::new("a.png")), "a.png");
+        assert_eq!(short_dir(std::path::Path::new("/a.png")), "/a.png");
+    }
+
+    #[test]
+    fn resolve_source_requires_existing() {
+        let it = item("x.png", 1);
+        assert!(resolve_source(&it).is_none()); // 空 source
+        let mut it = it;
+        it.source = "/definitely/not/here.png".to_string();
+        assert!(resolve_source(&it).is_none()); // 不存在
+        let _t = TestDir::new("resolve");
+        let p = _t.dir.join("exists.png");
+        std::fs::write(&p, b"x").unwrap();
+        it.source = p.display().to_string();
+        assert_eq!(resolve_source(&it), Some(p));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fmt_time_shape() {
+        // 本地时区不定，但格式必须是 "MM-DD HH:MM"（unix 路径）
+        let s = fmt_time(1_753_900_000);
+        assert_eq!(s.len(), 11);
+        let parts: Vec<&str> = s.split(['-', ' ', ':']).collect();
+        assert_eq!(parts.len(), 4);
+        assert!(parts
+            .iter()
+            .all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_digit())));
+        let (mo, d, h, mi): (u32, u32, u32, u32) = (
+            parts[0].parse().unwrap(),
+            parts[1].parse().unwrap(),
+            parts[2].parse().unwrap(),
+            parts[3].parse().unwrap(),
+        );
+        assert!((1..=12).contains(&mo) && (1..=31).contains(&d));
+        assert!(h < 24 && mi < 60);
+    }
+
+    #[test]
+    #[cfg(not(unix))]
+    fn fmt_time_fallback_shape() {
+        // 非 unix 无 localtime_r 兜底：秒数形式
+        assert!(fmt_time(1_753_900_000).ends_with('s'));
+    }
 }

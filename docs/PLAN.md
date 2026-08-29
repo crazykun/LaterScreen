@@ -530,6 +530,29 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
 - [ ] Win/mac 指针查询（capture/src/other.rs cursor_position 返回 None）：
       windows-rs GetCursorPos / objc2 NSEvent.mouseLocation，补齐后多屏跟随生效
 
+### 已修缺陷（review 2026-08-29）
+
+- [x] tesseract 管道互等死锁隐患：原先父进程同步 `write_all` PNG（数 MB）
+      后才 `wait_with_output`，密集文本的 TSV 输出超过管道缓冲（64KiB）时
+      子进程阻塞在写 stdout、不再读 stdin，双方互等。stdin 写入挪独立线程
+      与读侧并行排水（ocrs_engine 同类结构不受影响）。本机 tesseract 真机
+      验证 1600×1200 大图链路无挂起
+- [x] 历史 index.toml 非原子写：GUI 保存与 CLI 落盘并发时轮询面板可能读到
+      truncate 后的半截 TOML（解析失败退空列表 = 丢一条）。改为同目录
+      `<pid>.tmp` + rename 原子替换（Win 侧 std 底层 MOVEFILE_REPLACE_EXISTING
+      同样替换目标），rename 失败退回旧直写语义
+- [x] 托盘（Win/mac）两处 `expect` 硬崩：图标解码失败/托盘创建失败会
+      panic 掉常驻进程，连全局热键一起带走。降级为无图标托盘 / 仅热键
+      常驻 + stderr 告警；setup 只尝试一次（防 resumed 重试刷屏）
+- [x] CI 补供应链门槛：cargo audit（RUSTSEC 扫描，周一定时 + PR；只对
+      真实漏洞失败，gtk 系 unmaintained 警告来自 tray-icon 的 Win/mac 依赖
+      不拦截）。当前 lock 无已知漏洞
+- [x] 测试盲区补齐：history.rs（索引排序/原子写/裁剪删文件/清空只删登记
+      项/单例锁 stale-PID 接管/raise-quit 信号消费）与 export.rs（crop_rgba
+      边界钳制与退化拒绝/utc_civil 闰年边界/save_png 扩展名语义/save_path
+      防覆盖）。测试注入缝：history_dir 可指向临时目录（串行锁防并行互踩），
+      record_png/trim 参数化 max 后不再依赖宿主机用户配置
+
 ### 已修缺陷（review 2026-08-18）
 
 - [x] 多屏负坐标区域截屏错位：capture_region 原先钳到根窗口 [0,w]×[0,h]，

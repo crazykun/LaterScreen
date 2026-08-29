@@ -707,6 +707,9 @@ mod native_impl {
         hotkeys: Hotkeys,
         last_mtime: Option<std::time::SystemTime>,
         mtime_initialized: bool,
+        /// setup 是否已尝试过。resumed 可能多次触发，失败也不再重试
+        /// （每次重建都报一遍错只是刷屏，热键常驻已是最终降级形态）
+        setup_done: bool,
     }
 
     impl NativeApp {
@@ -721,23 +724,31 @@ mod native_impl {
                 let _ = menu.append(&item);
                 items.insert(id, item);
             }
+            // 图标解码失败不致命：内嵌资源是构建期不变量，这里只是防御——
+            // 无图标的托盘仍可点击出菜单，不值得为它崩掉常驻进程
             let icon = icon_rgba(32)
-                .and_then(|img| tray_icon::Icon::from_rgba(img.into_raw(), 32, 32).ok())
-                .expect("托盘图标解码失败");
+                .and_then(|img| tray_icon::Icon::from_rgba(img.into_raw(), 32, 32).ok());
             let mut builder = TrayIconBuilder::new()
                 .with_menu(Box::new(menu))
-                .with_tooltip(base_tooltip())
-                .with_icon(icon);
+                .with_tooltip(base_tooltip());
+            if let Some(icon) = icon {
+                builder = builder.with_icon(icon);
+            }
             // Windows：右键才弹菜单，左键保留为快速截图入口（tray-icon 的
             // menu_on_left_click 默认开——左键会同时弹菜单并触发快速动作）。
             // macOS 保持默认：左键弹菜单符合系统惯例，见 handle() 的 TrayClick。
             if cfg!(windows) {
                 builder = builder.with_menu_on_left_click(false);
             }
-            let tray = builder.build().expect("创建托盘失败");
+            match builder.build() {
+                Ok(tray) => self.tray = Some(tray),
+                // 创建失败（托盘服务不可用等）降级为「仅热键」常驻：事件循环
+                // 与全局热键照常工作。panic 只会连热键一起带走，且 GUI 子系统
+                // 下用户根本看不到 panic 信息
+                Err(e) => eprintln!("lscreen: 托盘创建失败，仅全局热键可用: {e}"),
+            }
             self.hotkeys = Hotkeys::new();
             self.hotkeys.apply(&self.cfg);
-            self.tray = Some(tray);
             self.menu_items = items;
         }
 
@@ -811,7 +822,8 @@ mod native_impl {
 
     impl ApplicationHandler<UserEvent> for NativeApp {
         fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
-            if self.tray.is_none() {
+            if !self.setup_done {
+                self.setup_done = true;
                 self.setup();
             }
         }
@@ -892,6 +904,7 @@ mod native_impl {
             hotkeys: Hotkeys::new(),
             last_mtime: None,
             mtime_initialized: false,
+            setup_done: false,
         };
         event_loop
             .run_app(&mut app)

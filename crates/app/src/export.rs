@@ -445,3 +445,140 @@ pub fn clipd_main() -> Result<(), String> {
             .map_err(|e| e.to_string()),
     }
 }
+
+// ---------------------------------------------------------------- 测试
+
+#[cfg(test)]
+mod tests {
+    use lscreen_core::{RectF, P2};
+
+    use super::*;
+
+    /// 3×2 可辨识 RGBA：像素 (x,y) 的首通道 = x*40 + y*10。
+    fn rgba_3x2() -> Vec<u8> {
+        let mut v = Vec::new();
+        for y in 0..2u8 {
+            for x in 0..3u8 {
+                v.extend_from_slice(&[x * 40 + y * 10, 0, 0, 0xff]);
+            }
+        }
+        v
+    }
+
+    fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> RectF {
+        RectF::from_points(P2::new(x0, y0), P2::new(x1, y1))
+    }
+
+    // ---- crop_rgba ----
+
+    #[test]
+    fn crop_interior_exact_pixels() {
+        let img = rgba_3x2();
+        let (out, w, h) = crop_rgba(&img, 3, 2, rect(1.0, 0.0, 3.0, 1.0)).unwrap();
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(out.len(), 2 * 4);
+        // 行 0 的 x=1..3 两个像素，逐字节比对
+        assert_eq!(&out, &img[4..12]);
+    }
+
+    #[test]
+    fn crop_clamps_to_image_bounds() {
+        let img = rgba_3x2();
+        // 负 origin / 越界 max 一律钳到图像范围，不 panic、不丢整幅
+        let (out, w, h) = crop_rgba(&img, 3, 2, rect(-5.0, -5.0, 99.0, 99.0)).unwrap();
+        assert_eq!((w, h), (3, 2));
+        assert_eq!(out, img);
+    }
+
+    #[test]
+    fn crop_rounds_fractional_coords() {
+        let img = rgba_3x2();
+        // 小数坐标按 round 取整：0.4→0、1.5→2
+        let (out, w, h) = crop_rgba(&img, 3, 2, rect(0.4, 0.0, 1.5, 2.0)).unwrap();
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(&out[..4], &img[0..4]);
+        assert_eq!(&out[8..12], &img[3 * 4..4 * 4]); // 第二行首像素 = (0,1)
+    }
+
+    #[test]
+    fn crop_degenerate_is_none() {
+        let img = rgba_3x2();
+        // 零面积（钳后退化）：绝不静默变成全图
+        assert!(crop_rgba(&img, 3, 2, rect(1.0, 1.0, 1.0, 1.0)).is_none());
+        // 完全落在图像外：钳成零宽
+        assert!(crop_rgba(&img, 3, 2, rect(10.0, 10.0, 20.0, 20.0)).is_none());
+        // 负方向的退化
+        assert!(crop_rgba(&img, 3, 2, rect(-9.0, -9.0, -1.0, -1.0)).is_none());
+    }
+
+    // ---- 时间换算 ----
+
+    #[test]
+    fn utc_civil_known_values() {
+        assert_eq!(utc_civil(0), (1970, 1, 1, 0, 0, 0));
+        assert_eq!(utc_civil(86_399), (1970, 1, 1, 23, 59, 59));
+        // 闰日：2000-02-29（400 年一遇的世纪闰年）
+        assert_eq!(utc_civil(951_782_400), (2000, 2, 29, 0, 0, 0));
+        // 2100-01-01：世纪年非闰的边界（2100-02 无 29 日）
+        assert_eq!(utc_civil(4_102_444_800), (2100, 1, 1, 0, 0, 0));
+        // 负秒（div_euclid/rem_euclid 语义，不容许负余数）
+        assert_eq!(utc_civil(-1), (1969, 12, 31, 23, 59, 59));
+    }
+
+    #[test]
+    fn local_civil_within_day_of_utc() {
+        // 本地时与 UTC 偏移最大 ±14h：同一时刻的日期至多差一天
+        let (y, m, d, ..) = local_civil(0);
+        assert!(
+            [(1969, 12, 31), (1970, 1, 1), (1970, 1, 2)].contains(&(y, m, d)),
+            "unexpected local date for epoch: {y}-{m}-{d}"
+        );
+    }
+
+    // ---- save_png / save_path ----
+
+    #[test]
+    fn save_png_appends_extension() {
+        let dir = std::env::temp_dir().join(format!("lscreen-export-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let img = rgba_3x2();
+        let out = save_png(&img, 3, 2, &dir.join("noext")).unwrap();
+        assert_eq!(out.extension().unwrap(), "png");
+        assert!(out.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_png_rejects_non_png() {
+        let dir = std::env::temp_dir().join(format!("lscreen-export-test2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // RGBA→JPEG 的费解报错曾在 M1 review 修过：现在必须明确拒绝
+        let err = save_png(&rgba_3x2(), 3, 2, &dir.join("x.jpg")).unwrap_err();
+        assert!(err.contains("仅支持 PNG"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_path_never_returns_existing_file() {
+        let dir = std::env::temp_dir().join(format!("lscreen-export-test3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = crate::config::Config {
+            save_dir: dir.display().to_string(),
+            ..Default::default()
+        };
+        let p1 = save_path(&cfg, "png");
+        assert_eq!(p1.parent(), Some(dir.as_path()));
+        assert_eq!(p1.extension().unwrap(), "png");
+        // 占住 p1：下一次生成（无论同秒加 _1 还是跨秒新时间戳）都不得撞名
+        std::fs::write(&p1, b"x").unwrap();
+        let p2 = save_path(&cfg, "png");
+        assert_ne!(p1, p2);
+        assert!(!p2.exists());
+        // 防覆盖探测针对最终扩展名（gif 查重不吃 png 的账）
+        let g1 = save_path(&cfg, "gif");
+        assert_eq!(g1.extension().unwrap(), "gif");
+        assert_ne!(g1, p1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
