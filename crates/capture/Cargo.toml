@@ -32,3 +32,18 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# macOS：滚轮/指针合成走 CoreGraphics C API（extern 直连，见 other.rs 的
+# mac 模块）；录制边框条窗口用 NSWindow。objc2 全家已随 xcap 进入依赖树，
+# 这里仅声明为直接依赖并按需开 feature，不新增编译产物
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSColor",
+    "NSGraphics",
+    "NSWindow",
+    "objc2-core-foundation",
+] }
+objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
+
+
