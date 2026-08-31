@@ -19,3 +19,16 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 xcap = "0.9"
+
+# Windows：滚轮/指针合成（SendInput/SetCursorPos）+ 录制边框条窗口（user32/gdi32）。
+# windows-sys 只声明系统 DLL 的外部函数，不引入链接型依赖；与 app 同版本共用
+# 同一份编译产物
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+

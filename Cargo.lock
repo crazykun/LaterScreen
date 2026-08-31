@@ -2547,6 +2547,7 @@ dependencies = [
  "async-io",
  "futures-util",
  "image",
+ "windows-sys 0.61.2",
  "x11rb",
  "xcap",
 ]
