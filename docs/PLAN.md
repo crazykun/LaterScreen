@@ -99,6 +99,7 @@ crates/
 | v0.6.1 | 2026-08-25 | macOS 修到能用：录屏/滚动截图选区后不再消失（同进程跑不了第二个事件循环，框选后 re-exec 转交）、托盘左键弹菜单（不再叠加截图）、托盘不占 Dock（Accessory）、历史面板移到右上角 |
 | **v0.7.0** | **2026-08-26** | **多屏与 Wayland：双屏跨屏覆盖层（`_NET_WM_FULLSCREEN_MONITORS` 铺满虚拟桌面，可跨屏框选）、Wayland 交互式 portal 截图 + GlobalShortcuts 全局热键；修滚动截图无法滚动时像崩溃（退化普通区域截图）、托盘退出关历史面板、滚动截图选区边框、预览长图 Select 可拖动** |
 | v0.7.1 | 2026-08-29 | 健壮性：修 tesseract 管道互等死锁隐患（stdin 写入挪独立线程）、历史 index.toml 原子写（tmp+rename）、Win/mac 托盘创建失败降级仅热键常驻；history/export 补 32 个单测（详见「已修缺陷 review 2026-08-29」）、CI 增 cargo audit 供应链门槛 |
+| **v0.8.0** | **2026-08-31** | **三平台能力对齐：Windows/macOS 滚动长截图（SendInput / CGEvent 合成滚轮+指针）、Win/mac 录屏与滚动截图范围红框（画选区外侧保证不入镜）、mac 高分屏区域截图物理↔逻辑坐标换算修复；修 history 测试写真实缓存目录致 CI 自 v0.7.1 全红、release 矩阵砍 armv7/i686/rpm（0 下载，附件 23→13）** |
 
 ### M1 截图 + 标注 ✅（核心价值）
 - [x] workspace 骨架 + 体积优化 profile
