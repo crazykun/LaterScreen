@@ -43,21 +43,21 @@ linker_for() {
 usable() {
     local t=$1 linker
     if [[ $t == *apple-darwin* && $HOST != *apple-darwin* ]]; then
-        echo "  跳过 $t：macOS 目标需 Apple SDK，请走 GitHub Actions release 工作流" >&2
+        echo "  跳过 ${t}：macOS 目标需 Apple SDK，请走 GitHub Actions release 工作流" >&2
         return 1
     fi
     if [[ $t == *windows-msvc* && $HOST != *windows* ]]; then
-        echo "  跳过 $t：MSVC 目标只能在 Windows 上构建（本地可用 x86_64-pc-windows-gnu 代替）" >&2
+        echo "  跳过 ${t}：MSVC 目标只能在 Windows 上构建（本地可用 x86_64-pc-windows-gnu 代替）" >&2
         return 1
     fi
     linker=$(linker_for "$t")
     if [[ -n $linker ]] && ! command -v "$linker" >/dev/null; then
-        echo "  跳过 $t：缺少交叉链接器 $linker（见脚本头部安装提示）" >&2
+        echo "  跳过 ${t}：缺少交叉链接器 ${linker}（见脚本头部安装提示）" >&2
         return 1
     fi
     # openh264（MP4）要 C++ 交叉编译器，缺了会在编译到一半才失败，这里提前拦
     if [[ -n $linker ]] && ! command -v "${linker%gcc}g++" >/dev/null; then
-        echo "  跳过 $t：缺少交叉 C++ 编译器 ${linker%gcc}g++（见脚本头部安装提示）" >&2
+        echo "  跳过 ${t}：缺少交叉 C++ 编译器 ${linker%gcc}g++（见脚本头部安装提示）" >&2
         return 1
     fi
     return 0
@@ -214,7 +214,7 @@ pack_tarball() { # $1=target $2=bin
 build_mac_universal() {
     local s slices=() fat
     for s in aarch64-apple-darwin x86_64-apple-darwin; do
-        echo "==> 构建 $s（universal 切片）"
+        echo "==> 构建 ${s}（universal 切片）"
         rustup target add "$s" >/dev/null 2>&1 || true
         cargo build --release --target "$s"
         pack_tarball "$s" "target/$s/release/lscreen"
@@ -289,7 +289,7 @@ build_and_pack() {
 }
 
 if [[ ${1:-} == --list ]]; then
-    echo "默认目标集（host: $HOST）:"
+    echo "默认目标集（host: ${HOST}）:"
     for t in "${DEFAULT_TARGETS[@]}"; do
         if usable "$t" 2>/dev/null; then
             echo "  可用   $t"
