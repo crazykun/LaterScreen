@@ -2,11 +2,14 @@
 # 手动 workflow_dispatch 只出构建产物（Artifacts），不发 Release。
 #
 # 平台矩阵：
-#   Linux   x64 / arm64 / armv7 / x86（ubuntu-22.04，交叉 gcc 链接，
+#   Linux   x64 / arm64（ubuntu-22.04，交叉 gcc 链接，
 #           项目链接期仅 libc，见 scripts/package.sh 头部说明）
-#           每个架构出 tar.gz + deb + rpm + AppImage
+#           每个架构出 tar.gz + deb + AppImage
 #   Windows x64（MSVC）：zip + 自绘安装器 exe（egui，crates/setup 内嵌主程序）
 #   macOS   arm64 / x64：tar.gz + dmg（拖拽安装式 .app）
+#
+# 已砍：armv7 / i686（32 位桌面架构已死，5 个版本 20 个附件 0 下载）；
+#       rpm 格式（全架构 0 下载，纯页面噪音）。
 name: Release
 
 on:
@@ -30,9 +33,7 @@ jobs:
         include:
           - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu }
           # openh264（MP4 编码）是 C++ 源，交叉编译除 gcc 还需对应的 g++
-          - { os: ubuntu-22.04,   target: aarch64-unknown-linux-gnu,     apt: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu }
-          - { os: ubuntu-22.04,   target: armv7-unknown-linux-gnueabihf, apt: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf }
-          - { os: ubuntu-22.04,   target: i686-unknown-linux-gnu,        apt: gcc-i686-linux-gnu g++-i686-linux-gnu }
+          - { os: ubuntu-22.04,   target: aarch64-unknown-linux-gnu, apt: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
           - { os: macos-latest,   target: aarch64-apple-darwin }
           - { os: macos-latest,   target: x86_64-apple-darwin }
@@ -44,7 +45,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - name: 安装打包工具（Linux：交叉 gcc + rpm + appimagetool）
+      - name: 安装打包工具（Linux：交叉 gcc + appimagetool）
         if: runner.os == 'Linux'
         run: |
           # GitHub runner 默认挂了 azure.archive.ubuntu.com 镜像，高峰期反复超时重试（可卡 20+ 分钟）；
@@ -52,7 +53,7 @@ jobs:
           sudo grep -rl 'azure\.archive\.ubuntu\.com' /etc/apt/ 2>/dev/null \
             | sudo xargs -r sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g'
           sudo apt-get update -q || { sleep 10; sudo apt-get update -q; }
-          sudo apt-get install -y -q rpm ${{ matrix.apt }}
+          sudo apt-get install -y -q ${{ matrix.apt }}
           sudo curl -fsSL -o /usr/local/bin/appimagetool \
             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           sudo chmod +x /usr/local/bin/appimagetool
@@ -66,7 +67,6 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/*.deb
-            dist/*.rpm
             dist/*.AppImage
             dist/*.exe
             dist/*.dmg

@@ -72,6 +72,14 @@ fn index_path() -> PathBuf {
 /// 缓存目录下的运行期小文件（单例锁 / 唤起信号）。锁与信号都是纯运行期
 /// 状态，和历史副本一样属于「可随时删掉」的东西，放 cache 而非 config。
 fn runtime_path(name: &str) -> PathBuf {
+    // 测试注入：与 history_dir() 同款。生产写锁前有 create_dir_all 兜底，
+    // 但测试直接 fs::write(lock_path())——不注入就会写真实 cache 目录：
+    // 全新 CI runner 上该目录不存在而 NotFound，本机上则会动到正在运行的
+    // 面板的锁文件。
+    #[cfg(test)]
+    if let Some(d) = TEST_DIR.lock().unwrap().clone() {
+        return d.join(name);
+    }
     crate::config::cache_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(name)

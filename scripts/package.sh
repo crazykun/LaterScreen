@@ -10,9 +10,8 @@
 #   - 项目链接期仅依赖 libc（X11/GL 运行时 dlopen），但 MP4 编码用的
 #     openh264 是 C++ 源，交叉编译需 gcc + g++ 两套，无需 Docker/cross：
 #       aarch64:  sudo apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-#       armv7:    sudo apt install gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
-#       i686:     sudo apt install gcc-i686-linux-gnu g++-i686-linux-gnu
 #       windows:  sudo apt install gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+#     （armv7 / i686 已随 release 矩阵一起砍掉：32 位桌面架构 0 下载）
 #   - macOS 目标需要 Apple SDK，无法从 Linux 交叉编译：
 #     推 tag（git tag v0.1.0 && git push --tags）由 GitHub Actions
 #     release 工作流出全平台包，含 mac arm64/x64 与 Windows MSVC。
@@ -26,8 +25,6 @@ DIST=dist
 DEFAULT_TARGETS=(
     x86_64-unknown-linux-gnu
     aarch64-unknown-linux-gnu
-    armv7-unknown-linux-gnueabihf
-    i686-unknown-linux-gnu
     x86_64-pc-windows-gnu
 )
 
@@ -36,8 +33,6 @@ linker_for() {
     case "$1" in
         "$HOST") echo "" ;;
         aarch64-unknown-linux-gnu)     echo aarch64-linux-gnu-gcc ;;
-        armv7-unknown-linux-gnueabihf) echo arm-linux-gnueabihf-gcc ;;
-        i686-unknown-linux-gnu)        echo i686-linux-gnu-gcc ;;
         x86_64-pc-windows-gnu)         echo x86_64-w64-mingw32-gcc ;;
         *) echo "" ;;
     esac
@@ -71,12 +66,11 @@ sha256() {
     if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi
 }
 
-# ---------------- 平台原生包：deb / rpm / AppImage / 安装器 exe ----------------
+# ---------------- 平台原生包：deb / AppImage / 安装器 exe ----------------
 # 对应工具缺失时跳过该格式并提示安装方式，不影响 tar.gz/zip 主产物。
 
-deb_arch() { case "$1" in x86_64-*) echo amd64;; aarch64-*) echo arm64;; armv7-*) echo armhf;; i686-*) echo i386;; esac; }
-rpm_arch() { case "$1" in x86_64-*) echo x86_64;; aarch64-*) echo aarch64;; armv7-*) echo armv7hl;; i686-*) echo i686;; esac; }
-ai_arch()  { case "$1" in x86_64-*) echo x86_64;; aarch64-*) echo aarch64;; armv7-*) echo armhf;; i686-*) echo i686;; esac; }
+deb_arch() { case "$1" in x86_64-*) echo amd64;; aarch64-*) echo arm64;; esac; }
+ai_arch()  { case "$1" in x86_64-*) echo x86_64;; aarch64-*) echo aarch64;; esac; }
 
 # FHS 目录树：二进制 + desktop 入口 + 图标（deb/rpm/AppImage 共用）
 stage_fhs() { # $1=根目录 $2=二进制
@@ -106,38 +100,6 @@ Description: Screenshot & annotation tool (LaterScreen)
 EOF
     out="$DIST/lscreen_${VERSION}_$arch.deb"
     dpkg-deb --build --root-owner-group "$root" "$out" >/dev/null
-    echo "    $out ($(du -h "$out" | cut -f1))"
-}
-
-make_rpm() { # $1=target $2=bin
-    command -v rpmbuild >/dev/null || { echo "    跳过 rpm：无 rpmbuild（sudo apt install rpm）"; return; }
-    local arch top out
-    arch=$(rpm_arch "$1")
-    top="$PWD/$DIST/.stage/rpmtop-$1"
-    rm -rf "$top" && stage_fhs "$top/SOURCES/fhs" "$2"
-    cat > "$top/lscreen.spec" <<EOF
-Name: lscreen
-Version: $VERSION
-Release: 1
-Summary: Screenshot & annotation tool (LaterScreen)
-License: MIT
-URL: https://github.com/crazykun/LaterScreen
-AutoReqProv: no
-%global debug_package %{nil}
-%define __os_install_post %{nil}
-%define _build_id_links none
-%description
-跨平台截图标注工具：截图、标注、取色、二维码识别、OCR。
-%install
-cp -a %{_sourcedir}/fhs/. %{buildroot}/
-%files
-/usr/bin/lscreen
-/usr/share/applications/lscreen.desktop
-/usr/share/icons/hicolor/256x256/apps/lscreen.png
-EOF
-    rpmbuild -bb --quiet --target "$arch" --define "_topdir $top" "$top/lscreen.spec" >/dev/null
-    out="$DIST/lscreen-$VERSION-1.$arch.rpm"
-    cp "$top/RPMS/$arch/lscreen-$VERSION-1.$arch.rpm" "$out"
     echo "    $out ($(du -h "$out" | cut -f1))"
 }
 
@@ -282,7 +244,6 @@ build_and_pack() {
     # 平台原生包
     if [[ $t == *linux* ]]; then
         make_deb "$t" "$bin"
-        make_rpm "$t" "$bin"
         make_appimage "$t" "$bin"
     elif [[ $t == *windows* ]]; then
         make_setup "$t" "$bin"
@@ -328,7 +289,7 @@ rm -rf "$DIST/.stage"
 # 汇总校验和（覆盖式重建，包含 dist 下全部既有包）
 (
     cd "$DIST"
-    archives=$(ls *.tar.gz *.zip *.deb *.rpm *.AppImage *.exe *.dmg 2>/dev/null || true)
+    archives=$(ls *.tar.gz *.zip *.deb *.AppImage *.exe *.dmg 2>/dev/null || true)
     # shellcheck disable=SC2086
     [[ -n $archives ]] && sha256 $archives > SHA256SUMS
 )
