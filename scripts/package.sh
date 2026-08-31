@@ -14,7 +14,8 @@
 #     （armv7 / i686 已随 release 矩阵一起砍掉：32 位桌面架构 0 下载）
 #   - macOS 目标需要 Apple SDK，无法从 Linux 交叉编译：
 #     推 tag（git tag v0.1.0 && git push --tags）由 GitHub Actions
-#     release 工作流出全平台包，含 mac arm64/x64 与 Windows MSVC。
+#     release 工作流出全平台包，含 mac universal 胖包（一个 dmg 双架构）
+#     与 Windows MSVC。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -193,9 +194,48 @@ make_dmg() { # $1=target $2=bin
     echo "    $out ($(du -h "$out" | cut -f1))"
 }
 
+# tar.gz 通用归档：二进制 + README + LICENSE。macOS 各架构单包与 universal
+# 的每架构附包共用；windows 走 zip，不经过这里。
+pack_tarball() { # $1=target $2=bin
+    local t=$1 bin=$2 name stage out
+    name="lscreen-v$VERSION-$t"
+    stage="$DIST/.stage/$name"
+    rm -rf "$stage" && mkdir -p "$stage"
+    cp "$bin" README.md LICENSE "$stage/"
+    out="$DIST/$name.tar.gz"
+    tar -czf "$out" -C "$DIST/.stage" "$name"
+    echo "    $out ($(du -h "$out" | cut -f1))"
+}
+
+# macOS universal（arm64 + x86_64 胖二进制）：同一台 mac 交叉编两片后
+# lipo 合一。dmg 用胖包——用户下载时不用挑架构；tar.gz 仍按架构各一份，
+# 给明确知道自己机器的人留更小的选择。universal2-apple-darwin 是本脚本
+# 的合成目标名，rustup/cargo 没有这个 triple，真实构建目标是两个切片。
+build_mac_universal() {
+    local s slices=() fat
+    for s in aarch64-apple-darwin x86_64-apple-darwin; do
+        echo "==> 构建 $s（universal 切片）"
+        rustup target add "$s" >/dev/null 2>&1 || true
+        cargo build --release --target "$s"
+        pack_tarball "$s" "target/$s/release/lscreen"
+        slices+=("target/$s/release/lscreen")
+    done
+    mkdir -p "$DIST/.stage"
+    fat="$DIST/.stage/lscreen-fat"
+    lipo -create "${slices[@]}" -output "$fat"
+    lipo -info "$fat" | sed 's/^/    /'
+    make_dmg universal2-apple-darwin "$fat"
+}
+
 build_and_pack() {
     local t=$1 linker bin name stage out
     echo "==> 构建 $t"
+
+    if [[ $t == universal2-apple-darwin ]]; then
+        build_mac_universal
+        return
+    fi
+
     rustup target add "$t" >/dev/null 2>&1 || true
 
     linker=$(linker_for "$t")
@@ -210,18 +250,15 @@ build_and_pack() {
     if [[ $t == *windows* ]]; then
         bin="$bin.exe"
         check_win_deps "$bin" "$t"
-    fi
-    # windows-gnu 是「本地没有 Windows 时的编译替身」，产物带 libstdc++-6.dll
-    # 外部依赖（openh264 的 C++ 侧，mingw 下压不掉，详见 .cargo/config.toml）。
-    # 文件名打上 -localtest：check_win_deps 的警告会淹在构建输出里，但 dist/
-    # 下的文件名不会——实测有人装了本地 GNU 包，在干净虚拟机上报缺 DLL。
-    name="lscreen-v$VERSION-$t"
-    [[ $t == *windows-gnu* ]] && name="$name-localtest"
-    stage="$DIST/.stage/$name"
-    rm -rf "$stage" && mkdir -p "$stage"
-    cp "$bin" README.md LICENSE "$stage/"
-
-    if [[ $t == *windows* ]]; then
+        # windows-gnu 是「本地没有 Windows 时的编译替身」，产物带 libstdc++-6.dll
+        # 外部依赖（openh264 的 C++ 侧，mingw 下压不掉，详见 .cargo/config.toml）。
+        # 文件名打上 -localtest：check_win_deps 的警告会淹在构建输出里，但 dist/
+        # 下的文件名不会——实测有人装了本地 GNU 包，在干净虚拟机上报缺 DLL。
+        name="lscreen-v$VERSION-$t"
+        [[ $t == *windows-gnu* ]] && name="$name-localtest"
+        stage="$DIST/.stage/$name"
+        rm -rf "$stage" && mkdir -p "$stage"
+        cp "$bin" README.md LICENSE "$stage/"
         out="$DIST/$name.zip"
         rm -f "$out"
         if command -v zip >/dev/null; then
@@ -235,11 +272,10 @@ build_and_pack() {
             echo "错误：打 zip 需要 zip 或 7z" >&2
             exit 1
         fi
+        echo "    $out ($(du -h "$out" | cut -f1))"
     else
-        out="$DIST/$name.tar.gz"
-        tar -czf "$out" -C "$DIST/.stage" "$name"
+        pack_tarball "$t" "$bin"
     fi
-    echo "    $out ($(du -h "$out" | cut -f1))"
 
     # 平台原生包
     if [[ $t == *linux* ]]; then
@@ -261,7 +297,7 @@ if [[ ${1:-} == --list ]]; then
             echo "  不可用 $t"
         fi
     done
-    echo "macOS：aarch64/x86_64-apple-darwin 仅 GitHub Actions release 工作流可出包"
+    echo "macOS：universal2-apple-darwin（arm64+x64 胖包）仅 GitHub Actions release 工作流可出包"
     exit 0
 fi
 

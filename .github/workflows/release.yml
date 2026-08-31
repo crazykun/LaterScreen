@@ -6,8 +6,8 @@
 #           项目链接期仅 libc，见 scripts/package.sh 头部说明）
 #           每个架构出 tar.gz + deb + AppImage
 #   Windows x64（MSVC）：zip + 自绘安装器 exe（egui，crates/setup 内嵌主程序）
-#   macOS   arm64 / x64：tar.gz + dmg（拖拽安装式 .app）
-#
+#   macOS   universal（arm64 + x86_64 胖二进制）：一个 dmg 双架构通用，
+#           tar.gz 仍按架构各一份
 # 已砍：armv7 / i686（32 位桌面架构已死，5 个版本 20 个附件 0 下载）；
 #       rpm 格式（全架构 0 下载，纯页面噪音）。
 name: Release
@@ -35,13 +35,15 @@ jobs:
           # openh264（MP4 编码）是 C++ 源，交叉编译除 gcc 还需对应的 g++
           - { os: ubuntu-22.04,   target: aarch64-unknown-linux-gnu, apt: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
-          - { os: macos-latest,   target: aarch64-apple-darwin }
-          - { os: macos-latest,   target: x86_64-apple-darwin }
+          # universal2-apple-darwin 是 package.sh 的合成目标（脚本内编两片
+          # lipo 合一）；rustup 没有这个 triple，工具链装的是两个真实切片
+          - { os: macos-latest, target: universal2-apple-darwin,
+              rust-targets: "aarch64-apple-darwin x86_64-apple-darwin" }
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.rust-targets || matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
