@@ -106,6 +106,82 @@ fn quit_path() -> PathBuf {
     runtime_path("history.quit")
 }
 
+/// 上次面板位置（egui 逻辑坐标）的持久化文件：面板被拖到哪儿、下次就从
+/// 哪儿打开。用户对「弹窗每次都跳回默认角」的感知就是「位置乱」——记忆
+/// 位置让第二次及以后的开窗完全可预期。
+fn pos_path() -> PathBuf {
+    runtime_path("history.pos")
+}
+
+/// 读回上次面板位置，格式 "x,y"（容错解析，任何坏数据都当无记忆处理）。
+fn load_saved_pos() -> Option<Pos2> {
+    let text = std::fs::read_to_string(pos_path()).ok()?;
+    let (x, y) = text.trim().split_once(',')?;
+    let (x, y) = (x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?);
+    (x.is_finite() && y.is_finite()).then_some(Pos2::new(x, y))
+}
+
+/// 持久化面板位置。写失败静默：丢一次记忆只是回退默认角，不值得报错。
+fn save_pos(pos: Pos2) {
+    let p = pos_path();
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(p, format!("{:.1},{:.1}\n", pos.x, pos.y));
+}
+
+/// 物理（capture 系）像素 → egui 逻辑坐标的换算比例。
+/// Windows 的 xcap 返回物理像素，而 `ViewportCommand::OuterPosition` 吃
+/// egui 逻辑坐标——不换算的话 DPI≠100% 的机器上位置整体偏移 scale 倍，
+/// 窗口直接飞出屏幕（旧版三平台位置乱的根因）。macOS 的
+/// `CGDisplayBounds` 本身就是逻辑点，不能除。
+fn logical_scale(ctx: &egui::Context) -> f32 {
+    if cfg!(target_os = "macos") {
+        1.0
+    } else {
+        ctx.input(|i| i.viewport().native_pixels_per_point)
+            .unwrap_or(1.0)
+            .max(0.1)
+    }
+}
+
+/// 虚拟桌面（全部显示器并集）的 egui 逻辑矩形，供校验记忆位置仍可见。
+fn desktop_rect(ctx: &egui::Context) -> Option<Rect> {
+    let s = logical_scale(ctx);
+    let (x, y, w, h) = lscreen_capture::monitor_bounds()?;
+    Some(Rect::from_min_size(
+        Pos2::new(x as f32 / s, y as f32 / s),
+        Vec2::new(w as f32 / s, h as f32 / s),
+    ))
+}
+
+/// 窗口与桌面是否仍有交集（各向外放 40pt 容差，保住可抓拖的标题区）。
+/// 记忆位置悬在桌面外（拔了副屏/改了分辨率）时宁可不恢复，免得窗口
+/// 「打开即消失」。
+fn placement_visible(pos: Pos2, size: Vec2, desktop: Rect) -> bool {
+    let win = Rect::from_min_size(pos, size);
+    let d = desktop.expand(40.0);
+    win.min.x < d.max.x && win.max.x > d.min.x && win.min.y < d.max.y && win.max.y > d.min.y
+}
+
+/// 首次打开（无有效记忆）的默认摆放：贴主屏角、避开系统栏。
+/// - macOS：右上角、菜单栏下方（标准 24pt / 刘海 37pt，取 40 覆盖两者）
+/// - Windows/Linux：右下角、任务栏/dock 上方（典型栏高 48 + 边距 8）
+///
+/// 全程 egui 逻辑坐标（`logical_scale` 换算），DPI 无关。
+fn default_pos(ctx: &egui::Context, panel: Vec2) -> Option<Pos2> {
+    let s = logical_scale(ctx);
+    let (dx, dy, dw, dh) = lscreen_capture::primary_monitor_bounds()?;
+    let (dx, dy, dw, dh) = (dx as f32 / s, dy as f32 / s, dw as f32 / s, dh as f32 / s);
+    let x = dx + dw - panel.x - 8.0;
+    let y = if cfg!(target_os = "macos") {
+        dy + 40.0
+    } else {
+        dy + dh - panel.y - 56.0
+    };
+    Some(Pos2::new(x.max(dx), y.max(dy)))
+}
+
 /// 请求关闭正在运行的历史面板（托盘退出时调用）。留下信号文件，面板轮询到
 /// 即自行关闭。无面板运行时该文件由下一次 `acquire_single_instance` 清掉，
 /// 不会误关新面板。
@@ -423,6 +499,15 @@ pub struct HistoryApp {
     confirm_clear: bool,
     /// 上次轮询唤起信号的时刻（限流，别每帧都去戳文件系统）
     last_raise_poll: Instant,
+    /// 上次会话记住的面板位置（egui 逻辑坐标），首帧优先恢复
+    saved_pos: Option<Pos2>,
+    /// 首帧定位是否已发（OuterPosition 只发一次；WM 初值不算数）
+    placed: bool,
+    /// 发出定位命令的时刻：OuterPosition 异步生效，1s 内不落盘，防止把
+    /// WM 的临时初值当作用户位置写进记忆
+    placed_at: Instant,
+    /// 最近一次落盘的位置（>0.5pt 变化才写，避免每 300ms 空写）
+    last_saved_pos: Option<Pos2>,
 }
 
 impl HistoryApp {
@@ -445,6 +530,55 @@ impl HistoryApp {
             bytes: total_bytes(),
             confirm_clear: false,
             last_raise_poll: Instant::now(),
+            saved_pos: load_saved_pos(),
+            placed: false,
+            placed_at: Instant::now(),
+            last_saved_pos: None,
+        }
+    }
+
+    /// 首帧把窗口摆到正确位置，只执行一次：
+    /// 1. 有上次记住的位置且仍落在桌面内 → 原位恢复（用户拖到哪儿、下次
+    ///    开在哪儿）；
+    /// 2. 否则按平台默认贴主屏角（避开菜单栏/任务栏/dock）。
+    ///
+    /// 用运行时 `ViewportCommand::OuterPosition`（egui 逻辑坐标）而非构建期
+    /// `with_position`：后者吃逻辑坐标，而 capture 只能给物理像素，DPI≠100%
+    /// 的机器上必然错位；运行时命令按 egui 自己的 scale 换算，三平台自洽。
+    fn place_once(&mut self, ctx: &egui::Context) {
+        if self.placed {
+            return;
+        }
+        self.placed = true;
+        self.placed_at = Instant::now();
+        let size = ctx
+            .input(|i| i.viewport().outer_rect)
+            .map(|r| r.size())
+            .unwrap_or_else(|| Vec2::new(280.0, 420.0));
+        let desktop = desktop_rect(ctx);
+        let target = self
+            .saved_pos
+            .filter(|&p| desktop.is_none_or(|d| placement_visible(p, size, d)))
+            .or_else(|| default_pos(ctx, size));
+        if let Some(pos) = target {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+        }
+    }
+
+    /// 心跳里顺带落盘当前窗口位置（300ms 节流 + 位移阈值，拖动结束后很快
+    /// 稳定在最终值）。最小化时 egui 保持旧 outer_rect，不会写坏记忆。
+    fn persist_pos(&mut self, ctx: &egui::Context) {
+        if !self.placed || self.placed_at.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
+            let moved = self
+                .last_saved_pos
+                .is_none_or(|p| p.distance(outer.min) > 0.5);
+            if moved {
+                self.last_saved_pos = Some(outer.min);
+                save_pos(outer.min);
+            }
         }
     }
 
@@ -480,6 +614,8 @@ impl HistoryApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
+            // 同一条心跳顺带记忆窗口位置（节流见 persist_pos 注释）
+            self.persist_pos(ctx);
         }
         ctx.request_repaint_after(POLL);
     }
@@ -643,8 +779,9 @@ impl Drop for HistoryApp {
 
 impl eframe::App for HistoryApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.refresh_if_changed();
         let ctx = ui.ctx().clone();
+        self.place_once(&ctx);
+        self.refresh_if_changed();
         self.poll_raise(&ctx);
 
         // 顶栏：标题 + 计数（左）· 关闭（右，Painter 手绘 X——✕ 字符在 egui 内置
@@ -973,8 +1110,15 @@ impl eframe::App for HistoryApp {
         let panel_rect = ui.max_rect();
         self.show_toast(&ctx, panel_rect);
 
-        // Esc 或点「✕」关闭
+        // Esc 或点「✕」关闭。关窗前兜底落盘一次位置：最后一次拖动若距
+        // 上个心跳不足 300ms，心跳还没来得及记下就退出了。（定位稳定期内
+        // 不存——那 1s 里 outer_rect 可能还是 WM 初值。）
         if self.close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.placed && self.placed_at.elapsed() >= Duration::from_secs(1) {
+                if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
+                    save_pos(outer.min);
+                }
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
@@ -1395,5 +1539,56 @@ mod tests {
     fn fmt_time_fallback_shape() {
         // 非 unix 无 localtime_r 兜底：秒数形式
         assert!(fmt_time(1_753_900_000).ends_with('s'));
+    }
+
+    // ---- 面板位置记忆 ----
+
+    #[test]
+    fn pos_roundtrip() {
+        let _t = TestDir::new("pos-roundtrip");
+        assert!(load_saved_pos().is_none()); // 无文件
+        save_pos(Pos2::new(123.4, 567.8));
+        let p = load_saved_pos().unwrap();
+        assert!((p.x - 123.4).abs() < 0.1 && (p.y - 567.8).abs() < 0.1);
+        // 覆盖写：后一次为准
+        save_pos(Pos2::new(1.0, 2.0));
+        let p = load_saved_pos().unwrap();
+        assert!((p.x - 1.0).abs() < 0.1 && (p.y - 2.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn pos_rejects_garbage() {
+        let _t = TestDir::new("pos-garbage");
+        for bad in ["", "abc", "1", "1,", ",2", "x,y", "1e999,2", "-"] {
+            std::fs::write(pos_path(), bad).unwrap();
+            assert!(load_saved_pos().is_none(), "应当拒绝: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn pos_accepts_negative_coords() {
+        // 多屏常见：副屏在主屏左侧/上方，坐标为负
+        let _t = TestDir::new("pos-negative");
+        save_pos(Pos2::new(-1920.0, -100.0));
+        assert_eq!(load_saved_pos(), Some(Pos2::new(-1920.0, -100.0)));
+    }
+
+    #[test]
+    fn placement_visibility() {
+        let desktop = Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 1080.0));
+        let size = Vec2::new(280.0, 420.0);
+        // 完全在桌面内
+        assert!(placement_visible(Pos2::new(100.0, 100.0), size, desktop));
+        // 跨屏一半在外：可见（多屏第二块屏只覆盖到一部分坐标系）
+        assert!(placement_visible(Pos2::new(1800.0, 900.0), size, desktop));
+        // 刚出边缘但在容差内（标题区可抓）
+        assert!(placement_visible(
+            Pos2::new(1920.0 - 40.0, 500.0),
+            size,
+            desktop
+        ));
+        // 完全悬空（拔掉的副屏）：不可见，不恢复
+        assert!(!placement_visible(Pos2::new(5000.0, 5000.0), size, desktop));
+        assert!(!placement_visible(Pos2::new(-3000.0, 100.0), size, desktop));
     }
 }

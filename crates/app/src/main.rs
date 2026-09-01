@@ -477,35 +477,25 @@ fn run_settings() -> Result<(), String> {
 
 /// 截图历史面板（M11）：无边框置顶浮窗，缩略图网格展示最近截图/贴图/录屏。
 /// 单击按类型分动作（截图/贴图=复制，录屏=打开目录并选中）；右键贴图/打开/删除。
-/// 摆放靠近托盘：主屏右下角、桌面底部上方几个像素（Deepin 托盘在右下）。
+///
+/// 位置策略见 `history::HistoryApp::place_once`：这里**不**设 `with_position`——
+/// capture 拿到的是物理像素，而 egui 的窗口位置语义是逻辑坐标，DPI≠100% 的
+/// 机器上直接喂会把窗口甩出屏幕（这正是旧版「位置乱飞」的根因）。首帧用
+/// `ViewportCommand::OuterPosition`（egui 逻辑坐标，按各屏 scale 换算）摆正，
+/// 且优先恢复上次记住的位置（用户拖到哪儿、下次开在哪儿）。
 fn run_history() -> Result<(), String> {
     // 单例：快捷键/菜单连按会不断 spawn 新历史进程，这里先抢锁，已有活着的
     // 历史窗口则本进程直接退出，不再弹第二个面板。
     if !history::acquire_single_instance() {
         return Ok(());
     }
-    let mut viewport = eframe::egui::ViewportBuilder::default()
+    let viewport = eframe::egui::ViewportBuilder::default()
         .with_app_id("lscreen")
         .with_inner_size([280.0, 420.0])
         .with_min_inner_size([240.0, 200.0])
         .with_resizable(true)
         .with_decorations(false)
         .with_always_on_top();
-    // 贴托盘摆放：Linux（Deepin dock 在右下）贴主屏右下角；macOS 状态栏在
-    // 顶部，贴主屏右上角、菜单栏下方（菜单栏高 24-37pt，取 32 安全）。
-    // 多屏时贴主屏而非虚拟桌面边界——monitor_bounds 是全部显示器并集，
-    // 后者会落在最右那块屏上。
-    if let Some((dx, dy, dw, dh)) = lscreen_capture::primary_monitor_bounds() {
-        let (pw, ph) = (280.0, 420.0);
-        let x = (dx as f32 + dw as f32 - pw - 8.0).max(dx as f32);
-        let y = if cfg!(target_os = "macos") {
-            // 菜单栏高 24pt（标准）/37pt（刘海屏），取 36 保证不压
-            dy as f32 + 36.0
-        } else {
-            (dy as f32 + dh as f32 - ph - 8.0).max(dy as f32)
-        };
-        viewport = viewport.with_position(eframe::egui::Pos2::new(x, y));
-    }
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
