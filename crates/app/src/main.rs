@@ -478,26 +478,39 @@ fn run_settings() -> Result<(), String> {
 /// 截图历史面板（M11）：无边框置顶浮窗，缩略图网格展示最近截图/贴图/录屏。
 /// 单击按类型分动作（截图/贴图=复制，录屏=打开目录并选中）；右键贴图/打开/删除。
 ///
-/// 位置策略见 `history::HistoryApp::place_once`：这里**不**设 `with_position`——
-/// capture 拿到的是物理像素，而 egui 的窗口位置语义是逻辑坐标，DPI≠100% 的
-/// 机器上直接喂会把窗口甩出屏幕（这正是旧版「位置乱飞」的根因）。首帧用
-/// `ViewportCommand::OuterPosition`（egui 逻辑坐标，按各屏 scale 换算）摆正，
-/// 且优先恢复上次记住的位置（用户拖到哪儿、下次开在哪儿）。
+/// 几何策略：
+/// - **位置**：这里**不**设 `with_position`——capture 拿到的是物理像素，而
+///   egui 的窗口位置语义是逻辑坐标，DPI≠100% 的机器上直接喂会把窗口甩出
+///   屏幕（这正是旧版「位置乱飞」的根因）。首帧用 `ViewportCommand::
+///   OuterPosition`（egui 逻辑坐标，按各屏 scale 换算）摆正，且优先恢复
+///   上次记住的位置（用户拖到哪儿、下次开在哪儿）。
+/// - **大小**：构建期 `with_inner_size` 直接用记忆大小——记忆值本身就是
+///   egui 逻辑坐标（与 `with_inner_size` 语义一致，无 DPI 坑），建窗即
+///   正确尺寸，避免「先默认大小闪一下再跳变」。
 fn run_history() -> Result<(), String> {
     // 单例：快捷键/菜单连按会不断 spawn 新历史进程，这里先抢锁，已有活着的
     // 历史窗口则本进程直接退出，不再弹第二个面板。
     if !history::acquire_single_instance() {
         return Ok(());
     }
+    let (_, saved_size) = history::load_saved_geometry();
+    let size = saved_size
+        .map(|s| history::clamp_size(s, None))
+        .unwrap_or_else(|| eframe::egui::Vec2::new(280.0, 420.0));
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_app_id("lscreen")
-        .with_inner_size([280.0, 420.0])
-        .with_min_inner_size([240.0, 200.0])
+        .with_inner_size([size.x, size.y])
+        .with_min_inner_size([history::MIN_W, history::MIN_H])
         .with_resizable(true)
         .with_decorations(false)
         .with_always_on_top();
     let options = eframe::NativeOptions {
         viewport,
+        // 关掉 eframe 内置的窗口几何持久化：它会在建窗时用自存的旧几何
+        // 覆盖 with_inner_size，与 history.pos 的记忆打架（实测：记忆 500x600
+        // 被它存的 279x634 顶掉）。面板几何完全由我们自己的记忆接管——
+        // 那套带桌面校验与 DPI 换算，语义更明确。
+        persist_window: false,
         ..Default::default()
     };
     run_eframe(

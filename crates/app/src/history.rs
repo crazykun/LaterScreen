@@ -106,28 +106,65 @@ fn quit_path() -> PathBuf {
     runtime_path("history.quit")
 }
 
-/// 上次面板位置（egui 逻辑坐标）的持久化文件：面板被拖到哪儿、下次就从
-/// 哪儿打开。用户对「弹窗每次都跳回默认角」的感知就是「位置乱」——记忆
-/// 位置让第二次及以后的开窗完全可预期。
+/// 上次面板几何（位置+大小，egui 逻辑坐标）的持久化文件：面板被拖到哪儿、
+/// 拉成多大，下次就原样打开。用户对「弹窗每次都跳回默认角/默认大小」的
+/// 感知就是「位置乱」——记忆让第二次及以后的开窗完全可预期。
 fn pos_path() -> PathBuf {
     runtime_path("history.pos")
 }
 
-/// 读回上次面板位置，格式 "x,y"（容错解析，任何坏数据都当无记忆处理）。
-fn load_saved_pos() -> Option<Pos2> {
-    let text = std::fs::read_to_string(pos_path()).ok()?;
-    let (x, y) = text.trim().split_once(',')?;
-    let (x, y) = (x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?);
-    (x.is_finite() && y.is_finite()).then_some(Pos2::new(x, y))
+/// 面板窗口最小尺寸（与 `run_history` 的 `with_min_inner_size` 保持一致，
+/// 恢复记忆大小时钳住下限）。
+pub const MIN_W: f32 = 240.0;
+pub const MIN_H: f32 = 200.0;
+
+/// 记忆大小的宽松上限：拿不到桌面信息时的兜底，正常屏幕远小于此。
+const MAX_SIDE: f32 = 4096.0;
+
+/// 读回上次面板几何，格式 "x,y,w,h"（v0.8.1 及更早只有 "x,y"，视为无
+/// 大小记忆，大小回退默认值）。容错解析，任何坏数据都当无记忆处理。
+pub fn load_saved_geometry() -> (Option<Pos2>, Option<Vec2>) {
+    let Ok(text) = std::fs::read_to_string(pos_path()) else {
+        return (None, None);
+    };
+    let mut it = text.trim().split(',');
+    // 逐段解析有限 f32；不足两段 = 连位置都没有，整条记忆作废
+    let mut next = || {
+        it.next()
+            .and_then(|s| s.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite())
+    };
+    let (Some(x), Some(y)) = (next(), next()) else {
+        return (None, None);
+    };
+    let pos = Some(Pos2::new(x, y));
+    let size = match (next(), next()) {
+        (Some(w), Some(h)) if w >= MIN_W && h >= MIN_H => Some(Vec2::new(w, h)),
+        _ => None,
+    };
+    (pos, size)
 }
 
-/// 持久化面板位置。写失败静默：丢一次记忆只是回退默认角，不值得报错。
-fn save_pos(pos: Pos2) {
+/// 持久化面板几何。写失败静默：丢一次记忆只是回退默认摆放，不值得报错。
+fn save_geometry(pos: Pos2, size: Vec2) {
     let p = pos_path();
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(p, format!("{:.1},{:.1}\n", pos.x, pos.y));
+    let _ = std::fs::write(
+        p,
+        format!("{:.1},{:.1},{:.1},{:.1}\n", pos.x, pos.y, size.x, size.y),
+    );
+}
+
+/// 把记忆大小钳到合法范围：下限 = 最小窗口尺寸，上限 = 桌面（窗口比整个
+/// 桌面还大没有意义；改分辨率后旧记忆可能超了）。桌面拿不到时用宽松上限。
+pub fn clamp_size(size: Vec2, desktop: Option<Rect>) -> Vec2 {
+    let (max_w, max_h) = match desktop {
+        Some(d) => (d.width().max(MIN_W), d.height().max(MIN_H)),
+        None => (MAX_SIDE, MAX_SIDE),
+    };
+    Vec2::new(size.x.clamp(MIN_W, max_w), size.y.clamp(MIN_H, max_h))
 }
 
 /// 物理（capture 系）像素 → egui 逻辑坐标的换算比例。
@@ -501,13 +538,16 @@ pub struct HistoryApp {
     last_raise_poll: Instant,
     /// 上次会话记住的面板位置（egui 逻辑坐标），首帧优先恢复
     saved_pos: Option<Pos2>,
+    /// 上次会话记住的面板大小（构建期 with_inner_size 已生效，这里留作
+    /// place_once 的桌面校验/修正）
+    saved_size: Option<Vec2>,
     /// 首帧定位是否已发（OuterPosition 只发一次；WM 初值不算数）
     placed: bool,
     /// 发出定位命令的时刻：OuterPosition 异步生效，1s 内不落盘，防止把
     /// WM 的临时初值当作用户位置写进记忆
     placed_at: Instant,
-    /// 最近一次落盘的位置（>0.5pt 变化才写，避免每 300ms 空写）
-    last_saved_pos: Option<Pos2>,
+    /// 最近一次落盘的几何（位置或大小 >0.5pt 变化才写，避免每 300ms 空写）
+    last_saved: Option<(Pos2, Vec2)>,
 }
 
 impl HistoryApp {
@@ -520,6 +560,7 @@ impl HistoryApp {
                 crate::font::setup_egui_fonts(&cc.egui_ctx, bytes);
             }
         }
+        let (pos, size) = load_saved_geometry();
         Self {
             items: list(),
             thumbs: HashMap::new(),
@@ -530,10 +571,13 @@ impl HistoryApp {
             bytes: total_bytes(),
             confirm_clear: false,
             last_raise_poll: Instant::now(),
-            saved_pos: load_saved_pos(),
+            // 记忆几何：大小已在 main.rs 构建期生效（with_inner_size），
+            // 这里取位置+大小供 place_once 做桌面校验与修正
+            saved_pos: pos,
+            saved_size: size,
             placed: false,
             placed_at: Instant::now(),
-            last_saved_pos: None,
+            last_saved: None,
         }
     }
 
@@ -545,39 +589,51 @@ impl HistoryApp {
     /// 用运行时 `ViewportCommand::OuterPosition`（egui 逻辑坐标）而非构建期
     /// `with_position`：后者吃逻辑坐标，而 capture 只能给物理像素，DPI≠100%
     /// 的机器上必然错位；运行时命令按 egui 自己的 scale 换算，三平台自洽。
+    /// 大小则在构建期 `with_inner_size` 恢复（记忆值本身就是 egui 逻辑坐标，
+    /// 无 DPI 坑）；这里再按真实桌面钳一次——构建期拿不到显示器信息，只能
+    /// 宽松钳，分辨率变更后的旧记忆可能仍超桌面。
     fn place_once(&mut self, ctx: &egui::Context) {
         if self.placed {
             return;
         }
         self.placed = true;
         self.placed_at = Instant::now();
+        let desktop = desktop_rect(ctx);
         let size = ctx
             .input(|i| i.viewport().outer_rect)
             .map(|r| r.size())
             .unwrap_or_else(|| Vec2::new(280.0, 420.0));
-        let desktop = desktop_rect(ctx);
+        // 记忆大小超桌面：按桌面钳正（构建期已设的窗口会随之调整）
+        if let Some(saved) = self.saved_size {
+            let clamped = clamp_size(saved, desktop);
+            if clamped != saved && (clamped - size).length() > 0.5 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(clamped));
+            }
+        }
+        // 可见性校验用恢复后的实际大小（saved_size 优先），而不是默认大小
+        let effective = self.saved_size.map_or(size, |s| clamp_size(s, desktop));
         let target = self
             .saved_pos
-            .filter(|&p| desktop.is_none_or(|d| placement_visible(p, size, d)))
-            .or_else(|| default_pos(ctx, size));
+            .filter(|&p| desktop.is_none_or(|d| placement_visible(p, effective, d)))
+            .or_else(|| default_pos(ctx, effective));
         if let Some(pos) = target {
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
         }
     }
 
-    /// 心跳里顺带落盘当前窗口位置（300ms 节流 + 位移阈值，拖动结束后很快
-    /// 稳定在最终值）。最小化时 egui 保持旧 outer_rect，不会写坏记忆。
-    fn persist_pos(&mut self, ctx: &egui::Context) {
+    /// 心跳里顺带落盘当前窗口几何（300ms 节流 + 变化阈值，拖动/缩放结束后
+    /// 很快稳定在最终值）。最小化时 egui 保持旧 outer_rect，不会写坏记忆。
+    fn persist_geometry(&mut self, ctx: &egui::Context) {
         if !self.placed || self.placed_at.elapsed() < Duration::from_secs(1) {
             return;
         }
         if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
-            let moved = self
-                .last_saved_pos
-                .is_none_or(|p| p.distance(outer.min) > 0.5);
-            if moved {
-                self.last_saved_pos = Some(outer.min);
-                save_pos(outer.min);
+            let changed = self.last_saved.is_none_or(|(p, s)| {
+                p.distance(outer.min) > 0.5 || (s - outer.size()).length() > 0.5
+            });
+            if changed {
+                self.last_saved = Some((outer.min, outer.size()));
+                save_geometry(outer.min, outer.size());
             }
         }
     }
@@ -614,8 +670,8 @@ impl HistoryApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
-            // 同一条心跳顺带记忆窗口位置（节流见 persist_pos 注释）
-            self.persist_pos(ctx);
+            // 同一条心跳顺带记忆窗口几何（节流见 persist_geometry 注释）
+            self.persist_geometry(ctx);
         }
         ctx.request_repaint_after(POLL);
     }
@@ -1110,13 +1166,13 @@ impl eframe::App for HistoryApp {
         let panel_rect = ui.max_rect();
         self.show_toast(&ctx, panel_rect);
 
-        // Esc 或点「✕」关闭。关窗前兜底落盘一次位置：最后一次拖动若距
-        // 上个心跳不足 300ms，心跳还没来得及记下就退出了。（定位稳定期内
-        // 不存——那 1s 里 outer_rect 可能还是 WM 初值。）
+        // Esc 或点「✕」关闭。关窗前兜底落盘一次几何：最后一次拖动/缩放若
+        // 距上个心跳不足 300ms，心跳还没来得及记下就退出了。（定位稳定期
+        // 内不存——那 1s 里 outer_rect 可能还是 WM 初值。）
         if self.close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.placed && self.placed_at.elapsed() >= Duration::from_secs(1) {
                 if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
-                    save_pos(outer.min);
+                    save_geometry(outer.min, outer.size());
                 }
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1541,36 +1597,77 @@ mod tests {
         assert!(fmt_time(1_753_900_000).ends_with('s'));
     }
 
-    // ---- 面板位置记忆 ----
+    // ---- 面板几何记忆（位置+大小） ----
 
     #[test]
-    fn pos_roundtrip() {
-        let _t = TestDir::new("pos-roundtrip");
-        assert!(load_saved_pos().is_none()); // 无文件
-        save_pos(Pos2::new(123.4, 567.8));
-        let p = load_saved_pos().unwrap();
-        assert!((p.x - 123.4).abs() < 0.1 && (p.y - 567.8).abs() < 0.1);
+    fn geometry_roundtrip() {
+        let _t = TestDir::new("geo-roundtrip");
+        assert_eq!(load_saved_geometry(), (None, None)); // 无文件
+        save_geometry(Pos2::new(123.4, 567.8), Vec2::new(320.0, 500.0));
+        let (pos, size) = load_saved_geometry();
+        let pos = pos.unwrap();
+        let size = size.unwrap();
+        assert!((pos.x - 123.4).abs() < 0.1 && (pos.y - 567.8).abs() < 0.1);
+        assert!((size.x - 320.0).abs() < 0.1 && (size.y - 500.0).abs() < 0.1);
         // 覆盖写：后一次为准
-        save_pos(Pos2::new(1.0, 2.0));
-        let p = load_saved_pos().unwrap();
-        assert!((p.x - 1.0).abs() < 0.1 && (p.y - 2.0).abs() < 0.1);
+        save_geometry(Pos2::new(1.0, 2.0), Vec2::new(280.0, 420.0));
+        let (pos, size) = load_saved_geometry();
+        assert!((pos.unwrap().x - 1.0).abs() < 0.1);
+        assert_eq!(size, Some(Vec2::new(280.0, 420.0)));
     }
 
     #[test]
-    fn pos_rejects_garbage() {
-        let _t = TestDir::new("pos-garbage");
-        for bad in ["", "abc", "1", "1,", ",2", "x,y", "1e999,2", "-"] {
+    fn geometry_legacy_pos_only() {
+        // v0.8.1 旧格式 "x,y"：位置可恢复，大小无记忆（回退默认值）
+        let _t = TestDir::new("geo-legacy");
+        std::fs::write(pos_path(), "-1920.0,-100.0\n").unwrap();
+        assert_eq!(
+            load_saved_geometry(),
+            (Some(Pos2::new(-1920.0, -100.0)), None)
+        );
+    }
+
+    #[test]
+    fn geometry_rejects_garbage() {
+        let _t = TestDir::new("geo-garbage");
+        for bad in [
+            "",
+            "abc",
+            "1",
+            "1,",
+            ",2",
+            "x,y",
+            "1e999,2",
+            "-",
+            "1,2,x,y",
+            "1,2,100,100", // 尺寸小于窗口最小值：大小记忆作废
+        ] {
             std::fs::write(pos_path(), bad).unwrap();
-            assert!(load_saved_pos().is_none(), "应当拒绝: {bad:?}");
+            let (pos, size) = load_saved_geometry();
+            let ok = pos.is_none() && size.is_none();
+            let size_dropped = pos.is_some() && size.is_none();
+            assert!(
+                ok || size_dropped,
+                "应当拒绝或降级: {bad:?} -> ({pos:?}, {size:?})"
+            );
         }
     }
 
     #[test]
-    fn pos_accepts_negative_coords() {
-        // 多屏常见：副屏在主屏左侧/上方，坐标为负
-        let _t = TestDir::new("pos-negative");
-        save_pos(Pos2::new(-1920.0, -100.0));
-        assert_eq!(load_saved_pos(), Some(Pos2::new(-1920.0, -100.0)));
+    fn clamp_size_bounds() {
+        let desktop = Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 1080.0));
+        // 超桌面：钳到桌面大小
+        let s = clamp_size(Vec2::new(3000.0, 2000.0), Some(desktop));
+        assert_eq!(s, Vec2::new(1920.0, 1080.0));
+        // 过小：钳到最小窗口尺寸
+        let s = clamp_size(Vec2::new(10.0, 10.0), Some(desktop));
+        assert_eq!(s, Vec2::new(MIN_W, MIN_H));
+        // 正常值不动
+        let s = clamp_size(Vec2::new(320.0, 500.0), Some(desktop));
+        assert_eq!(s, Vec2::new(320.0, 500.0));
+        // 无桌面信息：宽松上限
+        let s = clamp_size(Vec2::new(9999.0, 9999.0), None);
+        assert_eq!(s.x, 4096.0);
     }
 
     #[test]
