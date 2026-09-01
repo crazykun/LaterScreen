@@ -100,6 +100,7 @@ crates/
 | **v0.7.0** | **2026-08-26** | **多屏与 Wayland：双屏跨屏覆盖层（`_NET_WM_FULLSCREEN_MONITORS` 铺满虚拟桌面，可跨屏框选）、Wayland 交互式 portal 截图 + GlobalShortcuts 全局热键；修滚动截图无法滚动时像崩溃（退化普通区域截图）、托盘退出关历史面板、滚动截图选区边框、预览长图 Select 可拖动** |
 | v0.7.1 | 2026-08-29 | 健壮性：修 tesseract 管道互等死锁隐患（stdin 写入挪独立线程）、历史 index.toml 原子写（tmp+rename）、Win/mac 托盘创建失败降级仅热键常驻；history/export 补 32 个单测（详见「已修缺陷 review 2026-08-29」）、CI 增 cargo audit 供应链门槛 |
 | **v0.8.0** | **2026-08-31** | **三平台能力对齐：Windows/macOS 滚动长截图（SendInput / CGEvent 合成滚轮+指针）、Win/mac 录屏与滚动截图范围红框（画选区外侧保证不入镜）、mac 高分屏区域截图物理↔逻辑坐标换算修复；修 history 测试写真实缓存目录致 CI 自 v0.7.1 全红、release 矩阵砍 armv7/i686/rpm（0 下载，附件 23→13）** |
+| v0.8.1 | 2026-09-01 | 修复：历史面板位置三平台错乱（构建期物理像素喂 with_position 而 egui 按逻辑坐标解释，Win 缩放 125%/150% 飞屏、mac Retina 坐标系不一致、Linux 压 dock）——改首帧 OuterPosition 逻辑坐标定位；新增位置记忆（cache/history.pos，恢复前校验仍在桌面内，拔屏回退默认防「打开即消失」）；默认摆放避让系统栏（mac 右上菜单栏下、Win/Linux 右下任务栏上） |
 
 ### M1 截图 + 标注 ✅（核心价值）
 - [x] workspace 骨架 + 体积优化 profile
