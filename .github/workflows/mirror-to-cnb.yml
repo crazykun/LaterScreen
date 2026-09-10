@@ -1,0 +1,21 @@
+name: Mirror to CNB
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["**"]
+  workflow_dispatch:
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mirror push to CNB
+        env:
+          CNB_USER: cnb
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: |
+          set -e
+          git clone --bare "https://github.com/${GITHUB_REPOSITORY}.git" repo.git
+          cd repo.git
+          git push --mirror "https://${CNB_USER}:${CNB_TOKEN}@cnb.cool/ailater/LaterScreen.git"
