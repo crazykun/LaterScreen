@@ -56,7 +56,8 @@ jobs:
             | sudo xargs -r sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g'
           sudo apt-get update -q || { sleep 10; sudo apt-get update -q; }
           sudo apt-get install -y -q ${{ matrix.apt }}
-          sudo curl -fsSL -o /usr/local/bin/appimagetool \
+          sudo curl --retry 5 --retry-delay 10 --retry-all-errors -fsSL \
+            -o /usr/local/bin/appimagetool \
             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           sudo chmod +x /usr/local/bin/appimagetool
       - name: 构建并打包
