@@ -95,8 +95,10 @@ fn apply_theme(ctx: &egui::Context) {
     }
     for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive] {
         w.weak_bg_fill = FIELD;
+        w.bg_fill = FIELD;
         w.bg_stroke.color = CARD_STROKE;
     }
+    v.text_edit_bg_color = FIELD;
     style.spacing.button_padding = egui::vec2(12.0, 6.0);
     style.spacing.interact_size.y = 30.0;
     ctx.set_style_of(egui::Theme::Dark, std::sync::Arc::new(style));

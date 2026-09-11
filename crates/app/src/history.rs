@@ -548,11 +548,15 @@ pub struct HistoryApp {
     placed_at: Instant,
     /// 最近一次落盘的几何（位置或大小 >0.5pt 变化才写，避免每 300ms 空写）
     last_saved: Option<(Pos2, Vec2)>,
+    /// 当前配置文件 mtime，用于热加载主题。
+    last_config_mtime: Option<std::time::SystemTime>,
 }
 
 impl HistoryApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         crate::apply_window_class(cc);
+        let cfg = crate::config::Config::load();
+        crate::theme::apply(&cc.egui_ctx, cfg.theme);
         // 独立进程必须自己挂中文字体，否则按钮/toast 中文显示为方框。
         // 与 pin.rs 同一套校验再安装。
         if let Some(bytes) = crate::font::load_system_font() {
@@ -565,7 +569,7 @@ impl HistoryApp {
             items: list(),
             thumbs: HashMap::new(),
             close: false,
-            close_after_copy: crate::config::Config::load().history_close_after_copy,
+            close_after_copy: cfg.history_close_after_copy,
             toast: None,
             last_mtime: index_mtime(),
             bytes: total_bytes(),
@@ -578,6 +582,8 @@ impl HistoryApp {
             placed: false,
             placed_at: Instant::now(),
             last_saved: None,
+            last_config_mtime: crate::config::config_path()
+                .and_then(|p| std::fs::metadata(p).ok()?.modified().ok()),
         }
     }
 
@@ -649,6 +655,17 @@ impl HistoryApp {
         }
     }
 
+    fn refresh_config_if_changed(&mut self, ctx: &egui::Context) {
+        let mtime =
+            crate::config::config_path().and_then(|p| std::fs::metadata(p).ok()?.modified().ok());
+        if mtime != self.last_config_mtime {
+            self.last_config_mtime = mtime;
+            let cfg = crate::config::Config::load();
+            self.close_after_copy = cfg.history_close_after_copy;
+            crate::theme::apply(ctx, cfg.theme);
+        }
+    }
+
     /// 轮询唤起信号：热键再次按下时第二个进程会留下信号文件，这里读到就把
     /// 窗口提到前台（取消最小化 + 显示 + Focus）。
     ///
@@ -659,6 +676,7 @@ impl HistoryApp {
         const POLL: Duration = Duration::from_millis(300);
         if self.last_raise_poll.elapsed() >= POLL {
             self.last_raise_poll = Instant::now();
+            self.refresh_config_if_changed(ctx);
             // 退出信号优先：托盘退出时留下，面板轮询到即自关（Drop 会清锁）
             if take_quit_request() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -834,6 +852,11 @@ impl Drop for HistoryApp {
 }
 
 impl eframe::App for HistoryApp {
+    /// 同 settings_ui：默认清屏色是恒定黑，浅色主题下透明面板后露黑底。
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        visuals.panel_fill.to_normalized_gamma_f32()
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.place_once(&ctx);
@@ -844,7 +867,11 @@ impl eframe::App for HistoryApp {
         // 字体里无字形会渲染成方框，和 CJK 缺失同源）。整条可拖动（无系统标题栏）。
         egui::Panel::top(egui::Id::new("history-top"))
             .exact_size(30.0)
-            .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(10, 0)))
+            .frame(
+                egui::Frame::NONE
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(egui::Margin::symmetric(10, 0)),
+            )
             .show(ui, |ui| {
                 let avail = ui.available_width();
                 let btn = Rect::from_center_size(
@@ -859,16 +886,16 @@ impl eframe::App for HistoryApp {
                     btn,
                     6.0,
                     if hovered {
-                        egui::Color32::from_rgb(0x3a, 0x3a, 0x44)
+                        ui.visuals().widgets.hovered.weak_bg_fill
                     } else {
                         egui::Color32::TRANSPARENT
                     },
                 );
                 // 手绘 X：两条对角线
                 let c = if hovered {
-                    egui::Color32::WHITE
+                    ui.visuals().text_color()
                 } else {
-                    egui::Color32::from_rgb(0x9e, 0x9e, 0xaa)
+                    ui.visuals().weak_text_color()
                 };
                 let (x0, x1) = (
                     btn.center() - Vec2::splat(4.0),
@@ -893,7 +920,7 @@ impl eframe::App for HistoryApp {
                         Self::human_size(self.bytes)
                     ),
                     egui::FontId::proportional(14.0),
-                    egui::Color32::from_rgb(0xec, 0xec, 0xf0),
+                    ui.visuals().text_color(),
                 );
                 // 「清空」按钮（X 左侧）：首点进入待确认态、二次点才真删；
                 // 鼠标移开自动取消，避免误触清光历史
@@ -908,6 +935,7 @@ impl eframe::App for HistoryApp {
                     self.confirm_clear = false;
                 }
                 let (label, fg, bg) = if self.confirm_clear {
+                    // 待确认态：红底白字（两主题通用）
                     (
                         "确认?",
                         egui::Color32::WHITE,
@@ -916,13 +944,13 @@ impl eframe::App for HistoryApp {
                 } else if clear_resp.hovered() {
                     (
                         "清空",
-                        egui::Color32::WHITE,
-                        egui::Color32::from_rgb(0x3a, 0x3a, 0x44),
+                        ui.visuals().text_color(),
+                        ui.visuals().widgets.hovered.weak_bg_fill,
                     )
                 } else {
                     (
                         "清空",
-                        egui::Color32::from_rgb(0x9e, 0x9e, 0xaa),
+                        ui.visuals().weak_text_color(),
                         egui::Color32::TRANSPARENT,
                     )
                 };
@@ -971,7 +999,11 @@ impl eframe::App for HistoryApp {
             });
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(10, 6)))
+            .frame(
+                egui::Frame::NONE
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(egui::Margin::symmetric(10, 6)),
+            )
             .show(ui, |ui| {
                 // 鼠标拖拽滚动：egui 默认 drag 只在触摸屏生效，这里显式开启——
                 // 列表只有滚轮滚非常难用。默认源（滚动条+滚轮）或上 DragScroll::Always。
@@ -1031,22 +1063,12 @@ impl eframe::App for HistoryApp {
                                             let lost = item.kind == Kind::Record
                                                 && resolve_source(item).is_none();
                                             let (text, color) = match item.kind {
-                                                Kind::Record if lost => (
-                                                    "录屏 ✕",
-                                                    egui::Color32::from_rgb(0x8a, 0x8a, 0x94),
-                                                ),
-                                                Kind::Record => (
-                                                    "录屏",
-                                                    egui::Color32::from_rgb(0xec, 0xec, 0xf0),
-                                                ),
-                                                Kind::Pin => (
-                                                    "贴图",
-                                                    egui::Color32::from_rgb(0xec, 0xec, 0xf0),
-                                                ),
-                                                Kind::Shot => (
-                                                    "截图",
-                                                    egui::Color32::from_rgb(0xec, 0xec, 0xf0),
-                                                ),
+                                                Kind::Record if lost => {
+                                                    ("录屏 ✕", ui.visuals().weak_text_color())
+                                                }
+                                                Kind::Record => ("录屏", ui.visuals().text_color()),
+                                                Kind::Pin => ("贴图", ui.visuals().text_color()),
+                                                Kind::Shot => ("截图", ui.visuals().text_color()),
                                             };
                                             ui.label(
                                                 egui::RichText::new(text)

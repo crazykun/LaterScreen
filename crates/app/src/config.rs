@@ -14,6 +14,25 @@ use std::path::PathBuf;
 /// 默认文件名模板：`lscreen_20260819_101520.png`
 pub const DEFAULT_TEMPLATE: &str = "lscreen_{YYYYMMDD}_{HHMMSS}";
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeMode {
+    Light,
+    Dark,
+    #[default]
+    System,
+}
+
+impl ThemeMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Light => "浅色",
+            Self::Dark => "夜间",
+            Self::System => "自动",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(default)]
 pub struct Config {
@@ -22,6 +41,8 @@ pub struct Config {
     /// 文件名模板，支持 {YYYYMMDD} {HHMMSS} {YYYY} {MM} {DD} {HH} {MI} {SS}，
     /// 未知 token 原样保留
     pub filename_template: String,
+    /// 配置窗口主题：light / dark / system
+    pub theme: ThemeMode,
     /// 默认工具（select/rect/ellipse/arrow/line/curve/marker/text/mosaic/eraser）
     pub default_tool: String,
     /// 默认颜色，#RRGGBB
@@ -56,6 +77,7 @@ impl Default for Config {
         Self {
             save_dir: String::new(),
             filename_template: DEFAULT_TEMPLATE.to_string(),
+            theme: ThemeMode::default(),
             default_tool: "select".to_string(),
             default_color: "#e53935".to_string(),
             default_width: 3.0,
@@ -441,6 +463,23 @@ mod tests {
         // 配置文件缺字段（旧版本写入）→ serde 默认值
         let c = cfg("default_color = \"#ffffff\"\n");
         assert_eq!(c.default_selection, "window");
+    }
+
+    #[test]
+    fn theme_defaults_and_labels() {
+        assert_eq!(Config::default().theme, ThemeMode::System);
+        assert_eq!(ThemeMode::Light.label(), "浅色");
+        assert_eq!(ThemeMode::Dark.label(), "夜间");
+        assert_eq!(ThemeMode::System.label(), "自动");
+        assert_eq!(cfg("theme = \"dark\"\n").theme, ThemeMode::Dark);
+    }
+
+    #[test]
+    fn old_config_gets_system_theme() {
+        assert_eq!(
+            cfg("default_color = \"#ffffff\"\n").theme,
+            ThemeMode::System
+        );
     }
 
     #[test]

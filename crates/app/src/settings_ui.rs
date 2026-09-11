@@ -3,60 +3,31 @@
 //! 保存即写 config.toml；托盘进程监视 mtime 自动热加载（无需重启）。
 //! 校验失败（模板/热键/颜色/工具名非法）只提示不落盘。
 //!
-//! 视觉：自定义暗色主题（深灰底 + 卡片分域 + 品牌红强调），与 egui
-//! 默认"工具感"样式区分；仅作用于本窗口的 egui Context。
+//! 视觉：双主题（暗/浅，见 [`crate::theme`]，品牌红强调 + 卡片分域），
+//! 颜色一律从 `ui.visuals()` 取令牌，仅作用于本窗口的 egui Context。
 
 use crate::config::{self, Config};
 use crate::export;
+use crate::theme;
 use eframe::egui;
 
-// ---------------------------------------------------------------- 设计令牌
+// ---------------------------------------------------------------- 取色令牌
 
-/// 品牌强调色（与默认标注色一致的红）
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(0xe5, 0x39, 0x35);
-/// 窗口底色
-const BG: egui::Color32 = egui::Color32::from_rgb(0x14, 0x14, 0x18);
-/// 卡片底色
-const CARD: egui::Color32 = egui::Color32::from_rgb(0x1d, 0x1d, 0x24);
-/// 卡片描边
-const CARD_STROKE: egui::Color32 = egui::Color32::from_rgb(0x2b, 0x2b, 0x35);
+/// 主文字（跟随主题）
+fn text(ui: &egui::Ui) -> egui::Color32 {
+    ui.visuals().text_color()
+}
 /// 次级文字（标签/提示）
-const MUTED: egui::Color32 = egui::Color32::from_rgb(0x9a, 0x9a, 0xa5);
-/// 主文字
-const TEXT: egui::Color32 = egui::Color32::from_rgb(0xec, 0xec, 0xf1);
-/// 页脚条底色（与卡片区分的更深一层）
-const FOOTER: egui::Color32 = egui::Color32::from_rgb(0x11, 0x11, 0x15);
-
-/// 应用自定义暗色视觉：控件圆角、悬浮态、选中色。
-fn apply_theme(ctx: &egui::Context) {
-    let mut style = egui::Style {
-        visuals: egui::Visuals::dark(),
-        ..Default::default()
-    };
-    let v = &mut style.visuals;
-    v.panel_fill = BG;
-    v.window_corner_radius = egui::CornerRadius::same(12);
-    v.menu_corner_radius = egui::CornerRadius::same(8);
-    v.selection.bg_fill = ACCENT;
-    v.hyperlink_color = ACCENT;
-    for w in [
-        &mut v.widgets.noninteractive,
-        &mut v.widgets.inactive,
-        &mut v.widgets.hovered,
-        &mut v.widgets.active,
-        &mut v.widgets.open,
-    ] {
-        w.corner_radius = egui::CornerRadius::same(6);
-        w.fg_stroke.color = TEXT;
-    }
-    // 输入框（noninteractive 承载背景）与卡片同层，弱化"嵌入感"
-    v.widgets.noninteractive.weak_bg_fill = egui::Color32::from_rgb(0x16, 0x16, 0x1b);
-    v.widgets.noninteractive.bg_stroke.color = CARD_STROKE;
-    v.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(0x16, 0x16, 0x1b);
-    v.widgets.inactive.bg_stroke.color = CARD_STROKE;
-    style.spacing.button_padding = egui::vec2(12.0, 6.0);
-    style.spacing.interact_size.y = 30.0;
-    ctx.set_style_of(egui::Theme::Dark, std::sync::Arc::new(style));
+fn muted(ui: &egui::Ui) -> egui::Color32 {
+    ui.visuals().weak_text_color()
+}
+/// 输入域底色（热键按钮/徽章）
+fn field(ui: &egui::Ui) -> egui::Color32 {
+    ui.visuals().widgets.inactive.weak_bg_fill
+}
+/// 卡片描边
+fn line(ui: &egui::Ui) -> egui::Color32 {
+    ui.visuals().widgets.noninteractive.bg_stroke.color
 }
 
 // ---------------------------------------------------------------- 卡片容器
@@ -64,8 +35,11 @@ fn apply_theme(ctx: &egui::Context) {
 /// 分区卡片：标题左侧一条强调色小竖条 + 圆角深色面板。
 fn card<R>(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::Frame::NONE
-        .fill(CARD)
-        .stroke(egui::Stroke::new(1.0, CARD_STROKE))
+        .fill(ui.visuals().panel_fill)
+        .stroke(egui::Stroke::new(
+            1.0,
+            ui.visuals().widgets.noninteractive.bg_stroke.color,
+        ))
         .corner_radius(10)
         .inner_margin(egui::Margin::same(14))
         .outer_margin(egui::Margin {
@@ -78,8 +52,8 @@ fn card<R>(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui) -> R
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(3.0, 14.0), egui::Sense::hover());
                 ui.painter()
-                    .rect_filled(rect, egui::CornerRadius::same(2), ACCENT);
-                ui.strong(egui::RichText::new(title).color(TEXT).size(14.0));
+                    .rect_filled(rect, egui::CornerRadius::same(2), theme::ACCENT);
+                ui.strong(egui::RichText::new(title).color(text(ui)).size(14.0));
             });
             ui.add_space(10.0);
             body(ui)
@@ -100,8 +74,9 @@ pub struct SettingsApp {
 
 impl SettingsApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let cfg = Config::load();
         crate::apply_window_class(cc);
-        apply_theme(&cc.egui_ctx);
+        theme::apply(&cc.egui_ctx, cfg.theme);
         // 独立窗口必须自己挂中文字体；先用 core Renderer 验证可解析
         // （epaint 对坏字体是 panic 而非 Err）
         let font = crate::font::load_system_font();
@@ -111,7 +86,7 @@ impl SettingsApp {
             }
         }
         Self {
-            cfg: Config::load(),
+            cfg,
             toast: None,
             recording: None,
             record_hint: None,
@@ -240,28 +215,30 @@ impl SettingsApp {
         let (label, stroke) = if active {
             (
                 egui::RichText::new("按下组合键…  (Esc 取消 / Backspace 清除)")
-                    .color(ACCENT)
+                    .color(theme::ACCENT)
                     .monospace(),
-                egui::Stroke::new(1.5, ACCENT),
+                egui::Stroke::new(1.5, theme::ACCENT),
             )
         } else if value.is_empty() {
             (
-                egui::RichText::new("点击设置热键").color(MUTED).monospace(),
-                egui::Stroke::new(1.0, CARD_STROKE),
+                egui::RichText::new("点击设置热键")
+                    .color(muted(ui))
+                    .monospace(),
+                egui::Stroke::new(1.0, line(ui)),
             )
         } else {
             (
                 egui::RichText::new(format!("{value}（点击修改）"))
-                    .color(TEXT)
+                    .color(text(ui))
                     .monospace(),
-                egui::Stroke::new(1.0, CARD_STROKE),
+                egui::Stroke::new(1.0, line(ui)),
             )
         };
         let btn = egui::Button::new(label)
             .min_size(egui::vec2(0.0, 32.0))
             .stroke(stroke)
             .corner_radius(6)
-            .fill(egui::Color32::from_rgb(0x16, 0x16, 0x1b));
+            .fill(field(ui));
         let resp = ui
             .add_sized([300.0, 32.0], btn)
             .on_hover_text("点击后按下想要的组合键（如 Ctrl+Alt+A）");
@@ -314,6 +291,12 @@ fn hotkey_string(mods: &egui::Modifiers, key: &egui::Key) -> String {
 }
 
 impl eframe::App for SettingsApp {
+    /// eframe 默认清屏色是恒定的半透明黑（无视主题），透明面板后面就是它
+    /// ——浅色模式下会露出黑底。改为跟随主题的面板底色。
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        visuals.panel_fill.to_normalized_gamma_f32()
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         // 热键捕获必须最先处理：吃掉所有按键事件（含 Esc，防止录制中关窗）
@@ -329,20 +312,20 @@ impl eframe::App for SettingsApp {
             .exact_size(64.0)
             .frame(
                 egui::Frame::NONE
-                    .fill(FOOTER)
-                    .stroke(egui::Stroke::new(1.0, CARD_STROKE))
+                    .fill(theme::footer_fill(ui.visuals()))
+                    .stroke(egui::Stroke::new(1.0, line(ui)))
                     .inner_margin(egui::Margin::symmetric(16, 0)),
             )
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // 主按钮：品牌红底白字
+                    // 主按钮：品牌红底白字（两主题通用）
                     let save_btn = egui::Button::new(
                         egui::RichText::new("保存")
                             .color(egui::Color32::WHITE)
                             .strong(),
                     )
-                    .fill(ACCENT)
+                    .fill(theme::ACCENT)
                     .corner_radius(8)
                     .min_size(egui::vec2(96.0, 34.0));
                     if ui.add(save_btn).clicked() {
@@ -350,17 +333,21 @@ impl eframe::App for SettingsApp {
                     }
                     ui.add_space(8.0);
                     // 次按钮：幽灵描边
-                    let close_btn = egui::Button::new(egui::RichText::new("关闭").color(MUTED))
+                    let close_btn = egui::Button::new(egui::RichText::new("关闭").color(muted(ui)))
                         .corner_radius(8)
                         .min_size(egui::vec2(80.0, 34.0))
-                        .stroke(egui::Stroke::new(1.0, CARD_STROKE));
+                        .stroke(egui::Stroke::new(1.0, line(ui)));
                     if ui.add(close_btn).clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
             });
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.inner_margin(egui::Margin::same(16)))
+            .frame(
+                egui::Frame::NONE
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(egui::Margin::same(16)),
+            )
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.set_width(ui.available_width());
@@ -378,7 +365,7 @@ impl eframe::App for SettingsApp {
                     .show(&ctx, |ui| {
                         egui::Frame::NONE
                             .fill(egui::Color32::from_black_alpha(230))
-                            .stroke(egui::Stroke::new(1.0, ACCENT))
+                            .stroke(egui::Stroke::new(1.0, theme::ACCENT))
                             .corner_radius(8)
                             .inner_margin(egui::Margin::symmetric(14, 8))
                             .show(ui, |ui| ui.colored_label(egui::Color32::WHITE, msg));
@@ -397,24 +384,24 @@ impl SettingsApp {
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new("LaterScreen")
-                    .color(TEXT)
+                    .color(text(ui))
                     .size(19.0)
                     .strong(),
             );
             ui.add_space(8.0);
             egui::Frame::NONE
-                .fill(egui::Color32::from_rgb(0x26, 0x26, 0x30))
+                .fill(field(ui))
                 .corner_radius(egui::CornerRadius::same(255))
                 .inner_margin(egui::Margin::symmetric(8, 2))
                 .show(ui, |ui| {
                     let ver = format!("v{}", env!("CARGO_PKG_VERSION"));
-                    ui.label(egui::RichText::new(ver).color(MUTED).size(11.0));
+                    ui.label(egui::RichText::new(ver).color(muted(ui)).size(11.0));
                 });
         });
         ui.add_space(2.0);
         ui.label(
             egui::RichText::new("截图 · 标注 · 取色 · 录屏 · 贴图")
-                .color(MUTED)
+                .color(muted(ui))
                 .size(12.0),
         );
         ui.add_space(14.0);
@@ -424,6 +411,19 @@ impl SettingsApp {
                 .num_columns(2)
                 .spacing([12.0, 10.0])
                 .show(ui, |ui| {
+                    row_label(ui, "主题");
+                    egui::ComboBox::from_id_salt("theme")
+                        .selected_text(self.cfg.theme.label())
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            for mode in [config::ThemeMode::System, config::ThemeMode::Light, config::ThemeMode::Dark] {
+                                if ui.selectable_value(&mut self.cfg.theme, mode, mode.label()).changed() {
+                                    theme::apply(ui.ctx(), self.cfg.theme);
+                                }
+                            }
+                        });
+                    ui.end_row();
+
                     row_label(ui, "目录");
                     input_field(
                         ui,
@@ -452,7 +452,7 @@ impl SettingsApp {
                         .map(|(_, label)| *label)
                         .unwrap_or("GIF 动图");
                     egui::ComboBox::from_id_salt("record-format")
-                        .selected_text(egui::RichText::new(current).color(TEXT))
+                        .selected_text(current)
                         .width(ui.available_width())
                         .show_ui(ui, |ui| {
                             for (id, label) in config::RECORD_FORMAT_NAMES {
@@ -482,18 +482,15 @@ impl SettingsApp {
                     "示例  {}.png",
                     config::render_template(&self.cfg.filename_template, (2026, 8, 19, 10, 15, 20))
                 ))
-                .color(MUTED),
+                .color(muted(ui)),
             );
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.checkbox(
-                    &mut self.cfg.open_dir_after_save,
-                    egui::RichText::new("保存后自动打开所在目录").color(TEXT),
-                );
+                ui.checkbox(&mut self.cfg.open_dir_after_save, "保存后自动打开所在目录");
                 ui.add_space(8.0);
                 // 必须用 link：Label（ui.small）默认 Sense::hover，clicked() 永远不触发
                 if ui
-                    .link(egui::RichText::new("打开目录").color(ACCENT))
+                    .link(egui::RichText::new("打开目录").color(theme::ACCENT))
                     .on_hover_text("调用系统文件管理器打开当前保存目录")
                     .clicked()
                 {
@@ -521,7 +518,7 @@ impl SettingsApp {
                         .map(|(_, label)| *label)
                         .unwrap_or("选择");
                     egui::ComboBox::from_id_salt("tool")
-                        .selected_text(egui::RichText::new(current).color(TEXT))
+                        .selected_text(current)
                         .width(ui.available_width())
                         .show_ui(ui, |ui| {
                             for (id, label) in config::TOOL_NAMES {
@@ -551,7 +548,7 @@ impl SettingsApp {
                         }
                         ui.label(
                             egui::RichText::new(self.cfg.default_color.clone())
-                                .color(MUTED)
+                                .color(muted(ui))
                                 .monospace(),
                         );
                     });
@@ -565,7 +562,7 @@ impl SettingsApp {
                         );
                         ui.label(
                             egui::RichText::new(format!("{:.0} px", self.cfg.default_width))
-                                .color(MUTED)
+                                .color(muted(ui))
                                 .monospace(),
                         );
                     });
@@ -585,7 +582,7 @@ impl SettingsApp {
                         .map(|(_, label)| *label)
                         .unwrap_or("最前窗口");
                     egui::ComboBox::from_id_salt("initial-selection")
-                        .selected_text(egui::RichText::new(current).color(TEXT))
+                        .selected_text(current)
                         .width(ui.available_width())
                         .show_ui(ui, |ui| {
                             for (id, label) in config::SELECTION_NAMES {
@@ -601,14 +598,11 @@ impl SettingsApp {
                     ui.end_row();
                 });
             ui.add_space(6.0);
-            ui.checkbox(
-                &mut self.cfg.copy_auto_exit,
-                egui::RichText::new("复制到剪贴板后自动退出").color(TEXT),
-            );
+            ui.checkbox(&mut self.cfg.copy_auto_exit, "复制到剪贴板后自动退出");
             ui.add_space(4.0);
             ui.checkbox(
                 &mut self.cfg.history_close_after_copy,
-                egui::RichText::new("历史面板点击复制后自动关闭").color(TEXT),
+                "历史面板点击复制后自动关闭",
             );
         });
 
@@ -646,14 +640,14 @@ impl SettingsApp {
                     self.record_hint = None;
                 }
             }
-            ui.small(egui::RichText::new(hint).color(MUTED));
+            ui.small(egui::RichText::new(hint).color(muted(ui)));
         });
 
         if let Some(path) = config::config_path() {
             ui.add_space(2.0);
             ui.label(
                 egui::RichText::new(format!("配置文件  {}", path.display()))
-                    .color(MUTED)
+                    .color(muted(ui))
                     .size(11.0),
             );
         }
@@ -663,7 +657,7 @@ impl SettingsApp {
 
 /// Grid 左列的弱色标签。
 fn row_label(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text).color(MUTED));
+    ui.label(egui::RichText::new(text).color(muted(ui)));
 }
 
 /// 通用加高输入框（min_size 保证 32px 高）。

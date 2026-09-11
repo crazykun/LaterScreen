@@ -62,7 +62,7 @@ cargo install --path crates/app
 
 ## 配置
 
-零配置可用，不生成文件。`lscreen config` 打开面板调整（保存目录、文件名模板、默认工具/颜色、录制格式、历史条数、六个全局热键等），运行中的托盘 1 秒内自动热加载。配置文件：Linux `~/.config/lscreen/config.toml`、Windows `%APPDATA%\lscreen\config.toml`、macOS `~/Library/Application Support/lscreen/config.toml`。
+零配置可用，不生成文件。`lscreen config` 打开面板调整（保存目录、文件名模板、配置窗口主题（自动/浅色/夜间）、默认工具/颜色、录制格式、历史条数、六个全局热键等），运行中的托盘 1 秒内自动热加载。配置文件：Linux `~/.config/lscreen/config.toml`、Windows `%APPDATA%\lscreen\config.toml`、macOS `~/Library/Application Support/lscreen/config.toml`。自动主题由 egui 跟随当前操作系统配色。
 
 历史副本不放配置目录，而是缓存目录（Linux `~/.cache/lscreen/history/`、Windows `%LOCALAPPDATA%\lscreen\history\`、macOS `~/Library/Caches/lscreen/history/`）：那是可随时删掉、不影响配置的派生数据，嫌占地方直接删整个目录即可。面板顶栏也能看到占用体积并一键清空。
 

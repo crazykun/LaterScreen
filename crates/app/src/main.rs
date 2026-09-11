@@ -15,6 +15,7 @@ mod history;
 mod pin;
 mod record_ui;
 mod settings_ui;
+mod theme;
 mod tray;
 mod ui;
 
