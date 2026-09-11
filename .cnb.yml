@@ -1,0 +1,38 @@
+# CNB 云原生构建配置
+#
+# 背景：本仓库通过 .github/workflows/mirror-to-cnb.yml 在推送分支/标签时
+#      `git push --mirror` 到 cnb.cool/ailater/LaterScreen，所以本文件提交到
+#      GitHub 后会自动同步到 CNB 并生效（CNB 侧无需任何额外配置）。
+#
+# 作用：CNB 收到 tag 推送后自动创建一份 CNB Release，标题与说明跟 GitHub
+#      Release 完全一致 —— 说明同样取自 docs/release-notes/<tag>.md，
+#      即 GitHub release.yml 所用的同一份文件。
+#
+# 说明：
+#   - $ 为兜底键，tag_push 挂在 $ 下表示对所有 tag 生效
+#   - tag_push 事件下 CNB_BRANCH 即被推送的 tag 名，无需手工传参
+#   - 只同步发布说明，不重复构建/上传安装包：GitHub 与 CNB 由同一次 tag 推送
+#     并行触发，CNB 侧构建时 GitHub Actions 的产物尚未生成，无法可靠拉取；
+#     安装包仍以下载自 GitHub Release 为准
+$:
+  tag_push:
+    - name: 创建 Release
+      stages:
+        - name: 准备发布说明
+          script: |
+            set -e
+            NOTES="docs/release-notes/${CNB_BRANCH}.md"
+            if [ -f "$NOTES" ]; then
+              cp "$NOTES" .cnb-release-notes.md
+              echo "使用发布说明：$NOTES"
+            else
+              echo "此版本未提供发布说明，详见提交历史。" > .cnb-release-notes.md
+              echo "未找到 $NOTES，回退为默认说明"
+            fi
+
+        - name: 发布 CNB Release
+          type: git:release
+          options:
+            title: ${CNB_BRANCH}
+            descriptionFromFile: .cnb-release-notes.md
+            latest: true
