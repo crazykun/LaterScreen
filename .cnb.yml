@@ -4,19 +4,33 @@
 #      `git push --mirror` 到 cnb.cool/ailater/LaterScreen，所以本文件提交到
 #      GitHub 后会自动同步到 CNB 并生效（CNB 侧无需任何额外配置）。
 #
-# 作用：CNB 收到 tag 推送后自动创建一份 CNB Release，标题与说明跟 GitHub
-#      Release 完全一致 —— 说明同样取自 docs/release-notes/<tag>.md，
-#      即 GitHub release.yml 所用的同一份文件。
+# 策略：CNB 不本地构建任何平台，统一镜像 GitHub Release 产物。
+#   - Windows/macOS 在 CNB 的 Linux 容器本就无法构建（Apple SDK / MSVC）；
+#   - Linux 若在 CNB 另行构建，与 GitHub 产物位元不一致，两边等于两个版本；
+#   - 同一次 tag 推送会并行触发 GitHub Actions release.yml 出全平台包，
+#     本流水线等其发布完成后原样镜像——两边下载到同一批文件、同一份校验和。
+#
+# 流程（单流水线串行）：
+#   1. git:release 创建 CNB Release（标题/说明与 GitHub 一致，取自
+#      docs/release-notes/<tag>.md；自带源码压缩包）
+#   2. 轮询 GitHub Release 直到 SHA256SUMS 资产出现——它在 release.yml 的
+#      release job 中最后生成，存在即代表全平台产物均已上传完毕
+#   3. 下载全部资产并用 GitHub 侧 SHA256SUMS 校验完整性
+#   4. cnbcool/attachments 统一上传为 CNB Release 附件
 #
 # 说明：
 #   - $ 为兜底键，tag_push 挂在 $ 下表示对所有 tag 生效
 #   - tag_push 事件下 CNB_BRANCH 即被推送的 tag 名，无需手工传参
-#   - 只同步发布说明，不重复构建/上传安装包：GitHub 与 CNB 由同一次 tag 推送
-#     并行触发，CNB 侧构建时 GitHub Actions 的产物尚未生成，无法可靠拉取；
-#     安装包仍以下载自 GitHub Release 为准
+#   - 轮询上限约 60 分钟（覆盖 GitHub Actions 全平台构建 + macOS runner 排队）；
+#     GitHub 侧失败则本流水线一并失败（可见），不会发布缺包的附件
+#   - 可选：在 CNB 仓库配置环境变量 GITHUB_TOKEN（个人访问令牌，只读
+#     public_repo 权限即可），轮询 GitHub API 可避开未认证 60 次/小时限流
+#     （CNB 共享出口 IP 常触发）；不配置也能跑
 $:
   tag_push:
-    - name: 创建 Release
+    - name: 发布 Release 并镜像全平台产物
+      docker:
+        image: alpine:3
       stages:
         - name: 准备发布说明
           script: |
@@ -36,3 +50,69 @@ $:
             title: ${CNB_BRANCH}
             descriptionFromFile: .cnb-release-notes.md
             latest: true
+
+        - name: 等待并下载 GitHub Release 产物
+          script: |
+            set -e
+            sed -i 's#dl-cdn.alpinelinux.org#mirrors.cloud.tencent.com#g' /etc/apk/repositories
+            apk add --no-cache curl >/dev/null
+
+            TAG="${CNB_BRANCH}"
+            API="https://api.github.com/repos/crazykun/LaterScreen/releases/tags/${TAG}"
+
+            # 可选认证：配置了 GITHUB_TOKEN 就带上，避开未认证限流
+            gh_curl() {
+              if [ -n "${GITHUB_TOKEN:-}" ]; then
+                curl -H "Authorization: Bearer ${GITHUB_TOKEN}" "$@"
+              else
+                curl "$@"
+              fi
+            }
+
+            mkdir -p dist
+            try=0
+            max=48   # 48 次 × 75s ≈ 60 分钟
+            while :; do
+              try=$((try + 1))
+              if gh_curl --retry 2 --retry-all-errors --connect-timeout 20 -fsSL "$API" -o /tmp/rel.json; then
+                grep -o '"browser_download_url": "[^"]*"' /tmp/rel.json | cut -d'"' -f4 \
+                  > /tmp/urls.txt || true
+                total=$(wc -l < /tmp/urls.txt)
+                if grep -q '/SHA256SUMS$' /tmp/urls.txt; then
+                  echo "[第 ${try} 次] GitHub Release 已发布（${total} 个资产，含 SHA256SUMS）"
+                  break
+                fi
+                echo "[第 ${try}/${max} 次] GitHub Actions 仍在构建（当前 ${total} 个资产，等待 SHA256SUMS）"
+              else
+                echo "[第 ${try}/${max} 次] GitHub API 暂不可达或 Release 尚未创建，继续等待"
+              fi
+              if [ "$try" -ge "$max" ]; then
+                echo "错误：等待约 60 分钟后 GitHub 产物仍未就绪，放弃镜像" >&2
+                exit 1
+              fi
+              sleep 75
+            done
+
+            # 大文件从国内下载可能较慢，心跳防止无输出超时
+            ( while sleep 90; do echo "[heartbeat] $(date +%H:%M:%S) 下载进行中"; done ) &
+            HB=$!
+            trap 'kill $HB 2>/dev/null || true' EXIT
+            while read -r url; do
+              name=$(basename "$url")
+              echo "下载 ${name}"
+              gh_curl -fL --retry 5 --retry-all-errors --connect-timeout 30 \
+                -o "dist/${name}" "$url"
+            done < /tmp/urls.txt
+
+            # 用 GitHub 侧校验和验证镜像完整性，缺包/损坏在此拦截
+            cd dist
+            sha256sum -c SHA256SUMS
+            cd ..
+            echo "镜像就绪："
+            ls -lh dist/
+
+        - name: 上传附件
+          image: cnbcool/attachments:latest
+          settings:
+            attachments:
+              - dist/*

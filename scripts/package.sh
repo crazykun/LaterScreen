@@ -119,7 +119,13 @@ make_appimage() { # $1=target $2=bin
     ln -sf lscreen.png "$appdir/.DirIcon"
     out="$DIST/lscreen-v$VERSION-$arch.AppImage"
     # EXTRACT_AND_RUN：无 FUSE 环境（CI 容器）也能跑
-    ARCH=$arch APPIMAGE_EXTRACT_AND_RUN=1 appimagetool "$appdir" "$out" >/dev/null
+    # 执行失败（如容器网络拉不动 AppImage 运行时）同样降级跳过：
+    # tar.gz/deb 是主产物，不能被可选格式拖垮整条流水线
+    if ! ARCH=$arch APPIMAGE_EXTRACT_AND_RUN=1 appimagetool "$appdir" "$out" >/dev/null; then
+        echo "    跳过 AppImage：appimagetool 执行失败（详见上方错误输出）"
+        rm -f "$out"
+        return
+    fi
     echo "    $out ($(du -h "$out" | cut -f1))"
 }
 
