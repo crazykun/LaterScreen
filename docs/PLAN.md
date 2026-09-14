@@ -523,6 +523,97 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       配置节补历史副本存缓存目录的三平台路径与「可直接删」说明。
       `docs/PLAN.md` §6 目录规范补 `app/src/history.rs`。
 
+### M12 贴图增强：对齐 Snipaste（不透明度 / 穿透 / 旋转 / 像素网格）
+
+贴图是 Snipaste 的招牌，也是本项目定位最直接的竞品能力。当前贴图只有
+缩放/拖拽/置顶，与 Snipaste 体验差距集中在四点。全部改动收敛在
+`pin.rs` + capture 层新增窗口属性 API（沿用 `set_window_class` /
+`set_window_icon` 的 raw-window-handle + 平台调用先例，不引入新依赖）。
+
+- [ ] **不透明度调节**：Ctrl+滚轮 10% 步进（25%–100%），toast 显示百分比，
+      工具条加不透明度按钮（弹出滑杆）。窗口级实现（不用 with_transparent
+      ——贴图内容本身不透明，改整窗 alpha）：Win
+      `SetLayeredWindowAttributes(LWA_ALPHA)`；X11 `_NET_WM_WINDOW_OPACITY`
+      （CARDINAL 0..0xffffffff，需要合成器，Deepin/KWin 已验过类似路径）；
+      mac `NSWindow.setAlphaValue`（objc2）。三平台收敛为
+      `capture::set_window_opacity(handle, f32)`，取不到句柄/不支持时仅缩放
+      不调透明并 toast 说明。快捷键与缩放（裸滚轮）不冲突
+- [ ] **鼠标穿透**：贴图置顶挡住下层窗口时点击穿到下层。Win
+      `WS_EX_TRANSPARENT | WS_EX_LAYERED`（SetWindowLongPtr）；X11 XShape
+      ShapeInput 空输入区（RecordBorder 已有先例）；mac
+      `setIgnoresMouseEvents(true)`。**穿透后本窗口收不到任何事件，退出
+      机制是设计难点**：工具条「穿透」按钮进入，进入前 toast 提示；
+      退出走托盘菜单「贴图穿透切换」（托盘对每张贴图存 cache/pins/
+      <pid>.win 记录，全局可逆）——Snipaste 同款思路。穿透与不透明度
+      组合是「贴图变参考底纹」的核心场景
+- [ ] **旋转 / 翻转**：0°/90°/180°/270° 旋转 + 水平/垂直翻转，RGBA 就地
+      变换（纯 CPU，一屏 4K 图毫秒级），窗口宽高随旋转对调、内容锚定
+      左上角；工具条按钮 + 快捷键（R 旋转 / H 水平翻转）。贴图内存只有
+      一份 RGBA + 纹理，变换后重建纹理即可，注意 8192 纹理上限沿长边判断
+- [ ] **高倍放大像素网格**：缩放 ≥ 8× 时叠加网格线（egui Painter 画，
+      交互层装饰、不进保存/复制的位图），网格线颜色黑白棋盘自适应
+      （按底色亮度取反），对齐像素边界取整避免半像素抖动
+
+### M13 截图体验补齐（延时 / 记忆选区 / 二维码生成 / 文字背景 / 取色历史）
+
+- [ ] **延时截图**：`lscreen gui --delay <秒>`、`shot --delay <秒>`；托盘
+      菜单「延时 3 秒截图」。实现：唤起前先倒计时（小 egui 置顶倒计时窗
+      或纯托盘通知），**倒计时结束先关提示窗、再 capture_screen、最后开
+      覆盖层**——顺序反了提示窗会被截进图里（关窗到合成器重绘有 ~200ms
+      延迟，RecordBorder 实测数据，关窗后 sleep 300ms 再采帧）
+- [ ] **记忆上次选区**：cache/screen.sel 存上次**交付**（复制/保存/贴图/
+      OCR）的区域，物理像素 + 显示器布局指纹（monitor_bounds 拼串）。
+      进入覆盖层时预选该区域（布局指纹变了作废，回退最前窗口）。
+      场景：对同一窗口/区域连续多次截图（对照文档写操作步骤）。
+      与 M9 的「初始选区」配置合并：最前窗口 / 上次选区 / 全屏 / 无
+- [ ] **二维码生成**：`qrcode` crate 从 core dev-dependency 扶正为正式
+      依赖（纯 Rust 零增量）。core/qr.rs 加 `generate(text, ecc, size)
+      -> RgbaImage`；CLI `lscreen qr-gen "文本" -o out.png`（--ecc 纠错
+      级别 L/M/Q/H，--margin 边距模块数）；覆盖层工具栏加「生成二维码」：
+      弹文本框 → 生成**图片图元**插入标注层（可拖动/缩放，与截图一起导出）
+      ——识别 + 生成闭环（识别到的 URL 一键回贴成码）。注意现有图元模型
+      没有位图图元，需新增 `ElementKind::Image`（双渲染路径都要支持：
+      egui `texture` + tiny-skia `draw_pixmap`，绘制顺序与其他图元一致）
+- [ ] **文字标注背景色**：Text 图元加 `bg: Option<Color>`（None 保持现状）。
+      工具栏文本工具激活时「背景色」开关：关 = 透明，开 = 取当前色 + 圆角
+      底（半径常量 2pt，两边共用 `Element::text_bg_rect` 保证一致）。
+      egui 层 `rect_filled` + tiny-skia `fill_path(RoundRect)`。浅色截图上
+      白字不可读的现状痛点。图元不持久化，无迁移问题
+- [ ] **取色历史**：pick 模式与覆盖层取色器共享的环形缓冲（进程内存，
+      最近 8 个 {RGBA, HEX}），放大镜旁横排小色块显示，单击选用为当前
+      色（可继续 Ctrl+R/H/K 复制）。跨进程不共享（截图覆盖层即起即退，
+      共享需落盘，不值）
+
+### M14 录屏增强（音频 Win/mac + 点击高亮）
+
+- [ ] **录屏音频（仅 Win/mac）**：MP4 加音轨。Win Media Foundation
+      （麦克风 + WASAPI loopback 系统声）→ AAC 编码 → mp4 crate 加
+      audio track；mac AVFoundation 采集 + AudioToolbox AAC。
+      **Linux 无纯 Rust 音频采集方案**（PipeWire/ALSA 都是动态库，违反
+      硬约束）——按系统 OCR 先例做平台差异，配置面板 Linux 上不显示该项
+      或标注不支持。`record --audio mic|system|both|off`（默认 off 保持
+      现状）。体积影响必须评估：mac objc2 avfoundation 绑定可能明显增
+      体积，release.yml 已有 ≤20MB 逐产物门槛兜底；超预算则 mac 降级
+      只录麦克风（CoreAudio 最小绑定）或整体推迟
+- [ ] **点击高亮**：录制时鼠标按下处叠加扩散圆环（半透明描边，半径
+      0→28px / 300ms 衰减），帧合成在采帧后纯 CPU 叠加（app 层改帧，
+      capture 不动），不改变 GIF/MP4 编码管线。默认开启、配置面板可关
+      （`record_click_highlight`）。教程录制场景第一刚需，成本远低于
+      按键显示（后者需要 X11 XRecord / Win 键盘钩子 / mac CGEventTap
+      三套全局监听，先不做，视需求反馈）
+
+### M15 分享集成：可插拔上传 hook（零体积方案）
+
+- [ ] **外部命令 hook**：`config.toml` `[upload] command = [...]`（argv
+      数组形式，不经 shell，杜绝注入；缺省无上传能力）。覆盖层/贴图/
+      CLI 加「上传」动作：把产物**路径**经 stdin 传给命令，stdout 期望
+      返回 URL → 复制到剪贴板 + toast + 历史条目记 `url` 字段；非零退出
+      显示 stderr（走托盘日志同款可见性思路）。不内置任何图床 SDK——
+      ShareX 式上传生态与「离线单文件小而美」冲突，外部命令零依赖零体积，
+      用户自配 uPic/PicGo/sup 自定义脚本均可。CLI：`lscreen upload <file>`
+      直接走同一条路径（脚本可用）。安全：命令只来自用户配置文件，
+      路径只经 stdin 不进 argv（避免文件名含空格/特殊字符的注入面）
+
 ### 遗留 TODO（review 2026-08-17）
 
 - [x] clipd 静默失败（✅ 2026-08-18）：守护进程在 X 连接 + 协议校验全部通过后
