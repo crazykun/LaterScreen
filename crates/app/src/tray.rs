@@ -34,6 +34,11 @@ pub enum Action {
     Screenshot,
     Picker,
     Pin,
+    /// 退出全部贴图的点击穿透（广播 pins.ctl；穿透中的贴图收不到任何
+    /// 指针事件，这是唯一可靠的恢复入口）
+    PinThrough,
+    /// 关闭全部贴图窗口
+    PinsClose,
     Record,
     Scroll,
     /// 打开历史面板（自绘缩略图浮窗，独立进程）
@@ -46,6 +51,8 @@ const MENU_ACTIONS: &[(Action, &str)] = &[
     (Action::Screenshot, "截图"),
     (Action::Picker, "取色"),
     (Action::Pin, "贴图"),
+    (Action::PinThrough, "退出贴图穿透"),
+    (Action::PinsClose, "关闭全部贴图"),
     (Action::Record, "录屏"),
     (Action::Scroll, "滚动截图"),
     (Action::History, "历史"),
@@ -69,6 +76,8 @@ fn dispatch(a: Action) -> bool {
                 eprintln!("lscreen tray: {e}");
             }
         }
+        Action::PinThrough => crate::pin::write_ctl("unthrough"),
+        Action::PinsClose => crate::pin::write_ctl("close"),
         Action::Quit => {
             // 托盘退出时带走它 spawn 的历史面板（独立进程，不会自动跟随退出）。
             // 留信号文件，运行中的面板轮询到即自关；无面板则下次开面板时清掉。

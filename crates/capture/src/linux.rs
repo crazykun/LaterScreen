@@ -710,6 +710,74 @@ pub fn primary_monitor_scale() -> Option<f32> {
     Some(1.0)
 }
 
+// --------------------------------------------- 原生窗口句柄（M12：不透明度/穿透）
+
+/// 跨平台 NativeWindow 的 X11 实现：仅存 window id，每次调用走独立连接
+/// （与 set_window_class 同模式；交互期调用频率低，连接开销可忽略）。
+#[derive(Clone)]
+pub struct NativeWindow(u32);
+
+impl NativeWindow {
+    /// 从 eframe 的 raw-window-handle 提取 X11 window id。只识别 Xlib 变体
+    ///（egui/glow 走 Xlib 加载器，Xcb 变体不会出现）。
+    pub fn from_raw(h: raw_window_handle::RawWindowHandle) -> Option<Self> {
+        match h {
+            raw_window_handle::RawWindowHandle::Xlib(x) => Some(NativeWindow(x.window as u32)),
+            _ => None,
+        }
+    }
+
+    /// 整窗不透明度 0.0–1.0，经 EWMH `_NET_WM_WINDOW_OPACITY`（CARDINAL，
+    /// 0..0xffffffff）。属性写入本身恒成功，**实际效果依赖合成器**——无
+    /// 合成器的会话（裸 i3 等）静默无变化，属可接受降级（调用方 toast 告知）。
+    pub fn set_opacity(&self, alpha: f32) -> Result<()> {
+        use x11rb::protocol::xproto::{AtomEnum, PropMode};
+        use x11rb::wrapper::ConnectionExt as _;
+        with_conn(|conn, _| {
+            let net_wm_opacity = intern(conn, "_NET_WM_WINDOW_OPACITY");
+            let v = (alpha.clamp(0.0, 1.0) * u32::MAX as f32).round() as u32;
+            conn.change_property32(
+                PropMode::REPLACE,
+                self.0,
+                net_wm_opacity,
+                AtomEnum::CARDINAL,
+                &[v],
+            )
+            .map_err(err)?;
+            conn.sync().map_err(err)
+        })
+    }
+
+    /// 点击穿透：改 XShape 输入区。协议规范语义（易踩反）：
+    /// - **空矩形列表**（ShapeRectangles `&[]`）= client 输入区为**空集**
+    ///   → 全窗不收指针事件，点击落到下层窗口（开穿透）
+    /// - **ShapeMask(src=None)** = **移除** client 输入区 → 恢复默认
+    ///   （默认输入区 = 全窗口，关穿透）
+    ///
+    /// 两者不是同一件事：空 region ≠ None。
+    pub fn set_click_through(&self, through: bool) -> Result<()> {
+        use x11rb::protocol::shape::{ConnectionExt as _, SK, SO};
+        use x11rb::protocol::xproto::ClipOrdering;
+        with_conn(|conn, _| {
+            let r = if through {
+                conn.shape_rectangles(
+                    SO::SET,
+                    SK::INPUT,
+                    ClipOrdering::UNSORTED,
+                    self.0,
+                    0,
+                    0,
+                    &[],
+                )
+            } else {
+                conn.shape_mask(SO::SET, SK::INPUT, self.0, 0, 0, x11rb::NONE)
+            };
+            r.map_err(err)?;
+            conn.sync().map_err(err)
+        })
+    }
+}
+
 /// 录制期间的选区边框（RAII）：4 条 override-redirect 细长窗口围在选区
 /// **外侧** 2px，Drop 即销毁（录制结束/出错/进程退出都不留残影）。
 ///
@@ -783,7 +851,7 @@ pub fn record_border(x: i32, y: i32, w: u32, h: u32) -> Option<RecordBorder> {
     ];
 
     use x11rb::protocol::shape::{ConnectionExt as _, SK, SO};
-    use x11rb::protocol::xproto::{CreateWindowAux, WindowClass};
+    use x11rb::protocol::xproto::{ClipOrdering, CreateWindowAux, WindowClass};
 
     let mut wins = Vec::new();
     'strips: for (sx, sy, sw, sh) in strips {
@@ -818,8 +886,12 @@ pub fn record_border(x: i32, y: i32, w: u32, h: u32) -> Option<RecordBorder> {
                 &aux,
             )
             .is_ok()
-            // 点击穿透：输入 shape 置空（source bitmap = NONE）
-            && conn.shape_mask(SO::SET, SK::INPUT, win, 0, 0, x11rb::NONE).is_ok()
+            // 点击穿透：输入 shape 置**空集**。注意 ShapeMask(src=None) 的语义
+            // 是「移除 client 输入区（恢复默认全窗收输入）」，并非置空——
+            // 此前用错了，边条实际在拦截选区边缘的点击
+            && conn
+                .shape_rectangles(SO::SET, SK::INPUT, ClipOrdering::UNSORTED, win, 0, 0, &[])
+                .is_ok()
             && conn.map_window(win).is_ok();
         if !created {
             let _ = conn.destroy_window(win);
@@ -908,4 +980,49 @@ pub fn run_global_shortcuts(
         // 流结束（portal 关闭会话）——正常退出
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 真机冒烟（env 门控 + `--ignored` 手动跑）：对 `LSCREEN_TEST_WIN` 指定
+    /// 的活窗口依次设置不透明度 0.5 → 穿透 → 恢复，每步停留 2s 供外部用
+    /// `xprop -id <win> _NET_WM_WINDOW_OPACITY` / `xwininfo -shape -id <win>`
+    /// 人工核对。CI 永不执行（ignore）。
+    ///
+    /// 用法（对正在显示的贴图窗口）：
+    /// `LSCREEN_TEST_WIN=$(xdotool search --class lscreen | tail -1) \
+    ///   cargo test -p lscreen-capture native_window -- --ignored --nocapture`
+    #[test]
+    #[ignore = "需要真实 X 会话与 LSCREEN_TEST_WIN 指定的窗口"]
+    fn native_window_opacity_and_through() {
+        let raw = std::env::var("LSCREEN_TEST_WIN").expect("LSCREEN_TEST_WIN=<窗口id>");
+        let wid = if let Some(hex) = raw.trim().strip_prefix("0x") {
+            u32::from_str_radix(hex, 16).expect("十六进制窗口 id")
+        } else {
+            raw.trim().parse().expect("十进制窗口 id")
+        };
+        let handle = raw_window_handle::RawWindowHandle::Xlib(
+            raw_window_handle::XlibWindowHandle::new(wid as std::ffi::c_ulong),
+        );
+        let n = NativeWindow::from_raw(handle).expect("Xlib 句柄");
+        // 每步停留（默认 2s），外部核对工具需要更长窗口时可加大
+        let dwell = std::time::Duration::from_secs(
+            std::env::var("LSCREEN_TEST_DWELL")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2),
+        );
+        n.set_opacity(0.5).expect("set_opacity(0.5)");
+        eprintln!("[1/3] 不透明度 0.5，停 2s（此时 xprop 应见 _NET_WM_WINDOW_OPACITY）");
+        std::thread::sleep(dwell);
+        n.set_click_through(true).expect("set_click_through(true)");
+        eprintln!("[2/3] 穿透开，停 2s（xwininfo -shape 应见空 Input shape）");
+        std::thread::sleep(dwell);
+        n.set_click_through(false)
+            .expect("set_click_through(false)");
+        n.set_opacity(1.0).expect("set_opacity(1.0)");
+        eprintln!("[3/3] 已恢复");
+    }
 }

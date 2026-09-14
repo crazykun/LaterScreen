@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[dependencies]
+# NativeWindow::from_raw 需要（M12 贴图不透明度/穿透）；与 app/eframe 同为
+# 0.6，纯类型 crate 无代码，不新增体积
+raw-window-handle = "0.6"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", features = ["randr", "xtest", "shape"] }
 # Wayland portal（M5）：纯 D-Bus 调 xdg-desktop-portal Screenshot，

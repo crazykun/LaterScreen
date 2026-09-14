@@ -523,36 +523,55 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       配置节补历史副本存缓存目录的三平台路径与「可直接删」说明。
       `docs/PLAN.md` §6 目录规范补 `app/src/history.rs`。
 
-### M12 贴图增强：对齐 Snipaste（不透明度 / 穿透 / 旋转 / 像素网格）
+### M12 贴图增强：对齐 Snipaste（不透明度 / 穿透 / 旋转 / 像素网格）✅ 2026-09-14
 
-贴图是 Snipaste 的招牌，也是本项目定位最直接的竞品能力。当前贴图只有
-缩放/拖拽/置顶，与 Snipaste 体验差距集中在四点。全部改动收敛在
-`pin.rs` + capture 层新增窗口属性 API（沿用 `set_window_class` /
-`set_window_icon` 的 raw-window-handle + 平台调用先例，不引入新依赖）。
+贴图是 Snipaste 的招牌，也是本项目定位最直接的竞品能力。改动收敛在
+`pin.rs` + capture 层新增 `NativeWindow`（沿用 `set_window_class` /
+`set_window_icon` 的平台调用先例，不引入新依赖——raw-window-handle 是
+纯类型 crate）。
 
-- [ ] **不透明度调节**：Ctrl+滚轮 10% 步进（25%–100%），toast 显示百分比，
-      工具条加不透明度按钮（弹出滑杆）。窗口级实现（不用 with_transparent
-      ——贴图内容本身不透明，改整窗 alpha）：Win
-      `SetLayeredWindowAttributes(LWA_ALPHA)`；X11 `_NET_WM_WINDOW_OPACITY`
-      （CARDINAL 0..0xffffffff，需要合成器，Deepin/KWin 已验过类似路径）；
-      mac `NSWindow.setAlphaValue`（objc2）。三平台收敛为
-      `capture::set_window_opacity(handle, f32)`，取不到句柄/不支持时仅缩放
-      不调透明并 toast 说明。快捷键与缩放（裸滚轮）不冲突
-- [ ] **鼠标穿透**：贴图置顶挡住下层窗口时点击穿到下层。Win
-      `WS_EX_TRANSPARENT | WS_EX_LAYERED`（SetWindowLongPtr）；X11 XShape
-      ShapeInput 空输入区（RecordBorder 已有先例）；mac
-      `setIgnoresMouseEvents(true)`。**穿透后本窗口收不到任何事件，退出
-      机制是设计难点**：工具条「穿透」按钮进入，进入前 toast 提示；
-      退出走托盘菜单「贴图穿透切换」（托盘对每张贴图存 cache/pins/
-      <pid>.win 记录，全局可逆）——Snipaste 同款思路。穿透与不透明度
-      组合是「贴图变参考底纹」的核心场景
-- [ ] **旋转 / 翻转**：0°/90°/180°/270° 旋转 + 水平/垂直翻转，RGBA 就地
-      变换（纯 CPU，一屏 4K 图毫秒级），窗口宽高随旋转对调、内容锚定
-      左上角；工具条按钮 + 快捷键（R 旋转 / H 水平翻转）。贴图内存只有
-      一份 RGBA + 纹理，变换后重建纹理即可，注意 8192 纹理上限沿长边判断
-- [ ] **高倍放大像素网格**：缩放 ≥ 8× 时叠加网格线（egui Painter 画，
-      交互层装饰、不进保存/复制的位图），网格线颜色黑白棋盘自适应
-      （按底色亮度取反），对齐像素边界取整避免半像素抖动
+- [x] **不透明度调节（Shift+滚轮，用户决策）**：20%–100%，滚轮上=更不
+      透明，toast 显示百分比。窗口级实现：X11 `_NET_WM_WINDOW_OPACITY`
+      / Win `SetLayeredWindowAttributes(LWA_ALPHA)`（先补
+      WS_EX_LAYERED）/ mac `NSWindow.setAlphaValue`，收敛为
+      `capture::NativeWindow::set_opacity`。**关键坑**：egui 0.35 默认
+      `horizontal_scroll_modifier = SHIFT`——Shift+滚轮被 egui 归为水平
+      滚动（值落 `delta.x`），只读 `delta.y` 恒为 0，必须两轴合成。
+      真机验证：xprop 见 `_NET_WM_WINDOW_OPACITY = 0x80000000`（=0.5）
+- [x] **鼠标穿透**：工具条「穿透」按钮（Esc 退出——窗口若仍持键盘
+      焦点；失焦后靠托盘）。平台实现：X11 XShape 输入区**空矩形列表**、
+      Win `WS_EX_TRANSPARENT`（SetWindowPos FRAMECHANGED 重算）、mac
+      `setIgnoresMouseEvents`。**穿透后窗口收不到任何事件**，恢复靠托盘
+      菜单「退出贴图穿透」：`<cache>/pins.ctl` 广播（"cmd nonce"，
+      nonce 单调递增、文件不删防多进程消费竞态），穿透中的贴图 300ms
+      心跳轮询（与历史面板 raise 同款 request_repaint_after 坑）。
+      **XShape 语义坑**：空矩形列表=输入区空集（真穿透），
+      `ShapeMask(src=None)`=移除 client 输入区（恢复默认全窗收输入），
+      两者相反——`record_border` 原代码用反了（边条实际在拦截选区边缘
+      点击），一并修正。真机验证：穿透期点击落到下层窗口（active 窗口
+      ≠ 贴图）、恢复期正常收输入
+- [x] **旋转 / 翻转**：R 旋转 90°、H/V 水平/垂直翻转，工具条按钮 +
+      键盘。纯像素置换（无插值、无损可逆），旋转后 w/h 对调、base 重算
+      + 纹理重建 + InnerSize 更新；复制/保存所见即所得（用变换后的
+      rgba）。真机验证：键盘 R 窗口 260x194→160x294
+- [x] **高倍放大像素网格**：实际显示比例（图像像素 ≥8 逻辑像素）时
+      叠加中灰网格线，只画 clip 交集（大图深放大时限流），交互层装饰
+      不进复制/保存位图。MAX_ZOOM 4→16（大图受 WM 最大窗口约束自然
+      到不了；小图标/像素画查看正是网格场景）
+- [x] **缩放控件（追加需求）**：工具条 `[− 100% +]` 组——百分比实时
+      预览、点击重置 100%（键盘 0）、−/+ 档位步进（吸附
+      25/50/75/100/125/150/200/300/400/600/800/1200/1600，连点无浮点
+      误差；键盘 +/=/−）。缩放键走裸事件扫描而非 consume_key：主键盘
+      '+' 是 Shift+= 组合，Modifiers::NONE 精确匹配会拒掉。工具条改为
+      按宽度预算贪心装入（优先级：复制并关闭 > 关闭 > 缩放组 > 置顶 >
+      穿透 > 旋转 > 翻转 > 保存）。工具条图标按主流工具惯例重绘：
+      穿透=窗口轮廓留过口+横穿箭头、旋转=经典刷新圆弧箭头（中心不打
+      叉——误读成关闭）、翻转=镜像双三角+虚轴
+- [x] 验证：capture 层（不透明度属性写入、穿透点击下落、恢复）真机
+      通过（env 门控的 ignored 测试 `native_window_opacity_and_through`，
+      `LSCREEN_TEST_WIN` 指定窗口手动跑）；旋转/键盘缩放真机通过。
+      Shift+滚轮手势与工具条按钮需人工点验（验证时桌面被占用）；
+      Win/mac 编译经 CI、运行待真机
 
 ### M13 截图体验补齐（延时 / 记忆选区 / 二维码生成 / 文字背景 / 取色历史）
 

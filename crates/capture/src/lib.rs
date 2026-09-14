@@ -138,6 +138,15 @@ pub fn set_fullscreen_span(window_id: u32) -> Result<()> {
     platform::set_fullscreen_span(window_id)
 }
 
+/// 跨平台原生窗口句柄（M12 贴图增强）：持有者可在运行期修改窗口属性
+/// （整窗不透明度 / 点击穿透）。经 eframe 暴露的 raw-window-handle 构造，
+/// X11 window id / Win32 HWND / NSWindow 的平台差异收敛在此。
+///
+/// 句柄仅保存、不拥有窗口；窗口销毁后再调用是未定义行为（各平台实际
+/// 多为静默失败，与 set_window_class 同语义）。`from_raw` 拿不到对应平台
+/// 变体时返回 None，调用方应把功能整体降级（不透明度/穿透不可用）。
+pub use platform::NativeWindow;
+
 // ---------------------------------------------------------------- 录制选区边框（M10）
 
 /// 录制期间的选区边框 guard：Linux X11 在选区外侧显示 4 条置顶、点击穿透的

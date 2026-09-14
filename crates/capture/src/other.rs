@@ -968,3 +968,128 @@ pub fn primary_monitor_scale() -> Option<f32> {
     let scale = m.scale_factor().ok()?;
     (scale > 0.0).then_some(scale)
 }
+
+// --------------------------------------------- 原生窗口句柄（M12：不透明度/穿透）
+
+#[cfg(windows)]
+mod win_native {
+    use super::{CaptureError, Result};
+    use windows_sys::Win32::Foundation::HWND;
+
+    /// NativeWindow 的 Windows 实现：直接持有 HWND。
+    #[derive(Clone)]
+    pub struct NativeWindow(HWND);
+
+    impl NativeWindow {
+        pub fn from_raw(h: raw_window_handle::RawWindowHandle) -> Option<Self> {
+            match h {
+                raw_window_handle::RawWindowHandle::Win32(w) => {
+                    Some(NativeWindow(w.hwnd.get() as HWND))
+                }
+                _ => None,
+            }
+        }
+
+        /// 整窗不透明度：先补 WS_EX_LAYERED 扩展样式（分层窗口是
+        /// SetLayeredWindowAttributes 的前置），再设 alpha 分量。
+        pub fn set_opacity(&self, alpha: f32) -> Result<()> {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, GWL_EXSTYLE,
+                LWA_ALPHA, WS_EX_LAYERED,
+            };
+            unsafe {
+                let style = GetWindowLongPtrW(self.0, GWL_EXSTYLE);
+                if style & WS_EX_LAYERED as isize == 0 {
+                    SetWindowLongPtrW(self.0, GWL_EXSTYLE, style | WS_EX_LAYERED as isize);
+                }
+                let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+                if SetLayeredWindowAttributes(self.0, 0, a, LWA_ALPHA) == 0 {
+                    return Err(CaptureError("SetLayeredWindowAttributes 失败".into()));
+                }
+            }
+            Ok(())
+        }
+
+        /// 点击穿透：WS_EX_TRANSPARENT 让命中测试穿透本窗口（需配合
+        /// WS_EX_LAYERED）。EXSTYLE 变更后要 SetWindowPos(SWP_FRAMECHANGED)
+        /// 重算框架才对输入生效；关闭穿透只摘 WS_EX_TRANSPARENT，
+        /// 保留 LAYERED（不透明度功能仍在用）。
+        pub fn set_click_through(&self, through: bool) -> Result<()> {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
+                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_LAYERED,
+                WS_EX_TRANSPARENT,
+            };
+            unsafe {
+                let style = GetWindowLongPtrW(self.0, GWL_EXSTYLE);
+                let need = if through {
+                    style | (WS_EX_TRANSPARENT | WS_EX_LAYERED) as isize
+                } else {
+                    style & !(WS_EX_TRANSPARENT as isize)
+                };
+                if need != style {
+                    SetWindowLongPtrW(self.0, GWL_EXSTYLE, need);
+                    SetWindowPos(
+                        self.0,
+                        std::ptr::null_mut(),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                    );
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+#[cfg(windows)]
+pub use win_native::NativeWindow;
+
+#[cfg(target_os = "macos")]
+mod mac_native {
+    use super::{CaptureError, Result};
+    use objc2::rc::Retained;
+    use objc2_app_kit::NSWindow;
+
+    /// NativeWindow 的 macOS 实现：持有 NSWindow（由 ns_view 反查，retain）。
+    /// NSWindow 非 Send——NativeWindow 只在主线程触碰（eframe App 生命周期
+    /// 本就在主线程，与 mac_border 的 MainWin 同约束）。
+    #[derive(Clone)]
+    pub struct NativeWindow(Retained<NSWindow>);
+
+    impl NativeWindow {
+        pub fn from_raw(h: raw_window_handle::RawWindowHandle) -> Option<Self> {
+            let view = match h {
+                raw_window_handle::RawWindowHandle::AppKit(a) => {
+                    a.ns_view.as_ptr() as *mut objc2::runtime::AnyObject
+                }
+                _ => return None,
+            };
+            // [ns_view window] 返回非持有引用，Retained::retain 补一次 +1
+            let raw: *mut NSWindow = unsafe { objc2::msg_send![view, window] };
+            let win = unsafe { Retained::retain(raw) }?;
+            Some(NativeWindow(win))
+        }
+
+        /// 整窗不透明度：NSWindow alphaValue（1.0 = 不透明）。
+        pub fn set_opacity(&self, alpha: f32) -> Result<()> {
+            unsafe { self.0.setAlphaValue(alpha.clamp(0.0, 1.0) as f64) }
+            Ok(())
+        }
+
+        /// 点击穿透：让窗口忽略全部鼠标事件（键盘焦点不受影响）。
+        pub fn set_click_through(&self, through: bool) -> Result<()> {
+            unsafe { self.0.setIgnoresMouseEvents(through) }
+            Ok(())
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub use mac_native::NativeWindow;
+
+#[cfg(not(any(windows, target_os = "macos")))]
+compile_error!("lscreen-capture: 未预期的平台（lib.rs 只分 linux / other 二态）");
