@@ -163,11 +163,18 @@ pub fn primary_monitor_bounds() -> Option<(i32, i32, u32, u32)> {
     platform::primary_monitor_bounds().ok()
 }
 
+/// 主显示器缩放比（物理像素/逻辑点）。Win/mac 读系统 DPI；X11 无系统级
+/// 缩放（本 crate 坐标恒物理像素，scale=1）。取不到返回 None，调用方按
+/// 1.0 兜底。托盘贴图等无 egui 上下文的场景用来换算窗口逻辑尺寸。
+pub fn primary_monitor_scale() -> Option<f32> {
+    platform::primary_monitor_scale()
+}
+
 // ---------------------------------------------------------------- 窗口枚举（M9）
 
-/// 一个可交互的顶层窗口。坐标语义与 `Screenshot::origin` 同一坐标系同一单位
-/// （Linux X11 = 根窗口物理像素；Windows = 屏幕物理像素；macOS = CG 全局点），
-/// 与 `Screenshot` 的原点相减即可换算到图像像素。
+/// 一个可交互的顶层窗口。坐标语义：一律物理像素，与 `Screenshot` 位图
+/// 同一单位（Linux X11 = 根窗口像素；Windows = 屏幕像素；macOS 已在
+/// `list_windows` 内按屏缩放把 CG 逻辑点换算为物理像素）。
 #[derive(Debug, Clone)]
 pub struct WindowInfo {
     pub id: u64,
@@ -211,15 +218,17 @@ pub fn window_at(x: i32, y: i32) -> Option<WindowInfo> {
 }
 
 /// 窗口矩形与一台显示器截图的交集，换算为图像像素坐标 (x, y, w, h)。
-/// 无交集返回 None。macOS 的窗口矩形是 CG 逻辑点，这里按该显示器的
-/// 缩放比换算成物理像素——平台差异收敛在本函数，不泄漏到 app。
+/// 无交集返回 None。所有平台的 `WindowInfo` 均为物理像素（macOS 已在
+/// `list_windows` 内按屏缩放换算完毕），但 macOS 的 `Screenshot::origin`
+/// 是 CG 逻辑点，需先乘 scale 折成物理再相减——平台差异收敛在本函数，
+/// 不泄漏到 app。
 pub fn window_rect_in_image(win: &WindowInfo, shot: &Screenshot) -> Option<(f32, f32, f32, f32)> {
     #[cfg(target_os = "macos")]
     let (x, y, w, h) = (
-        (win.x as f32 - shot.origin.0 as f32) * shot.scale,
-        (win.y as f32 - shot.origin.1 as f32) * shot.scale,
-        win.width as f32 * shot.scale,
-        win.height as f32 * shot.scale,
+        win.x as f32 - shot.origin.0 as f32 * shot.scale,
+        win.y as f32 - shot.origin.1 as f32 * shot.scale,
+        win.width as f32,
+        win.height as f32,
     );
     #[cfg(not(target_os = "macos"))]
     let (x, y, w, h) = (

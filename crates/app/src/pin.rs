@@ -127,7 +127,8 @@ impl PinApp {
 
     fn do_save(&mut self, ctx: &egui::Context) {
         let path = export::default_save_path("png");
-        match export::save_png(&self.rgba, self.w, self.h, &path) {
+        // 自动命名走防覆盖（create_new 消除 TOCTOU 覆盖窗口）
+        match export::save_png_unique(&self.rgba, self.w, self.h, &path) {
             Ok(p) => {
                 history::record_file(&p, history::Kind::Pin, self.source.as_deref());
                 self.toast(ctx, format!("已保存 {}", p.display()));

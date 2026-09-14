@@ -106,7 +106,15 @@ impl Renderer {
                 self.draw_arrow(canvas, &paint, &flat_stroke, *from, *to, e.style.width);
             }
             ElementKind::Curve { points } => {
-                if let Some(path) = polyline_path(points) {
+                if points.len() == 1 {
+                    // 单点笔迹 = 圆点：与交互层 circle_filled(width/2) 像素一致。
+                    // （旧实现画 0.01px 平头线段，导出后不可见，单击落点丢失）
+                    let mut pb = PathBuilder::new();
+                    pb.push_circle(points[0].x, points[0].y, e.style.width * 0.5);
+                    if let Some(path) = pb.finish() {
+                        canvas.fill_path(&path, &paint, FillRule::Winding, id, None);
+                    }
+                } else if let Some(path) = polyline_path(points) {
                     canvas.stroke_path(&path, &paint, &flat_stroke, id, None);
                 }
             }
@@ -400,18 +408,14 @@ fn sk_rect(r: &RectF) -> Option<SkRect> {
 }
 
 fn polyline_path(points: &[P2]) -> Option<tiny_skia::Path> {
-    if points.is_empty() {
+    // 少于 2 点无可见线段（单点笔迹由调用方画圆点），空路径直接放弃
+    if points.len() < 2 {
         return None;
     }
     let mut pb = PathBuilder::new();
     pb.move_to(points[0].x, points[0].y);
-    if points.len() == 1 {
-        // 单点：画一段极短线让 Round cap 呈现为圆点
-        pb.line_to(points[0].x + 0.01, points[0].y);
-    } else {
-        for p in &points[1..] {
-            pb.line_to(p.x, p.y);
-        }
+    for p in &points[1..] {
+        pb.line_to(p.x, p.y);
     }
     pb.finish()
 }
@@ -455,6 +459,32 @@ mod tests {
         let out = r.render(&src, 64, 64, &elems);
         assert_ne!(out, src);
         assert_eq!(out.len(), src.len());
+    }
+
+    #[test]
+    fn single_point_curve_renders_dot() {
+        // 回归：单点笔迹在交互层是 circle_filled(width/2) 的圆点，导出层
+        // 曾画 0.01px 平头线段（不可见，单击落点丢失）
+        let r = Renderer::new(None);
+        let src = blank(64, 64);
+        let elems = vec![Element {
+            id: 1,
+            kind: ElementKind::Curve {
+                points: vec![P2::new(32.0, 32.0)],
+            },
+            style: Style {
+                width: 8.0,
+                ..Style::default()
+            },
+        }];
+        let out = r.render(&src, 64, 64, &elems);
+        let center = ((32 * 64 + 32) * 4) as usize;
+        assert_ne!(&out[center..center + 3], &[255, 255, 255], "圆心应被着色");
+        // 圆点覆盖半径 width/2=4：距圆心 2px 处应着色、8px 外应保持原样
+        let near = ((32 * 64 + 34) * 4) as usize;
+        assert_ne!(&out[near..near + 3], &[255, 255, 255]);
+        let far = ((32 * 64 + 42) * 4) as usize;
+        assert_eq!(&out[far..far + 3], &[255, 255, 255]);
     }
 
     #[test]

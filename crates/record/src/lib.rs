@@ -12,6 +12,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use imgref::ImgVec;
@@ -19,6 +20,39 @@ use rgb::RGBA8;
 
 #[derive(Debug)]
 pub struct RecordError(pub String);
+
+/// 记录底层写失败的 writer 包装。mp4-rust 的 `Mp4Writer` 无法取回内部
+/// writer，收尾只能靠 Drop 时 `BufWriter` 的静默 flush——ENOSPC/EIO 会被
+/// 吞掉，moov 截断仍报成功。本包装把首个错误存入共享标志，收尾后显式
+/// 检查并并入错误路径（触发半成品清理）。
+struct TrackedWriter {
+    inner: File,
+    err: Arc<Mutex<Option<String>>>,
+}
+
+impl TrackedWriter {
+    fn note(&self, e: &std::io::Error) {
+        let mut slot = self.err.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(e.to_string());
+        }
+    }
+}
+
+impl Write for TrackedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf).inspect_err(|e| self.note(e))
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush().inspect_err(|e| self.note(e))
+    }
+}
+
+impl std::io::Seek for TrackedWriter {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos).inspect_err(|e| self.note(e))
+    }
+}
 
 impl std::fmt::Display for RecordError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -95,6 +129,12 @@ pub fn record_gif(
         let tick = Instant::now();
         match grab_frame() {
             Ok((rgba, w, h)) => {
+                // 长度与声明尺寸不符的帧喂进 gifski 会触发其内部硬断言
+                // （panic=abort 下整进程崩溃、不走半成品清理），先在此拦截
+                if w == 0 || h == 0 || rgba.len() != (w * h * 4) as usize {
+                    abort = Some(RecordError("帧尺寸/数据无效".into()));
+                    break;
+                }
                 match frame_size {
                     None => frame_size = Some((w, h)),
                     Some(size) if size != (w, h) => {
@@ -246,12 +286,16 @@ pub fn record_mp4(
 ) -> Result<usize> {
     let fps = opts.fps.clamp(1, 60);
     let bitrate = opts.bitrate_kbps.clamp(200, 50_000) * 1000;
-    let mut file = Some(std::io::BufWriter::new(
-        File::create(out_path).map_err(err)?,
-    ));
+    let write_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let mut file = Some(BufWriter::new(TrackedWriter {
+        inner: File::create(out_path).map_err(err)?,
+        err: Arc::clone(&write_err),
+    }));
     let mut muxer: Option<mp4::Mp4Writer<_>> = None;
     let mut encoder: Option<openh264::encoder::Encoder> = None;
-    let config_tsc = 1000u32;
+    // 90000 可被 24/25/30/50/60 fps 整除，帧时长不因整除截断漂移
+    // （timescale=1000 时 fps=60 每帧少 0.67ms，播放偏快 ~4%）
+    let config_tsc = 90_000u32;
 
     let interval = Duration::from_secs_f64(1.0 / fps as f64);
     let start = Instant::now();
@@ -358,7 +402,9 @@ pub fn record_mp4(
                         return Err(RecordError("编码输出空帧".into()));
                     }
                     let sample = mp4::Mp4Sample {
-                        start_time: (count as u64 * config_tsc as u64) / fps as u64,
+                        // mp4-rust 0.14 的 write_sample 只累计 duration，
+                        // start_time 被忽略（时间戳由 stts 表推导），恒置 0
+                        start_time: 0,
                         duration: (config_tsc / fps).max(1),
                         rendering_offset: 0,
                         is_sync: sync,
@@ -386,17 +432,22 @@ pub fn record_mp4(
         }
     }
 
-    // 收尾：flush muxer（moov 盒在 write_end 写出，失败同样清理半成品）
+    // 收尾：flush muxer（moov 盒在 write_end 写出，失败同样清理半成品）。
+    // muxer 在 match 内 drop，其中 BufWriter 尾盘 flush 的失败经共享标志带出
     let finalize: std::result::Result<(), RecordError> = match muxer.take() {
         Some(mut m) => m.write_end().map_err(err),
         None => Ok(()),
     };
-    if abort.is_some() || finalize.is_err() || count == 0 {
+    let write_failed = write_err.lock().unwrap().take();
+    if abort.is_some() || finalize.is_err() || count == 0 || write_failed.is_some() {
         let _ = std::fs::remove_file(out_path);
         if let Some(e) = abort {
             return Err(e);
         }
         finalize?;
+        if let Some(e) = write_failed {
+            return Err(RecordError(format!("写入文件失败: {e}")));
+        }
         return Err(RecordError("未采集到任何帧".into()));
     }
     Ok(count)

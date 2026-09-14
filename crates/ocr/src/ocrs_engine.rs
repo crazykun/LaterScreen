@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use ocrs::{ImageSource, OcrEngine, OcrEngineParams};
 use rten::Model;
@@ -27,6 +27,9 @@ pub struct OcrsEngine {
     unsupported_lang: Option<String>,
     /// 引擎缓存：模型加载约几百 ms，GUI 内重复识别不重复加载
     engine: OnceLock<OcrEngine>,
+    /// 串行化「检查缺失→下载→加载」：并发首调用的两个线程会同时往同一
+    /// 个 .part 写入，交错后 rename 落盘永久损坏的模型
+    download_lock: Mutex<()>,
 }
 
 /// ocrs 默认模型的字母表不含这些文字（按 tesseract 语言码前缀匹配）。
@@ -44,10 +47,16 @@ impl OcrsEngine {
         Self {
             unsupported_lang,
             engine: OnceLock::new(),
+            download_lock: Mutex::new(()),
         }
     }
 
     fn ensure_engine(&self) -> Result<&OcrEngine> {
+        if let Some(e) = self.engine.get() {
+            return Ok(e);
+        }
+        // 拿锁后再查一次：另一线程可能已在此期间完成下载与初始化
+        let _guard = self.download_lock.lock().unwrap();
         if let Some(e) = self.engine.get() {
             return Ok(e);
         }
@@ -163,14 +172,15 @@ fn curl_available() -> bool {
 }
 
 /// 经系统 curl 下载到 `.part` 临时名，成功后原子改名——中断不会留下
-/// 让 models_present() 误判的半截文件。
+/// 让 models_present() 误判的半截文件。临时名带 PID：同机两个进程并发
+/// 首调也不会交错写同一个 .part（rename 原子，后完成者覆盖等价内容）。
 fn download(url: &str, dest: &Path) -> Result<()> {
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir)
             .map_err(|e| OcrError(format!("创建 {} 失败: {e}", dir.display())))?;
     }
     eprintln!("首次使用内置 OCR：下载模型 {url} …");
-    let part = dest.with_extension("rten.part");
+    let part = dest.with_extension(format!("rten.{}.part", std::process::id()));
     let status = Command::new("curl")
         .args(["-fsSL", "--retry", "2", "--connect-timeout", "15", "-o"])
         .arg(&part)

@@ -63,6 +63,22 @@ jobs:
       - name: 构建并打包
         shell: bash
         run: bash scripts/package.sh "${{ matrix.target }}"
+      - name: 体积门槛（单产物 ≤ 20MB 硬约束）
+        shell: bash
+        run: |
+          # PLAN §1 体积硬约束。ci.yml 只在 Linux x86_64 宿主构建上检查裸二进制，
+          # 这道闸覆盖全部发布产物——尤其内嵌主程序的 Windows 安装器与 macOS
+          # universal 胖包。wc -c 而非 stat -c：三平台 runner 的 bash 均可用。
+          FAIL=0
+          for f in dist/*; do
+            SIZE=$(wc -c < "$f" | tr -d ' ')
+            echo "$f: $((SIZE / 1024 / 1024))MB ($SIZE bytes)"
+            if [ "$SIZE" -gt $((20 * 1024 * 1024)) ]; then
+              echo "::error::体积超限 $f"
+              FAIL=1
+            fi
+          done
+          test "$FAIL" -eq 0
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}

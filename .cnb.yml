@@ -58,7 +58,9 @@ $:
             apk add --no-cache curl >/dev/null
 
             TAG="${CNB_BRANCH}"
-            API="https://api.github.com/repos/crazykun/LaterScreen/releases/tags/${TAG}"
+            # per_page=100：Release 资产默认每页 30 个，SHA256SUMS 按字母序
+            # 靠后、最后上传——不翻页时它可能永远不在第一页，轮询空耗 60 分钟
+            API="https://api.github.com/repos/crazykun/LaterScreen/releases/tags/${TAG}?per_page=100"
 
             # 可选认证：配置了 GITHUB_TOKEN 就带上，避开未认证限流
             gh_curl() {

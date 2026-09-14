@@ -87,7 +87,11 @@ fn spawn_detached(args: &[&str]) {
             return;
         }
     };
-    match std::process::Command::new(exe).args(args).spawn() {
+    match std::process::Command::new(exe)
+        .args(args)
+        .stderr(child_stderr(args))
+        .spawn()
+    {
         Ok(mut child) => {
             // 常驻进程必须回收退出的子进程，否则累积僵尸
             std::thread::spawn(move || {
@@ -100,6 +104,40 @@ fn spawn_detached(args: &[&str]) {
                 args.first().unwrap_or(&"gui")
             )
         }
+    }
+}
+
+/// 托盘拉起的子进程 stderr 落日志：托盘自身被 daemonize 后 stdio 全断开，
+/// 子进程失败（如 Wayland 下区域录制不支持）若继续 /dev/null，用户表现
+/// 为「点了没反应」。日志放配置目录，超 4MB 截断防无限增长。
+fn child_stderr(args: &[&str]) -> std::process::Stdio {
+    use std::io::Write;
+    use std::process::Stdio;
+    let Some(dir) = config::config_dir() else {
+        return Stdio::null();
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("lscreen-tray.log");
+    if std::fs::metadata(&path)
+        .map(|m| m.len() > 4 * 1024 * 1024)
+        .unwrap_or(false)
+    {
+        let _ = std::fs::File::create(&path); // 超限截断
+    }
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(mut f) => {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let _ = writeln!(f, "---- unix+{secs}s: lscreen {} ----", args.join(" "));
+            f.into()
+        }
+        Err(_) => Stdio::null(),
     }
 }
 
@@ -123,10 +161,14 @@ fn pin_from_clipboard() -> Result<(), String> {
     history::record_rgba(img.as_raw(), w, h, history::Kind::Pin, None);
 
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    // 剪贴板图像是物理像素，scale 决定贴图窗口逻辑尺寸（w/scale）与指针
+    // 坐标换算。取主屏真实缩放比（Win/mac HiDPI 下 scale=1 会放大 N 倍），
+    // 取不到按 1.0 兜底
+    let scale = lscreen_capture::primary_monitor_scale().unwrap_or(1.0);
     use std::io::Write;
     use std::process::{Command, Stdio};
     let mut child = Command::new(exe)
-        .args(["pin", "--pos", "80,80", "--scale", "1.0"])
+        .args(["pin", "--pos", "80,80", "--scale", &scale.to_string()])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -657,15 +699,17 @@ mod linux_impl {
                     }
                 }
             }
-            // 配置热加载（面板保存会改 mtime；轮询间隔 1s 足够）
+            // 配置热加载（面板保存会改 mtime；轮询间隔 1s 足够）。
+            // 解析失败（读到中间态/手改坏）保留旧配置，下一轮再试
             if last_poll.elapsed() >= std::time::Duration::from_secs(1) {
                 last_poll = std::time::Instant::now();
                 let mtime = config_mtime();
                 if mtime != last_mtime {
                     last_mtime = mtime;
-                    let cfg = Config::load();
-                    hotkeys.apply(&cfg);
-                    handle.update(move |t: &mut LscreenTray| t.cfg = cfg);
+                    if let Some(cfg) = Config::load_ok() {
+                        hotkeys.apply(&cfg);
+                        handle.update(move |t: &mut LscreenTray| t.cfg = cfg);
+                    }
                 }
             }
             std::thread::park_timeout(std::time::Duration::from_millis(150));
@@ -788,14 +832,16 @@ mod native_impl {
             self.mtime_initialized = true;
             self.last_mtime = mtime;
             if changed {
-                let cfg = Config::load();
-                self.hotkeys.apply(&cfg);
-                for (a, _) in MENU_ACTIONS {
-                    if let Some(item) = self.menu_items.get(&action_id(a)) {
-                        item.set_text(menu_label(&cfg, a));
+                // 解析失败（读到中间态/手改坏）保留旧配置，下一轮再试
+                if let Some(cfg) = Config::load_ok() {
+                    self.hotkeys.apply(&cfg);
+                    for (a, _) in MENU_ACTIONS {
+                        if let Some(item) = self.menu_items.get(&action_id(a)) {
+                            item.set_text(menu_label(&cfg, a));
+                        }
                     }
+                    self.cfg = cfg;
                 }
-                self.cfg = cfg;
             }
         }
     }

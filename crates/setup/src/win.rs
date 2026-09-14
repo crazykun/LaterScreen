@@ -176,7 +176,20 @@ pub fn uninstall(mut prog: impl FnMut(f32, &str)) -> Result<(), String> {
         .map_err(|e| format!("删除注册表键失败: {e}"))?;
 
     prog(0.55, "删除程序文件");
-    let _ = std::fs::remove_file(dir.join("lscreen.exe"));
+    // 运行中的 exe 被映像锁定删不掉：吞错会"假卸载成功"、文件全部残留，
+    // 必须显式失败并提示退出托盘（与 install 的 sharing violation 同文案）
+    let exe = dir.join("lscreen.exe");
+    if exe.exists() {
+        if let Err(e) = std::fs::remove_file(&exe) {
+            let msg = if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
+                "删除失败：LaterScreen 正在运行，请先从托盘图标退出后重试".to_string()
+            } else {
+                format!("删除 lscreen.exe 失败: {e}")
+            };
+            // 注册表/快捷方式已清，重跑卸载幂等；直接把错误带给 UI
+            return Err(msg);
+        }
+    }
 
     // uninstall.exe 自身被锁不能直删：cmd 延迟 2 秒删除并顺带收掉目录
     // （若目录里留有用户文件，rmdir 失败无害，剩下的目录用户手动清理）

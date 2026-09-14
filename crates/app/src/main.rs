@@ -375,7 +375,9 @@ fn main() {
                     }
                     Ok(None) => Ok(()),
                     Err(e) => {
-                        eprintln!("lscreen: {e}");
+                        // 走 report_fatal（无控制台时至少 Windows 弹窗；
+                        // stderr 由托盘拉起的子进程重定向到日志，见 tray.rs）
+                        report_fatal(&format!("lscreen: {e}"));
                         std::process::exit(1);
                     }
                 }
@@ -419,7 +421,8 @@ fn main() {
                     }
                     Ok(None) => Ok(()),
                     Err(e) => {
-                        eprintln!("lscreen: {e}");
+                        // 同 record --select：错误必须可见（托盘子进程无控制台）
+                        report_fatal(&format!("lscreen: {e}"));
                         std::process::exit(1);
                     }
                 },
@@ -547,6 +550,15 @@ fn reexec_after_pick(sub: &str, region: &str, extra: &[String]) -> Result<(), St
 /// 交互框选录制区域：复用截图覆盖层（Mode::Record），框完即关窗；
 /// 返回绝对物理坐标的 "X,Y,W,H"；用户 Esc 取消返回 None。
 fn pick_region_interactive() -> Result<Option<String>, String> {
+    // Wayland 无自绘覆盖层，portal 也只能回选区图像拿不到绝对坐标，
+    // 而区域采帧/录屏本身依赖 X11——明确告知不支持，而不是走进 X11
+    // 路径报一串难懂的连接错误
+    #[cfg(target_os = "linux")]
+    if lscreen_capture::is_wayland() {
+        return Err(
+            "Wayland 会话暂不支持区域录制/滚动截图（需要 X11，或等待 PipeWire 支持）".to_string(),
+        );
+    }
     let OverlayShot {
         shot,
         pos,
@@ -921,8 +933,14 @@ fn run_shot(
         export::copy_to_clipboard(&rgba, w, h)?;
     }
     if output.is_some() || !clipboard {
+        // 自动命名走防覆盖（create_new）；显式 -o 保持覆盖惯例
+        let explicit = output.is_some();
         let path = output.unwrap_or_else(|| export::default_save_path("png"));
-        let saved = export::save_png(&rgba, w, h, &path)?;
+        let saved = if explicit {
+            export::save_png(&rgba, w, h, &path)?
+        } else {
+            export::save_png_unique(&rgba, w, h, &path)?
+        };
         history::record_file(&saved, history::Kind::Shot, Some(&saved));
         println!("{}", saved.display());
     }

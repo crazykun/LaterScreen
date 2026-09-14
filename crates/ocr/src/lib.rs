@@ -111,6 +111,17 @@ pub fn default_engine(languages: &[String]) -> Box<dyn TextRecognizer> {
                 // Linux 无系统引擎，等价未指定，走默认序
             }
         }
+        Some("tesseract") => {
+            #[cfg(target_os = "linux")]
+            {
+                // tesseract 仅 Linux 子进程实现；不可用时落回默认序
+                let t = tesseract::Tesseract::new(languages);
+                if t.available() {
+                    return Box::new(t);
+                }
+            }
+            // Win/mac 上 tesseract 引擎不存在，等价未指定
+        }
         _ => {}
     }
 

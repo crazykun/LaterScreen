@@ -957,3 +957,14 @@ pub fn primary_monitor_bounds() -> Result<(i32, i32, u32, u32)> {
         m.height().map_err(err)?,
     ))
 }
+
+/// 主显示器缩放比（物理/逻辑）。xcap 偶发返回 0/负值，按无效处理。
+pub fn primary_monitor_scale() -> Option<f32> {
+    let monitors = Monitor::all().ok()?;
+    let m = monitors
+        .iter()
+        .find(|m| m.is_primary().unwrap_or(false))
+        .or_else(|| monitors.first())?;
+    let scale = m.scale_factor().ok()?;
+    (scale > 0.0).then_some(scale)
+}

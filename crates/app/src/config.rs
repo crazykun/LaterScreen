@@ -113,6 +113,13 @@ impl Config {
         }
     }
 
+    /// 热加载专用：解析失败返回 None 而非默认值——托盘轮询到 mtime 变化
+    /// 时若文件恰好处于中间态/被手改坏，保留旧配置等下一轮，避免用户
+    /// 热键被静默重置成默认 F1。
+    pub fn load_ok() -> Option<Config> {
+        Self::load_inner().ok()
+    }
+
     fn load_inner() -> Result<Config, (PathBuf, String)> {
         let path = config_path().ok_or_else(|| (PathBuf::from("."), "无法定位配置目录".into()))?;
         // 无配置文件是正常形态，静默走默认值
@@ -124,13 +131,23 @@ impl Config {
     }
 
     /// 保存到配置文件（创建目录）。仅在配置面板点击保存时调用。
+    /// 走同目录临时文件 + rename 的原子写：托盘每秒轮询 mtime 热加载，
+    /// 直接 truncate 写会让托盘读到半截 TOML 而判"损坏"、整份回退默认值
+    /// （与 history::save_index 同一模式；临时文件名带 PID 防多进程互踩）。
     pub fn save(&self) -> Result<(), String> {
         let path = config_path().ok_or_else(|| "无法定位配置目录".to_string())?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
         }
         let text = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&path, text).map_err(|e| format!("写入配置失败: {e}"))
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        let renamed = std::fs::write(&tmp, &text).and_then(|_| std::fs::rename(&tmp, &path));
+        if renamed.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            std::fs::write(&path, text).map_err(|e| format!("写入配置失败: {e}"))
+        } else {
+            Ok(())
+        }
     }
 
     /// 配置覆盖的保存目录；空串 = None（用默认目录）

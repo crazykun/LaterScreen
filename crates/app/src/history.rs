@@ -12,6 +12,7 @@
 //!   unix 毫秒时间戳，天然排序且无需计数器。
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -67,6 +68,101 @@ fn history_dir() -> PathBuf {
 
 fn index_path() -> PathBuf {
     history_dir().join("index.toml")
+}
+
+/// 索引跨进程写互斥的锁文件（与单例锁分开：单例锁生命周期=面板进程，
+/// 索引锁按操作短持有）。
+fn index_lock_path() -> PathBuf {
+    history_dir().join("index.lock")
+}
+
+// ---------------- 跨进程文件锁（flock / LockFileEx）
+//
+// 语义：句柄存活期间持锁，drop/进程退出即释放——崩溃由内核回收，不会留
+// stale 锁，比「PID 文件 + 存活探测」可靠（后者会被 PID 复用误判成存活，
+// 把用户锁死在「面板永远打不开」上）。
+
+/// 独占文件锁句柄。
+struct FileLock(File);
+
+impl FileLock {
+    /// 打开（不存在则创建）并尝试**非阻塞**独占锁定。
+    /// `Ok(Some(_))` = 拿到；`Ok(None)` = 被别的进程/句柄持有；`Err` = IO 失败。
+    fn try_lock(path: &std::path::Path) -> std::io::Result<Option<FileLock>> {
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let r = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if r != 0 {
+                let e = std::io::Error::last_os_error();
+                return if e.kind() == std::io::ErrorKind::WouldBlock {
+                    Ok(None)
+                } else {
+                    Err(e)
+                };
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::{
+                LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+            };
+            let mut ov: windows_sys::Win32::System::IO::OVERLAPPED = unsafe { std::mem::zeroed() };
+            let r = unsafe {
+                LockFileEx(
+                    f.as_raw_handle(),
+                    LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                    0,
+                    u32::MAX,
+                    u32::MAX,
+                    &mut ov,
+                )
+            };
+            if r == 0 {
+                let e = std::io::Error::last_os_error();
+                // ERROR_LOCK_VIOLATION = 已被锁定（等价 flock 的 EWOULDBLOCK）
+                return if e.raw_os_error() == Some(33) {
+                    Ok(None)
+                } else {
+                    Err(e)
+                };
+            }
+        }
+        Ok(Some(FileLock(f)))
+    }
+
+    /// 通过持锁句柄写 PID（同句柄读写不受自身锁影响；仅供人工诊断）。
+    fn write_pid(&mut self, pid: u32) -> std::io::Result<()> {
+        use std::io::{Seek, Write};
+        let f = &mut self.0;
+        f.rewind()?;
+        f.set_len(0)?;
+        f.write_all(format!("{pid}\n").as_bytes())?;
+        f.flush()
+    }
+}
+
+/// 拿索引写锁（短等待重试，避免面板删除与 CLI 落盘交叠时直接放弃）。
+/// 返回 None = 1s 内拿不到/IO 失败——继续无锁执行，保留旧的尽力而为
+/// 语义（锁是防丢条目的优化，不是硬前置条件）。
+fn lock_index() -> Option<FileLock> {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match FileLock::try_lock(&index_lock_path()) {
+            Ok(Some(l)) => return Some(l),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// 缓存目录下的运行期小文件（单例锁 / 唤起信号）。锁与信号都是纯运行期
@@ -233,42 +329,47 @@ pub fn request_quit() {
 /// 打开历史面板前先抢单例锁。已有活着的面板则**留下唤起信号**并返回 false，
 /// 调用方应立即退出——那个面板会自己跳到前台（连按热键不再像「没反应」）。
 ///
-/// 锁文件含 PID 而非纯存在性：进程崩溃留下的 stale 锁，下一次启动读到死 PID
-/// 会覆盖它，不会把用户锁死。
+/// 实现为 flock/LockFileEx 句柄锁（存全局，进程退出自动释放）：崩溃不会
+/// 留 stale 锁，也不受 PID 复用误判影响。锁文件内的 PID 仅供人工诊断。
 pub fn acquire_single_instance() -> bool {
     let lock = lock_path();
     if let Some(dir) = lock.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    // 已有锁：先判断是否是活着的进程
-    if let Ok(text) = std::fs::read_to_string(&lock) {
-        if let Ok(pid) = text.trim().parse::<u32>() {
-            if pid_alive(pid) && pid != std::process::id() {
-                let _ = std::fs::write(raise_path(), b"1");
-                return false; // 另一个历史面板在跑，让它自己上前台
-            }
-        }
+    let mut slot = INSTANCE_LOCK.lock().unwrap();
+    if slot.is_some() {
+        return true; // 本进程已持锁（理论不可达：单例入口只走一次）
     }
-    // 拿到锁（覆盖 stale 锁）：写出自己的 PID。顺手清掉上次会话残留的唤起
-    // 与退出信号，免得新面板刚开就自我 Focus 或立刻自关。
-    let _ = std::fs::remove_file(raise_path());
-    let _ = std::fs::remove_file(quit_path());
-    let _ = std::fs::write(&lock, format!("{}\n", std::process::id()));
-    true
+    match FileLock::try_lock(&lock) {
+        Ok(Some(mut l)) => {
+            let _ = l.write_pid(std::process::id());
+            // 顺手清掉上次会话残留的唤起与退出信号，免得新面板刚开就自我
+            // Focus 或立刻自关。
+            let _ = std::fs::remove_file(raise_path());
+            let _ = std::fs::remove_file(quit_path());
+            *slot = Some(l);
+            true
+        }
+        Ok(None) => {
+            // 活着的持有者：留唤起信号让它上前台
+            let _ = std::fs::write(raise_path(), b"1");
+            false
+        }
+        Err(_) => false, // IO 异常：宁可放过也不锁死用户
+    }
 }
 
-/// 释放单例锁（窗口正常关闭时调用）。只删本进程持有的锁——先比对 PID，
-/// 避免误删刚被下一个实例重新写入的锁。
+/// 释放单例锁（窗口正常关闭时调用）：丢弃句柄即解锁。刻意不删锁文件——
+/// 「解锁后删除」与「下一个实例 create+lock」之间存在经典竞态（两个进程
+/// 各持不同 inode 的锁），留一个零字节文件无害。
 pub fn release_single_instance() {
-    let lock = lock_path();
-    if let Ok(text) = std::fs::read_to_string(&lock) {
-        if text.trim().parse::<u32>() == Ok(std::process::id()) {
-            let _ = std::fs::remove_file(&lock);
-            // 连带清掉可能刚落下、已经没人消费的唤起信号
-            let _ = std::fs::remove_file(raise_path());
-        }
-    }
+    drop(INSTANCE_LOCK.lock().unwrap().take());
+    // 连带清掉可能刚落下、已经没人消费的唤起信号
+    let _ = std::fs::remove_file(raise_path());
 }
+
+/// 本进程持有的单例锁句柄（进程存活期间常驻）。
+static INSTANCE_LOCK: std::sync::Mutex<Option<FileLock>> = std::sync::Mutex::new(None);
 
 /// 轮询唤起信号：有则消费掉（删文件）并返回 true。
 fn take_raise_request() -> bool {
@@ -288,34 +389,6 @@ fn take_quit_request() -> bool {
         return true;
     }
     false
-}
-
-/// 该 PID 是否还活着。Linux/mac 走 `kill(pid, 0)`（信号 0 只探测存活，
-/// 不投递信号）；Windows 走 OpenProcess 探测。
-#[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
-    let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    // 0 = 存活；EPERM = 存活但无权投递信号（同样视为活着）；ESRCH = 不存在
-    if r == 0 {
-        return true;
-    }
-    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-}
-
-#[cfg(not(unix))]
-fn pid_alive(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER};
-    use windows_sys::Win32::System::Threading::OpenProcess;
-    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-    unsafe {
-        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if !h.is_null() {
-            let _ = CloseHandle(h);
-            return true;
-        }
-        // 进程不存在报 ERROR_INVALID_PARAMETER；存在但权限不足则是别的错误
-        GetLastError() != ERROR_INVALID_PARAMETER
-    }
 }
 
 fn now() -> (u64, u64) {
@@ -448,6 +521,9 @@ fn record_png(
         return;
     }
 
+    // 跨进程写锁：GUI 落盘与面板删除并发时，无锁的 load→push→save 会
+    // 后写覆盖先写，丢掉先写者的条目（副本变孤儿、永不清理）
+    let _guard = lock_index();
     let mut index = load_index();
     index.items.push(Item {
         filename,
@@ -478,6 +554,8 @@ pub fn total_bytes() -> u64 {
 /// 其它东西（例如未来可能加的缩略图缓存）。
 pub fn clear_all() -> usize {
     let dir = history_dir();
+    // 与 record_png 同一把索引写锁（load→清→save 也是 read-modify-write）
+    let _guard = lock_index();
     let index = load_index();
     let n = index.items.len();
     for item in &index.items {
@@ -1174,7 +1252,8 @@ impl eframe::App for HistoryApp {
                                 let item = items.remove(idx);
                                 let _ = std::fs::remove_file(file_path(&item));
                                 self.thumbs.remove(&name);
-                                // 同步索引
+                                // 同步索引（与 record_png 同一把跨进程写锁）
+                                let _guard = lock_index();
                                 let mut index = load_index();
                                 index.items.retain(|i| i.filename != name);
                                 save_index(&index);
@@ -1224,23 +1303,11 @@ fn resolve_source(item: &Item) -> Option<PathBuf> {
 }
 
 /// unix 秒 → 本地 "MM-DD HH:MM"。
+/// 复用 export::local_civil：非 unix 平台也有 civil-from-days 兜底，
+/// 不会退化成 "1753900000s" 这样的原始秒数。
 fn fmt_time(secs: u64) -> String {
-    #[cfg(unix)]
-    {
-        let t = secs as libc::time_t;
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        if !unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
-            return format!(
-                "{:02}-{:02} {:02}:{:02}",
-                tm.tm_mon + 1,
-                tm.tm_mday,
-                tm.tm_hour,
-                tm.tm_min
-            );
-        }
-    }
-    // 非 unix / 转换失败：退化为秒数
-    format!("{secs}s")
+    let (_, mo, d, h, mi, _) = export::local_civil(secs as i64);
+    format!("{mo:02}-{d:02} {h:02}:{mi:02}")
 }
 
 // ---------------------------------------------------------------- 测试
@@ -1263,11 +1330,12 @@ struct TestDir {
 #[cfg(test)]
 impl TestDir {
     fn new(tag: &str) -> Self {
-        let serial = TEST_SERIAL.lock().unwrap();
+        // 中毒也要接着用：一个测试 panic 不应级联炸掉所有共用注入槽的测试
+        let serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("lscreen-hist-test-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        *TEST_DIR.lock().unwrap() = Some(dir.clone());
+        *TEST_DIR.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir.clone());
         Self {
             _serial: serial,
             dir,
@@ -1278,7 +1346,7 @@ impl TestDir {
 #[cfg(test)]
 impl Drop for TestDir {
     fn drop(&mut self) {
-        *TEST_DIR.lock().unwrap() = None;
+        *TEST_DIR.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
@@ -1477,72 +1545,78 @@ mod tests {
     }
 
     // ---- 单例锁 / 信号 ----
+    // 语义已从「PID 文件 + 存活探测」换成 flock/LockFileEx 句柄锁：
+    // 用同一进程内另开的锁句柄（flock 对不同 fd 互相冲突）模拟"另一个
+    // 活着的持锁进程"，不再需要真拉子进程。
 
     #[test]
-    fn lock_with_stale_pid_taken_over() {
+    fn lock_taken_over_when_no_live_holder() {
+        // 锁文件里只有残留内容（无活句柄持有）：任意垃圾 PID 都能接管
         let _t = TestDir::new("lock-stale");
-        // 崩溃残留的 stale 锁：PID 远超三平台上限，必然不存在
         std::fs::write(lock_path(), format!("{}\n", u32::MAX - 10)).unwrap();
         assert!(acquire_single_instance());
+        // 诊断 PID 已更新为本进程
         assert_eq!(
             std::fs::read_to_string(lock_path()).unwrap().trim(),
             std::process::id().to_string()
         );
         release_single_instance();
-        assert!(!lock_path().exists());
-    }
-
-    #[test]
-    fn lock_with_own_pid_taken_over() {
-        // 残留锁的 PID 恰好被本进程复用：视为死锁残留，接管而非退出
-        let _t = TestDir::new("lock-own");
-        std::fs::write(lock_path(), format!("{}\n", std::process::id())).unwrap();
+        // 锁文件保留（避免"解锁后删除"的经典 inode 竞态），但可再次接管
+        assert!(lock_path().exists());
         assert!(acquire_single_instance());
         release_single_instance();
-        assert!(!lock_path().exists());
     }
 
     #[test]
-    #[cfg(unix)]
-    fn lock_with_alive_pid_leaves_raise_signal() {
-        let _t = TestDir::new("lock-alive");
-        // 拉一个真活着的进程占锁（sleep 三平台可移植性差，仅 unix 验证）
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .unwrap();
-        std::fs::write(lock_path(), format!("{}\n", child.id())).unwrap();
-        // 第二实例：退出并留下唤起信号
+    fn lock_conflict_leaves_raise_signal() {
+        let _t = TestDir::new("lock-conflict");
+        // 另一个"进程"持有锁句柄
+        let holder = FileLock::try_lock(&lock_path()).unwrap();
+        assert!(holder.is_some());
+        let holder = holder.unwrap();
+        // 第二实例：失败并留下唤起信号
         assert!(!acquire_single_instance());
         assert!(raise_path().exists());
         // 信号被消费一次即失效
         assert!(take_raise_request());
         assert!(!take_raise_request());
-        let _ = child.kill();
-        let _ = child.wait();
-        // 持锁进程死后锁可被接管
+        drop(holder); // 持锁者退出：锁自动释放、可被接管
         assert!(acquire_single_instance());
+        release_single_instance();
     }
 
     #[test]
-    fn release_keeps_foreign_lock() {
-        let _t = TestDir::new("lock-foreign");
+    fn lock_reentry_in_same_process_is_true() {
+        // 同进程重复 acquire：全局句柄仍持有，直接返回 true（幂等）
+        let _t = TestDir::new("lock-reentry");
+        assert!(acquire_single_instance());
+        assert!(acquire_single_instance());
+        release_single_instance();
+        assert!(acquire_single_instance());
+        release_single_instance();
+    }
+
+    #[test]
+    fn release_without_acquire_is_noop() {
+        let _t = TestDir::new("lock-noop");
         std::fs::write(lock_path(), "12345\n").unwrap();
+        // 未持锁就 release：不动别人的锁内容，也不影响他人接管
         release_single_instance();
         assert!(lock_path().exists());
-        assert_eq!(std::fs::read_to_string(lock_path()).unwrap(), "12345\n");
+        assert!(acquire_single_instance());
+        release_single_instance();
     }
 
     #[test]
     fn acquire_clears_stale_signals() {
         // 新面板接锁时清掉残留的 raise/quit：否则刚开面板就会自 Focus / 自关
         let _t = TestDir::new("lock-clear-signals");
-        std::fs::write(lock_path(), format!("{}\n", u32::MAX - 10)).unwrap();
         std::fs::write(raise_path(), b"1").unwrap();
         std::fs::write(quit_path(), b"1").unwrap();
         assert!(acquire_single_instance());
         assert!(!raise_path().exists());
         assert!(!quit_path().exists());
+        release_single_instance();
     }
 
     #[test]

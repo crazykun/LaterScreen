@@ -88,7 +88,6 @@ crates/
 ### 版本历程
 
 | 版本 | 日期 | 交付内容 |
-| v0.8.2 | 2026-09-11 | 配置窗口与历史面板支持浅色/夜间/自动主题；修复 Windows 安装器暗色输入框文字不可见；修复主题切换下的 UI 配色与配置布局 |
 |---|---|---|
 | v0.1.0 | 2026-08-18 | M1 截图标注、M2 取色/二维码/CLI、M3 OCR（Linux tesseract）、M4a GIF 录屏、M6 工具栏图标化；四种原生包格式 + dmg |
 | v0.2.0 | 2026-08-19 | M7 贴图（独立进程 + 缩放/拖拽/工具条）、Win/mac 系统 OCR、内置 ocrs 兜底、Windows 自绘安装器替代 NSIS |
@@ -101,7 +100,8 @@ crates/
 | **v0.7.0** | **2026-08-26** | **多屏与 Wayland：双屏跨屏覆盖层（`_NET_WM_FULLSCREEN_MONITORS` 铺满虚拟桌面，可跨屏框选）、Wayland 交互式 portal 截图 + GlobalShortcuts 全局热键；修滚动截图无法滚动时像崩溃（退化普通区域截图）、托盘退出关历史面板、滚动截图选区边框、预览长图 Select 可拖动** |
 | v0.7.1 | 2026-08-29 | 健壮性：修 tesseract 管道互等死锁隐患（stdin 写入挪独立线程）、历史 index.toml 原子写（tmp+rename）、Win/mac 托盘创建失败降级仅热键常驻；history/export 补 32 个单测（详见「已修缺陷 review 2026-08-29」）、CI 增 cargo audit 供应链门槛 |
 | **v0.8.0** | **2026-08-31** | **三平台能力对齐：Windows/macOS 滚动长截图（SendInput / CGEvent 合成滚轮+指针）、Win/mac 录屏与滚动截图范围红框（画选区外侧保证不入镜）、mac 高分屏区域截图物理↔逻辑坐标换算修复；修 history 测试写真实缓存目录致 CI 自 v0.7.1 全红、release 矩阵砍 armv7/i686/rpm（0 下载，附件 23→13）** |
-| v0.8.2 | 2026-09-01 | 修复：历史面板位置三平台错乱（构建期物理像素喂 with_position 而 egui 按逻辑坐标解释，Win 缩放 125%/150% 飞屏、mac Retina 坐标系不一致、Linux 压 dock）——改首帧 OuterPosition 逻辑坐标定位；新增位置记忆（cache/history.pos，恢复前校验仍在桌面内，拔屏回退默认防「打开即消失」）；默认摆放避让系统栏（mac 右上菜单栏下、Win/Linux 右下任务栏上） |
+| v0.8.1 | 2026-09-01 | 修复：历史面板位置三平台错乱（构建期物理像素喂 with_position 而 egui 按逻辑坐标解释，Win 缩放 125%/150% 飞屏、mac Retina 坐标系不一致、Linux 压 dock）——改首帧 OuterPosition 逻辑坐标定位；新增位置记忆（cache/history.pos，恢复前校验仍在桌面内，拔屏回退默认防「打开即消失」）；默认摆放避让系统栏（mac 右上菜单栏下、Win/Linux 右下任务栏上） |
+| v0.8.2 | 2026-09-11 | 配置窗口与历史面板支持浅色/夜间/自动主题；修复 Windows 安装器暗色输入框文字不可见；修复主题切换下的 UI 配色与配置布局 |
 
 ### M1 截图 + 标注 ✅（核心价值）
 - [x] workspace 骨架 + 体积优化 profile
@@ -533,6 +533,64 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       破坏 OCR tesseract 子进程的 wait_with_output
 - [ ] Win/mac 指针查询（capture/src/other.rs cursor_position 返回 None）：
       windows-rs GetCursorPos / objc2 NSEvent.mouseLocation，补齐后多屏跟随生效
+
+### 已修缺陷（review 2026-09-14）
+
+并发竞态、平台正确性与失败可见性批次（含 CI 门槛加固）：
+
+- [x] **历史单例锁换句柄锁**：原「PID 文件 + 存活探测」在持有者崩溃后靠
+      PID 复用误判可能把用户锁死。改为 flock / LockFileEx 句柄锁
+      （`FileLock`，进程退出内核自动释放，零 stale 残留）；锁文件保留
+      不删（避开「解锁后删除 vs 下个实例 create+lock」的 inode 竞态），
+      内部 PID 仅供人工诊断。测试改为同进程另开 fd 模拟冲突（flock 对
+      不同 fd 互斥），不再拉真 sleep 子进程
+- [x] **历史索引跨进程写锁**：GUI 落盘与面板删除并发时，无锁的
+      load→push→save 后写覆盖先写，丢条目且副本变孤儿永不清理。
+      `record_png`/`clear_all`/面板删除单条统一走 `index.lock` 短持锁
+      （1s 重试，拿不到退回尽力而为语义）
+- [x] **config.toml 原子写 + 热加载防抖**：save 走同目录 tmp+rename
+      （带 PID 防互踩）；托盘轮询解析失败（读到中间态/手改坏）保留旧
+      配置下一轮再试（`load_ok`），不再整份回退默认值静默重置用户热键
+- [x] **保存防覆盖（TOCTOU）**：`save_png_unique` 用 create_new（O_EXCL）
+      独占创建 + `_N` 顺延，消除 `save_path` 的 exists 探测与写入之间
+      被并发进程抢名的覆盖窗口。GUI/CLI/贴图自动命名路径全接入；
+      显式 `-o` 保持覆盖惯例。文件名模板运行时二次校验（手改 config
+      注入 `../` 可穿越 save_dir），非法回退默认模板
+- [x] **MP4 时基修正**：timescale 1000→90000（可被 24/25/30/50/60 整除；
+      原 60fps 每帧少 0.67ms，播放偏快 ~4%）；`TrackedWriter` 捕获
+      BufWriter 尾盘 flush 的 ENOSPC/EIO（mp4-rust 收尾静默，moov 截断
+      仍报成功）并入错误路径触发半成品清理；`write_sample` 的
+      start_time 在 0.14 被忽略，恒置 0 由 stts 推导
+- [x] **GIF 帧校验**：长度与声明尺寸不符的帧喂 gifski 触发其内部断言
+      （panic=abort 下整进程崩、不走清理路径），采帧侧先拦截报错
+- [x] **托盘子进程失败可见**：daemonize 后 stdio 断开，子进程失败表现为
+      「点了没反应」。stderr 落 `<config>/lscreen-tray.log`（4MB 截断）；
+      record --select / scroll 在 Wayland 明确报「不支持」而非走进 X11
+      报一串连接错误；CLI 失败路径统一走 report_fatal（无控制台弹窗）
+- [x] **贴图 HiDPI**：托盘「读剪贴板贴图」固定 --scale 1，Win/mac HiDPI
+      下窗口被放大 N 倍。新增 `primary_monitor_scale`，按主屏真实缩放比
+      传入（X11 恒 1.0）
+- [x] **macOS 窗口矩形换算**：`WindowInfo` 已在 list_windows 内换算为
+      物理像素，`window_rect_in_image` 却再乘 shot.scale——改为 origin
+      乘 scale、尺寸直接用；顺带补文档说明三平台均为物理像素契约
+- [x] **X11 z_order 语义反转**：`_NET_CLIENT_LIST_STACKING` 自底向上，
+      原实现 `(n-1-i)` 算反了，与 Win/mac（越大越顶层）契约相反，
+      `window_at` 命中检测取错窗口。改为 `i` 直接用
+- [x] **单点笔迹导出丢失**：单击落点是交互层 circle_filled(width/2) 的
+      圆点，导出层却画 0.01px 平头线段（不可见）。导出改 push_circle，
+      补回归测试
+- [x] **ocrs 模型下载竞态**：两个线程并发首调用会交错写同一个 .part，
+      rename 落盘永久损坏的模型。「检查→下载→加载」加 Mutex 串行化
+      （双重检查），.part 名带 PID 防跨进程互踩
+- [x] **OCR 引擎显式选择**：`engine = "tesseract"` 配置原先被静默忽略
+      落回默认序，现在 Linux 上真正生效
+- [x] **Windows 卸载器假成功**：运行中的 lscreen.exe 被映像锁定删不掉，
+      原先吞错后报「卸载成功」但文件全残留。sharing violation 显式
+      失败并提示先退出托盘（重跑幂等）
+- [x] **CI/release 门槛**：release.yml 打包后逐产物检查 ≤20MB（覆盖内嵌
+      主程序的安装器与 macOS universal 胖包，ci.yml 只查 Linux 裸二进制）；
+      .cnb.yml Release 轮询加 per_page=100——资产超 30 个时 SHA256SUMS
+      按字母序靠后，不翻页永远不在第一页，轮询空耗 60 分钟超时
 
 ### 已修缺陷（review 2026-08-29）
 

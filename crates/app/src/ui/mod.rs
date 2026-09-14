@@ -425,7 +425,8 @@ impl SnipApp {
             return;
         };
         let path = export::save_path(&self.config, "png");
-        match export::save_png(&rgba, w, h, &path) {
+        // 自动命名走防覆盖（create_new 消除 exists 检查与写入间的 TOCTOU）
+        match export::save_png_unique(&rgba, w, h, &path) {
             Ok(saved) => {
                 println!("{}", saved.display());
                 history::record_file(&saved, history::Kind::Shot, Some(&saved));

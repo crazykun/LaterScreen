@@ -408,7 +408,6 @@ fn list_windows_inner(conn: &impl Connection, screen: &Screen) -> Vec<WindowInfo
         prop(conn, screen.root, atoms.current_desktop).and_then(|r| values32(&r).next());
 
     let mut out = Vec::new();
-    let n = stacking.len();
     for (i, &win) in stacking.iter().enumerate() {
         // 非当前桌面（0xFFFFFFFF = sticky，出现在所有桌面，保留）
         if atoms.net_wm_desktop != 0 {
@@ -451,7 +450,9 @@ fn list_windows_inner(conn: &impl Connection, screen: &Screen) -> Vec<WindowInfo
             y,
             width: w,
             height: h,
-            z_order: (n - 1 - i) as u32,
+            // stacking 自底向上（i 越大越顶层）→ 越大越靠前，与契约及
+            // Win/mac 实现（other.rs）一致
+            z_order: i as u32,
             is_minimized: false,
         });
     }
@@ -702,6 +703,11 @@ pub fn primary_monitor_bounds() -> Result<(i32, i32, u32, u32)> {
             .ok_or_else(|| CaptureError("no monitor found".into()))?;
         Ok((m.x, m.y, m.width, m.height))
     })
+}
+
+/// X11 无系统级缩放（本 crate 坐标恒物理像素），恒 1.0。
+pub fn primary_monitor_scale() -> Option<f32> {
+    Some(1.0)
 }
 
 /// 录制期间的选区边框（RAII）：4 条 override-redirect 细长窗口围在选区

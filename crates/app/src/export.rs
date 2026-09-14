@@ -49,7 +49,14 @@ pub fn default_save_path(ext: &str) -> PathBuf {
 
 /// 按配置生成保存路径。
 pub fn save_path(cfg: &crate::config::Config, ext: &str) -> PathBuf {
-    let name = crate::config::render_template(&cfg.filename_template, save_time());
+    // 运行时校验模板：配置面板保存时已挡过一道，但手改 config.toml 写入
+    // 含 ../ 或分隔符的模板可把产物写到 save_dir 之外——非法回退默认模板
+    let template = if crate::config::validate_template(&cfg.filename_template).is_ok() {
+        cfg.filename_template.as_str()
+    } else {
+        crate::config::DEFAULT_TEMPLATE
+    };
+    let name = crate::config::render_template(template, save_time());
     let dir = cfg.save_dir_override().unwrap_or_else(default_dir);
     let mut path = dir.join(format!("{name}.{ext}"));
     let mut n = 1;
@@ -83,7 +90,7 @@ fn save_time() -> (i64, u32, u32, u32, u32, u32) {
 
 /// unix 秒 → 本地时间 (年,月,日,时,分,秒)。
 /// unix 平台走 libc localtime_r；其余平台退化为 UTC（civil-from-days 算法）。
-fn local_civil(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
+pub(crate) fn local_civil(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
     #[cfg(unix)]
     {
         let t = secs as libc::time_t;
@@ -125,6 +132,57 @@ fn utc_civil(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
 /// 父目录不存在时自动创建（自定义保存目录首次使用）。
 /// 返回实际写入的路径（可能补过扩展名）。
 pub fn save_png(rgba: &[u8], w: u32, h: u32, path: &Path) -> Result<PathBuf, String> {
+    let (img, out) = prep_png(rgba, w, h, path)?;
+    img.save_with_format(&out, image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+/// 防覆盖版 `save_png`：create_new（O_EXCL）独占创建，撞名按 `_N` 重试。
+/// `save_path` 的 exists() 探测与写入之间是 TOCTOU——托盘 GUI 与 CLI 同秒
+/// 并发保存会选中同一路径、后写者覆盖前者；独占创建从内核侧消除该窗口。
+/// 显式指定输出路径的调用方仍走 `save_png`（CLI `-o` 覆盖既有文件是惯例）。
+pub fn save_png_unique(rgba: &[u8], w: u32, h: u32, path: &Path) -> Result<PathBuf, String> {
+    use std::io::Write;
+    let (img, out) = prep_png(rgba, w, h, path)?;
+    let stem = out
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = out
+        .extension()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "png".into());
+    let mut candidate = out.clone();
+    for n in 1u32.. {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(f) => {
+                let mut bw = std::io::BufWriter::new(f);
+                img.write_to(&mut bw, image::ImageFormat::Png)
+                    .map_err(|e| e.to_string())?;
+                bw.flush().map_err(|e| e.to_string())?;
+                return Ok(candidate);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 10_000 => {
+                candidate = out.with_file_name(format!("{stem}_{n}.{ext}"));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    unreachable!("循环内必经 return 或 Err")
+}
+
+/// 公共准备：缓冲校验、扩展名规范化（缺省补 .png、非 png 拒绝）、建目录。
+fn prep_png(
+    rgba: &[u8],
+    w: u32,
+    h: u32,
+    path: &Path,
+) -> Result<(image::RgbaImage, PathBuf), String> {
     let img = image::RgbaImage::from_raw(w, h, rgba.to_vec())
         .ok_or_else(|| "invalid image buffer".to_string())?;
     let mut out = path.to_path_buf();
@@ -142,9 +200,7 @@ pub fn save_png(rgba: &[u8], w: u32, h: u32, path: &Path) -> Result<PathBuf, Str
             std::fs::create_dir_all(dir).map_err(|e| format!("创建目录失败: {e}"))?;
         }
     }
-    img.save_with_format(&out, image::ImageFormat::Png)
-        .map_err(|e| e.to_string())?;
-    Ok(out)
+    Ok((img, out))
 }
 
 /// 用系统默认程序打开文件（录屏点击播放、图片等按默认应用打开）。
@@ -579,6 +635,39 @@ mod tests {
         let g1 = save_path(&cfg, "gif");
         assert_eq!(g1.extension().unwrap(), "gif");
         assert_ne!(g1, p1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_path_falls_back_on_bad_template() {
+        // 手改 config 注入路径穿越模板：运行时回退默认模板，产物留在 save_dir 内
+        let dir = std::env::temp_dir().join(format!("lscreen-export-test4-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = crate::config::Config {
+            save_dir: dir.display().to_string(),
+            filename_template: "../../etc/pwned_{YYYY}".into(),
+            ..Default::default()
+        };
+        let p = save_path(&cfg, "png");
+        assert_eq!(p.parent(), Some(dir.as_path()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_png_unique_never_overwrites() {
+        let dir = std::env::temp_dir().join(format!("lscreen-export-test5-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let img = rgba_3x2();
+        // 预占目标名（模拟另一进程在 exists 检查与写入之间抢先落地）
+        let first = dir.join("a.png");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&first, b"occupied").unwrap();
+        // 独占创建必撞 AlreadyExists → 顺延 _1，且预占内容不被覆盖
+        let out = save_png_unique(&img, 3, 2, &first).unwrap();
+        assert_eq!(out, dir.join("a_1.png"));
+        assert_eq!(std::fs::read(&first).unwrap(), b"occupied");
+        assert!(out.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
