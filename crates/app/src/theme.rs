@@ -15,10 +15,10 @@ pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(0xe5, 0x39, 0x35);
 // ---------------------------------------------------------------- 暗色令牌
 
 const DARK_BG: egui::Color32 = egui::Color32::from_rgb(0x14, 0x14, 0x18);
-const DARK_STROKE: egui::Color32 = egui::Color32::from_rgb(0x2b, 0x2b, 0x35);
+const DARK_STROKE: egui::Color32 = egui::Color32::from_rgb(0x3d, 0x3d, 0x4c);
 const DARK_TEXT: egui::Color32 = egui::Color32::from_rgb(0xec, 0xec, 0xf1);
 const DARK_MUTED: egui::Color32 = egui::Color32::from_rgb(0x9a, 0x9a, 0xa5);
-const DARK_FIELD: egui::Color32 = egui::Color32::from_rgb(0x16, 0x16, 0x1b);
+const DARK_FIELD: egui::Color32 = egui::Color32::from_rgb(0x1f, 0x1f, 0x27);
 /// 页脚条（比面板更深一层）
 const DARK_FOOTER: egui::Color32 = egui::Color32::from_rgb(0x11, 0x11, 0x15);
 
@@ -61,6 +61,8 @@ pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
         v.window_corner_radius = egui::CornerRadius::same(12);
         v.menu_corner_radius = egui::CornerRadius::same(8);
         v.selection.bg_fill = ACCENT;
+        // TextEdit 聚焦框取 selection.stroke；默认淡蓝与品牌红主题不搭
+        v.selection.stroke = egui::Stroke::new(1.0, ACCENT);
         v.hyperlink_color = ACCENT;
         // 文字令牌：text_color()/weak_text_color() 即业务代码的取色入口
         v.override_text_color = Some(text);
@@ -75,15 +77,15 @@ pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
             w.corner_radius = egui::CornerRadius::same(6);
             w.fg_stroke.color = text;
         }
-        // 非交互态（下拉箭头/装饰线）：弱化色 + 输入域底色 + 描边
+        // 非交互态（下拉箭头/装饰线）：弱化色 + 输入域底色 + 描边。
+        // egui 默认 inactive.bg_stroke 是 Stroke::NONE（width 0），只改 color
+        // 不会画线——必须整条 Stroke::new 赋值，否则输入框边框隐形。
         v.widgets.noninteractive.corner_radius = egui::CornerRadius::same(6);
         v.widgets.noninteractive.fg_stroke.color = muted;
         v.widgets.noninteractive.weak_bg_fill = field;
-        v.widgets.noninteractive.bg_stroke.color = stroke;
+        v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, stroke);
         v.widgets.inactive.weak_bg_fill = field;
-        v.widgets.inactive.bg_stroke.color = stroke;
-        v.widgets.inactive.weak_bg_fill = field;
-        v.widgets.inactive.bg_stroke.color = stroke;
+        v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, stroke);
         style.spacing.button_padding = egui::vec2(12.0, 6.0);
         style.spacing.interact_size.y = 30.0;
         ctx.set_style_of(theme, std::sync::Arc::new(style));
@@ -103,5 +105,35 @@ mod tests {
     fn footer_follows_dark_mode() {
         assert_eq!(footer_fill(&egui::Visuals::dark()), DARK_FOOTER);
         assert_eq!(footer_fill(&egui::Visuals::light()), LIGHT_FOOTER);
+    }
+
+    #[test]
+    fn dark_input_tokens_contrast() {
+        // 回归：曾 #16161b vs #141418 通道仅差 2，夜间输入域与面板融为一体
+        let lum = |c: egui::Color32| (c.r() as u32 + c.g() as u32 + c.b() as u32) as f32 / 3.0;
+        assert!(
+            lum(DARK_FIELD) - lum(DARK_BG) >= 8.0,
+            "暗色输入域底色需亮于面板底色"
+        );
+        assert!(
+            lum(DARK_STROKE) - lum(DARK_FIELD) >= 16.0,
+            "暗色描边需显著亮于输入域底色"
+        );
+    }
+
+    #[test]
+    fn text_edit_frame_paintable() {
+        // 回归：只赋 bg_stroke.color 时 width 仍为 0（Stroke::NONE），
+        // 输入框边框整条不渲染
+        let ctx = egui::Context::default();
+        apply(&ctx, ThemeMode::Dark);
+        let v = &ctx.style_of(egui::Theme::Dark).visuals;
+        let stroke = v.widgets.inactive.bg_stroke;
+        assert!(!stroke.is_empty(), "输入框 idle 边框必须有宽度");
+        assert_ne!(
+            v.text_edit_bg_color(),
+            v.panel_fill,
+            "输入域底色必须区别于面板底色"
+        );
     }
 }
