@@ -1075,7 +1075,8 @@ mod tests {
             let Primitive::Mesh(mesh) = &cp.primitive else {
                 continue;
             };
-            for tri in mesh.indices.chunks_exact(3) {
+            // as_chunks 借出 [[u32; 3]]，索引访问免逐元素越界检查
+            for tri in mesh.indices.as_chunks::<3>().0 {
                 let v = |i: u32| &mesh.vertices[i as usize];
                 let (a, b, c) = (v(tri[0]), v(tri[1]), v(tri[2]));
                 if [a, b, c].iter().any(|v| v.uv != WHITE_UV) {
