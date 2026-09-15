@@ -819,9 +819,12 @@ impl eframe::App for PinApp {
     }
 }
 
+/// 图标统一线宽：与参考风格（细线圆头）一致，所有贴图条图标共用。
+const ICON_W: f32 = 1.5;
+
 /// 置顶图标：顶部横线 + 向上箭头（推到最上层）。激活态由 icon_button 高亮。
 fn draw_topmost(p: &egui::Painter, r: Rect, c: Color32) {
-    let s = Stroke::new(1.4, c);
+    let s = Stroke::new(ICON_W, c);
     let w = r.width();
     p.line_segment([r.left_top(), r.right_top()], s);
     let cx = r.center().x;
@@ -834,7 +837,7 @@ fn draw_topmost(p: &egui::Painter, r: Rect, c: Color32) {
 /// 穿透图标：窗口轮廓（左右留过口）+ 水平箭头穿堂而过——点击落到下层。
 /// 激活态由 icon_button 高亮。
 fn draw_through(p: &egui::Painter, r: Rect, c: Color32) {
-    let s = Stroke::new(1.4, c);
+    let s = Stroke::new(ICON_W, c);
     let w = r.width();
     let m = w * 0.15;
     let gap = w * 0.24; // 左右边中段的箭头过口
@@ -859,74 +862,94 @@ fn draw_through(p: &egui::Painter, r: Rect, c: Color32) {
     p.line_segment([to, Pos2::new(to.x - w * 0.22, cy + w * 0.14)], s);
 }
 
-/// 旋转图标：经典「刷新」圆弧箭头（顺时针 90°）。3/4 圆弧 + 末端沿
-/// 切线方向的箭头，中空无杂物（中心打叉会误读成关闭）。
+/// 旋转图标：小方块画面 + 一道掠过右上角的贝塞尔弧，末端箭头指向
+/// 顺时针切线方向（与 R 键一致）。
 fn draw_rotate(p: &egui::Painter, r: Rect, c: Color32) {
-    let s = Stroke::new(1.4, c);
+    let s = Stroke::new(ICON_W, c);
     let w = r.width();
-    let center = r.center();
-    let rad = w * 0.30;
-    // 从 60° 顺时针扫 300° 到 360°（= 3 点钟方向），箭头沿 CW 切线（向下）
-    let steps = 14;
-    let mut prev = None;
-    for k in 0..=steps {
-        let a = (60.0 + 300.0 * k as f32 / steps as f32) * std::f32::consts::PI / 180.0;
-        let pt = Pos2::new(center.x + rad * a.cos(), center.y - rad * a.sin());
-        if let Some(a0) = prev {
-            p.line_segment([a0, pt], s);
-        }
-        prev = Some(pt);
-    }
-    let end = prev.unwrap();
-    let tip = Pos2::new(end.x, end.y + w * 0.18);
-    p.line_segment([tip, Pos2::new(end.x - w * 0.14, end.y + w * 0.02)], s);
-    p.line_segment([tip, Pos2::new(end.x + w * 0.14, end.y + w * 0.02)], s);
+    let at = |fx: f32, fy: f32| Pos2::new(r.min.x + w * fx, r.min.y + w * fy);
+    // 画面方块（左下，约占图标一半）
+    p.rect_stroke(
+        Rect::from_min_max(at(0.14, 0.38), at(0.62, 0.88)),
+        1.0,
+        s,
+        egui::StrokeKind::Inside,
+    );
+    // 弧：从方块顶边中部上方掠过右上角，落到右侧
+    let tip = at(0.86, 0.46);
+    p.add(egui::Shape::QuadraticBezier(
+        egui::epaint::QuadraticBezierShape::from_points_stroke(
+            [at(0.34, 0.28), at(0.72, 0.08), tip],
+            false,
+            Color32::TRANSPARENT,
+            s,
+        ),
+    ));
+    // 箭头两翼：从终点沿切线反方向向后张开（顺时针 = 指向右下）
+    p.line_segment([tip, tip + Vec2::new(-w * 0.16, -w * 0.10)], s);
+    p.line_segment([tip, tip + Vec2::new(-w * 0.02, -w * 0.20)], s);
 }
 
-/// 翻转图标：中轴虚线 + 左实右虚两个镜像三角（原像/镜像）。
+/// 翻转图标：圆角矩形 + 中央竖直虚线（镜像轴，两半互为镜像）。
 fn draw_flip(p: &egui::Painter, r: Rect, c: Color32) {
-    let s = Stroke::new(1.4, c);
+    let s = Stroke::new(ICON_W, c);
     let w = r.width();
+    p.rect_stroke(r.shrink(0.5), 2.0, s, egui::StrokeKind::Inside);
     let cx = r.center().x;
-    let (top, bot) = (r.min.y + w * 0.16, r.max.y - w * 0.16);
-    let mid = (top + bot) / 2.0;
-    // 中轴虚线（两段短线示虚）
-    p.line_segment([Pos2::new(cx, top), Pos2::new(cx, mid - w * 0.07)], s);
-    p.line_segment([Pos2::new(cx, mid + w * 0.07), Pos2::new(cx, bot)], s);
-    let dx = w * 0.10;
-    let (lw, rw) = (r.min.x + w * 0.08, r.max.x - w * 0.08);
-    // 左侧封闭三角（原像）：斜边 + 竖底
-    p.line_segment([Pos2::new(cx - dx, top), Pos2::new(lw, mid)], s);
-    p.line_segment([Pos2::new(lw, mid), Pos2::new(cx - dx, bot)], s);
-    p.line_segment([Pos2::new(cx - dx, top), Pos2::new(cx - dx, bot)], s);
-    // 右侧开口三角（镜像）：仅斜边，无竖底——读作「影子」
-    p.line_segment([Pos2::new(cx + dx, top), Pos2::new(rw, mid)], s);
-    p.line_segment([Pos2::new(rw, mid), Pos2::new(cx + dx, bot)], s);
+    for (a, b) in [(0.14, 0.38), (0.46, 0.54), (0.62, 0.86)] {
+        p.line_segment(
+            [
+                Pos2::new(cx, r.min.y + w * a),
+                Pos2::new(cx, r.min.y + w * b),
+            ],
+            s,
+        );
+    }
 }
 
-/// 缩小图标：短横线。
+/// 缩小图标：放大镜 + 圆内减号。
 fn draw_minus(p: &egui::Painter, r: Rect, c: Color32) {
-    let ctr = r.center();
-    let d = r.width() * 0.28;
-    p.line_segment(
-        [Pos2::new(ctr.x - d, ctr.y), Pos2::new(ctr.x + d, ctr.y)],
-        Stroke::new(1.6, c),
-    );
+    draw_glass(p, r, c, false);
 }
 
-/// 放大图标：十字线。
+/// 放大图标：放大镜 + 圆内加号。
 fn draw_plus(p: &egui::Painter, r: Rect, c: Color32) {
-    let s = Stroke::new(1.6, c);
-    let ctr = r.center();
-    let d = r.width() * 0.28;
+    draw_glass(p, r, c, true);
+}
+
+/// 放大镜：圆在左上、柄伸向右下角，圆内嵌 ± 号。
+fn draw_glass(p: &egui::Painter, r: Rect, c: Color32, plus: bool) {
+    let s = Stroke::new(ICON_W, c);
+    let w = r.width();
+    let center = Pos2::new(r.min.x + w * 0.42, r.min.y + w * 0.42);
+    let rad = w * 0.32;
+    p.circle_stroke(center, rad, s);
+    // 柄：从圆周 45° 到右下角
+    let k = std::f32::consts::FRAC_1_SQRT_2;
     p.line_segment(
-        [Pos2::new(ctr.x - d, ctr.y), Pos2::new(ctr.x + d, ctr.y)],
+        [
+            Pos2::new(center.x + rad * k, center.y + rad * k),
+            Pos2::new(r.min.x + w * 0.96, r.min.y + w * 0.96),
+        ],
         s,
     );
+    let d = w * 0.16;
     p.line_segment(
-        [Pos2::new(ctr.x, ctr.y - d), Pos2::new(ctr.x, ctr.y + d)],
+        [
+            Pos2::new(center.x - d, center.y),
+            Pos2::new(center.x + d, center.y),
+        ],
         s,
     );
+    if plus {
+        p.line_segment(
+            [
+                Pos2::new(center.x, center.y - d),
+                Pos2::new(center.x, center.y + d),
+            ],
+            s,
+        );
+    }
 }
 
 // ---------------------------------------------------------------- 测试
@@ -996,5 +1019,120 @@ mod tests {
         let mut d = c.clone();
         flip_rgba(&mut d, 3, 2, false);
         assert_eq!(d, src);
+    }
+
+    /// 离屏渲染贴图条全部图标为一张 PNG，供人工核对造型（无窗口依赖，
+    /// egui tessellate + 软件三角形光栅化）。CI 不跑：
+    /// `cargo test -p lscreen icon_preview -- --ignored --nocapture`
+    #[test]
+    #[ignore = "生成 /tmp/lscreen_icon_preview.png 供人工核对图标造型"]
+    fn icon_preview() {
+        use crate::ui::toolbar::{action_button, draw_check, draw_close, draw_save, icon_button};
+        use egui::epaint::{Primitive, WHITE_UV};
+
+        let ctx = egui::Context::default();
+        ctx.set_pixels_per_point(4.0); // 4x 渲染，缩略图也看得清线稿
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 40.0))),
+            ..Default::default()
+        };
+        let out = ctx.run_ui(input, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::splat(2.0);
+                    icon_button(ui, false, "", draw_topmost);
+                    icon_button(ui, true, "", draw_through);
+                    action_button(ui, true, "", draw_rotate);
+                    action_button(ui, true, "", draw_flip);
+                    action_button(ui, true, "", draw_minus);
+                    // 百分比按钮原样占位；其文字走字体图集纹理，下面的
+                    // 光栅化只画无纹理几何，文字留空不影响核对
+                    ui.add(
+                        egui::Button::new(egui::RichText::new("100%").strong().size(12.0))
+                            .min_size(Vec2::new(40.0, 24.0)),
+                    );
+                    action_button(ui, true, "", draw_plus);
+                    action_button(ui, true, "", draw_save);
+                    action_button(ui, true, "", draw_close);
+                    action_button(ui, true, "", draw_check);
+                });
+            });
+        });
+        let prims = ctx.tessellate(out.shapes, out.pixels_per_point);
+
+        // 软件光栅化：逐三角形重心覆盖，顶点 alpha 插值 + clamp 处理
+        // 线段衔接处的少量重叠。线条/填充与文字字形共用同一 mesh
+        // （texture 均为 Managed(0)），靠 uv 区分：字形 quad 的 uv 落在
+        // 字体图集内，逐三角形过滤（uv==WHITE_UV 才是无纹理几何）
+        let ppp = out.pixels_per_point;
+        let w = (300.0 * ppp) as usize;
+        let h = (40.0 * ppp) as usize;
+        // 累积 alpha 与预乘 rgb，末端归一化后对深灰底做 src-over，
+        // 保留 Frame 底色与线条白色的层次
+        let mut acc_a = vec![0.0f32; w * h];
+        let mut acc_c = vec![[0.0f32; 3]; w * h];
+        for cp in &prims {
+            let Primitive::Mesh(mesh) = &cp.primitive else {
+                continue;
+            };
+            for tri in mesh.indices.chunks_exact(3) {
+                let v = |i: u32| &mesh.vertices[i as usize];
+                let (a, b, c) = (v(tri[0]), v(tri[1]), v(tri[2]));
+                if [a, b, c].iter().any(|v| v.uv != WHITE_UV) {
+                    continue;
+                }
+                let (ax, ay) = (a.pos.x * ppp, a.pos.y * ppp);
+                let (bx, by) = (b.pos.x * ppp, b.pos.y * ppp);
+                let (cx, cy) = (c.pos.x * ppp, c.pos.y * ppp);
+                let area2 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+                if area2.abs() < 1e-9 {
+                    continue;
+                }
+                let min_x = (ax.min(bx).min(cx).floor().max(0.0) as usize).min(w - 1);
+                let min_y = (ay.min(by).min(cy).floor().max(0.0) as usize).min(h - 1);
+                let max_x = (ax.max(bx).max(cx).ceil() as usize).min(w - 1);
+                let max_y = (ay.max(by).max(cy).ceil() as usize).min(h - 1);
+                for py in min_y..=max_y {
+                    for px in min_x..=max_x {
+                        let (sx, sy) = (px as f32 + 0.5, py as f32 + 0.5);
+                        let wa = ((bx - sx) * (cy - sy) - (by - sy) * (cx - sx)) / area2;
+                        let wb = ((cx - sx) * (ay - sy) - (cy - sy) * (ax - sx)) / area2;
+                        let wc = 1.0 - wa - wb;
+                        if wa >= -1e-6 && wb >= -1e-6 && wc >= -1e-6 {
+                            let (wa, wb, wc) = (wa.max(0.0), wb.max(0.0), wc.max(0.0));
+                            // Color32 为预乘 alpha：rgb 通道直接累积
+                            let chans =
+                                |v: &egui::epaint::Vertex| [v.color.r(), v.color.g(), v.color.b()];
+                            let (ca, cb, cc) = (chans(a), chans(b), chans(c));
+                            let i = py * w + px;
+                            acc_a[i] += wa * f32::from(a.color.a())
+                                + wb * f32::from(b.color.a())
+                                + wc * f32::from(c.color.a());
+                            for (k, slot) in acc_c[i].iter_mut().enumerate() {
+                                *slot += wa * f32::from(ca[k])
+                                    + wb * f32::from(cb[k])
+                                    + wc * f32::from(cc[k]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut img = image::RgbaImage::new(w as u32, h as u32);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            let i = y as usize * w + x as usize;
+            let a = (acc_a[i] / 255.0).min(1.0);
+            // 累积色去预乘还原原色（预乘 rgb = 原色×alpha/255），再 src-over
+            let mut px = [40u8; 3];
+            if acc_a[i] > 1e-3 {
+                for (k, ch) in px.iter_mut().enumerate() {
+                    let c = acc_c[i][k] * 255.0 / acc_a[i];
+                    *ch = (c * a + 40.0 * (1.0 - a)).round() as u8;
+                }
+            }
+            *p = image::Rgba([px[0], px[1], px[2], 255]);
+        }
+        img.save("/tmp/lscreen_icon_preview.png").unwrap();
+        println!("已生成 /tmp/lscreen_icon_preview.png（{}x{}）", w, h);
     }
 }

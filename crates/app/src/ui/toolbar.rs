@@ -468,27 +468,35 @@ fn draw_redo(p: &egui::Painter, r: Rect, c: Color32) {
     p.line_segment([tip, tip + Vec2::new(-w * 0.28, w * 0.25)], s);
 }
 
+/// 保存图标：下载样式——向下箭头 + 底部横线（比软盘更直白，主流画法）。
 pub(crate) fn draw_save(p: &egui::Painter, r: Rect, c: Color32) {
-    let s = Stroke::new(1.3, c);
+    let s = Stroke::new(1.5, c);
     let w = r.width();
-    // 软盘：外框 + 顶部标签 + 底部滑块
-    p.rect_stroke(r.shrink(0.5), 1.5, s, StrokeKind::Inside);
-    p.rect_filled(
-        Rect::from_min_size(
-            Pos2::new(r.min.x + w * 0.3, r.min.y + 1.0),
-            Vec2::new(w * 0.4, w * 0.25),
-        ),
-        0.0,
-        c,
+    let cx = r.center().x;
+    // 竖干 + 两翼箭头
+    p.line_segment(
+        [
+            Pos2::new(cx, r.min.y + w * 0.10),
+            Pos2::new(cx, r.min.y + w * 0.58),
+        ],
+        s,
     );
-    p.rect_stroke(
-        Rect::from_min_size(
-            Pos2::new(r.min.x + w * 0.22, r.max.y - w * 0.4),
-            Vec2::new(w * 0.56, w * 0.35),
-        ),
-        0.0,
-        Stroke::new(1.0, c),
-        StrokeKind::Inside,
+    for dx in [-w * 0.22, w * 0.22] {
+        p.line_segment(
+            [
+                Pos2::new(cx + dx, r.min.y + w * 0.36),
+                Pos2::new(cx, r.min.y + w * 0.58),
+            ],
+            s,
+        );
+    }
+    // 底部托盘横线
+    p.line_segment(
+        [
+            Pos2::new(r.min.x + w * 0.10, r.min.y + w * 0.88),
+            Pos2::new(r.min.x + w * 0.90, r.min.y + w * 0.88),
+        ],
+        s,
     );
 }
 
