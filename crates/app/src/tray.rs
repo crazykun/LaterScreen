@@ -35,7 +35,7 @@ pub enum Action {
     Picker,
     Pin,
     /// 退出全部贴图的点击穿透（广播 pins.ctl；穿透中的贴图收不到任何
-    /// 指针事件，这是唯一可靠的恢复入口）
+    /// 指针事件，这是唯一可靠的恢复入口，藏在「贴图 ▸ 关闭穿透」）
     PinThrough,
     /// 关闭全部贴图窗口
     PinsClose,
@@ -47,18 +47,28 @@ pub enum Action {
     Quit,
 }
 
+/// 主菜单：纯「发起动作」项。贴图及其管理入口收进 `PIN_MENU` 子菜单——
+/// 「关闭穿透」「关闭所有贴图」是低频保底操作，平铺在动作区显得突兀。
 const MENU_ACTIONS: &[(Action, &str)] = &[
     (Action::Screenshot, "截图"),
     (Action::Picker, "取色"),
-    (Action::Pin, "贴图"),
-    (Action::PinThrough, "退出贴图穿透"),
-    (Action::PinsClose, "关闭全部贴图"),
     (Action::Record, "录屏"),
     (Action::Scroll, "滚动截图"),
     (Action::History, "历史"),
     (Action::Config, "配置"),
     (Action::Quit, "退出"),
 ];
+
+/// 「贴图 ▸」子菜单。关闭穿透/关闭所有贴图是保底入口：穿透中的贴图
+/// 收不到任何指针事件，失焦后托盘是唯一恢复渠道——只收纳、不删除。
+const PIN_MENU: &[(Action, &str)] = &[
+    (Action::Pin, "显示贴图"),
+    (Action::PinThrough, "关闭穿透"),
+    (Action::PinsClose, "关闭所有贴图"),
+];
+
+/// 子菜单在主菜单中的插入位：截图、取色之后（即历史版本「贴图」的位置）。
+const PIN_SUBMENU_POS: usize = 2;
 
 /// 执行动作：除退出外都是拉起独立子进程（detached + 分离线程收割，防僵尸）。
 /// 注意子命令名不能省：裸启动 = 托盘模式，会递归再驻留一个托盘。
@@ -492,7 +502,7 @@ fn to_preferred_trigger(raw: &str) -> Option<String> {
 #[cfg(target_os = "linux")]
 fn shortcut_specs(cfg: &Config) -> Vec<lscreen_capture::ShortcutSpec> {
     let mut out = Vec::new();
-    for (action, label) in MENU_ACTIONS {
+    for (action, label) in MENU_ACTIONS.iter().chain(PIN_MENU) {
         let Some(id) = action_shortcut_id(action) else {
             continue;
         };
@@ -518,6 +528,7 @@ fn shortcut_specs(cfg: &Config) -> Vec<lscreen_capture::ShortcutSpec> {
 fn menu_label(cfg: &Config, a: &Action) -> String {
     let base = MENU_ACTIONS
         .iter()
+        .chain(PIN_MENU)
         .find(|(act, _)| *act == *a)
         .map(|(_, label)| *label)
         .unwrap_or("");
@@ -627,6 +638,20 @@ mod linux_impl {
                 .iter()
                 .map(|(a, _)| menu_item(&menu_label(&self.cfg, a), &self.tx, a.clone()))
                 .collect();
+            // 「贴图 ▸」子菜单插在原「贴图」位（显示贴图/关闭穿透/关闭所有贴图）
+            let submenu = PIN_MENU
+                .iter()
+                .map(|(a, _)| menu_item(&menu_label(&self.cfg, a), &self.tx, a.clone()))
+                .collect();
+            all.insert(
+                PIN_SUBMENU_POS,
+                ksni::menu::SubMenu {
+                    label: "贴图".into(),
+                    submenu,
+                    ..Default::default()
+                }
+                .into(),
+            );
             // 退出与常规动作之间加分隔线
             let quit = all.len() - 1;
             all.insert(quit, ksni::MenuItem::Separator);
@@ -771,7 +796,19 @@ mod native_impl {
         fn setup(&mut self) {
             let menu = Menu::new();
             let mut items = HashMap::new();
-            for (a, _) in MENU_ACTIONS {
+            // 「贴图 ▸」子菜单（与 Linux ksni 侧同构）；子项 MenuItem 也登记
+            // 进 items，热加载时 tick() 才能刷新「显示贴图  F1」这类热键后缀
+            let pin_menu = tray_icon::menu::Submenu::with_id("pin_menu", "贴图", true);
+            for (a, _) in PIN_MENU {
+                let id = action_id(a);
+                let item = MenuItem::with_id(id.clone(), menu_label(&self.cfg, a), true, None);
+                let _ = pin_menu.append(&item);
+                items.insert(id, item);
+            }
+            for (i, (a, _)) in MENU_ACTIONS.iter().enumerate() {
+                if i == PIN_SUBMENU_POS {
+                    let _ = menu.append(&pin_menu);
+                }
                 let id = action_id(a);
                 let item = MenuItem::with_id(id.clone(), menu_label(&self.cfg, a), true, None);
                 let _ = menu.append(&item);
@@ -811,6 +848,9 @@ mod native_impl {
                     "shot" => Some(Action::Screenshot),
                     "pick" => Some(Action::Picker),
                     "pin" => Some(Action::Pin),
+                    // 子菜单两个保底入口：此前漏了分发分支，点了没反应
+                    "pin_through" => Some(Action::PinThrough),
+                    "pins_close" => Some(Action::PinsClose),
                     "record" => Some(Action::Record),
                     "scroll" => Some(Action::Scroll),
                     "history" => Some(Action::History),
@@ -844,7 +884,7 @@ mod native_impl {
                 // 解析失败（读到中间态/手改坏）保留旧配置，下一轮再试
                 if let Some(cfg) = Config::load_ok() {
                     self.hotkeys.apply(&cfg);
-                    for (a, _) in MENU_ACTIONS {
+                    for (a, _) in MENU_ACTIONS.iter().chain(PIN_MENU) {
                         if let Some(item) = self.menu_items.get(&action_id(a)) {
                             item.set_text(menu_label(&cfg, a));
                         }
@@ -973,7 +1013,21 @@ mod native_impl {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_hotkey;
+    use super::*;
+
+    #[test]
+    fn pin_actions_live_only_in_submenu() {
+        // 主菜单纯「发起动作」；贴图三项（含关闭穿透/关闭所有贴图两个
+        // 保底入口）只进「贴图 ▸」子菜单，不再平铺在动作区
+        let main: Vec<Action> = MENU_ACTIONS.iter().map(|(a, _)| a.clone()).collect();
+        for a in [Action::Pin, Action::PinThrough, Action::PinsClose] {
+            assert!(!main.contains(&a), "{a:?} 不应平铺在主菜单");
+        }
+        let pin: Vec<Action> = PIN_MENU.iter().map(|(a, _)| a.clone()).collect();
+        for a in [Action::Pin, Action::PinThrough, Action::PinsClose] {
+            assert!(pin.contains(&a), "{a:?} 应在贴图子菜单中");
+        }
+    }
 
     #[test]
     fn hotkey_parse_ok() {
