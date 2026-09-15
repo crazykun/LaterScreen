@@ -866,6 +866,8 @@ mod native_impl {
             Action::Screenshot => "shot",
             Action::Picker => "pick",
             Action::Pin => "pin",
+            Action::PinThrough => "pin_through",
+            Action::PinsClose => "pins_close",
             Action::Record => "record",
             Action::Scroll => "scroll",
             Action::History => "history",

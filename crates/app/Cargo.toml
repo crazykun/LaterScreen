@@ -17,6 +17,10 @@ lscreen-ocr = { version = "0.8.1", path = "../ocr" }
 lscreen-record = { version = "0.8.1", path = "../record" }
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
+# 从 eframe::CreationContext 取原始窗口句柄：Linux 设 X11 WM_CLASS（任务栏
+# 图标归属），全平台经 capture::NativeWindow 做贴图不透明度/点击穿透。
+# 纯类型 crate 无代码，且已随 eframe 进入依赖树，不新增体积
+raw-window-handle = "0.6"
 
 [target."cfg(unix)".dependencies]
 libc = "0.2"
@@ -34,8 +38,6 @@ ksni = { version = "0.3", default-features = false, features = ["blocking", "asy
 # （上游打包缺陷），钉回 5.18；app 用于 FileManager1 ShowItems 定位文件
 # （export::open_and_select），blocking + async-io 与 capture 的 ashpd 同款
 zbus = { version = "=5.18.0", default-features = false, features = ["blocking-api", "async-io"] }
-# 从 eframe::CreationContext 取原始窗口句柄，设 X11 WM_CLASS（任务栏图标归属）
-raw-window-handle = "0.6"
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 tray-icon = "0.24"

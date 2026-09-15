@@ -1555,12 +1555,14 @@ mod tests {
         let _t = TestDir::new("lock-stale");
         std::fs::write(lock_path(), format!("{}\n", u32::MAX - 10)).unwrap();
         assert!(acquire_single_instance());
-        // 诊断 PID 已更新为本进程
+        release_single_instance();
+        // 诊断 PID 已更新为本进程。必须在释放后读：Windows 的 LockFileEx 是
+        // 强制字节范围锁（锁了全文件），持锁期间别的句柄读同区域会
+        // ERROR_LOCK_VIOLATION(33)；unix flock 是建议锁无此限制
         assert_eq!(
             std::fs::read_to_string(lock_path()).unwrap().trim(),
             std::process::id().to_string()
         );
-        release_single_instance();
         // 锁文件保留（避免"解锁后删除"的经典 inode 竞态），但可再次接管
         assert!(lock_path().exists());
         assert!(acquire_single_instance());
@@ -1666,9 +1668,9 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn fmt_time_shape() {
-        // 本地时区不定，但格式必须是 "MM-DD HH:MM"（unix 路径）
+        // 本地时区不定，但格式必须是 "MM-DD HH:MM"。三平台统一：unix 走
+        // localtime_r，非 unix 落 UTC 兜底，两者都产出同一形状的日期串
         let s = fmt_time(1_753_900_000);
         assert_eq!(s.len(), 11);
         let parts: Vec<&str> = s.split(['-', ' ', ':']).collect();
@@ -1684,13 +1686,6 @@ mod tests {
         );
         assert!((1..=12).contains(&mo) && (1..=31).contains(&d));
         assert!(h < 24 && mi < 60);
-    }
-
-    #[test]
-    #[cfg(not(unix))]
-    fn fmt_time_fallback_shape() {
-        // 非 unix 无 localtime_r 兜底：秒数形式
-        assert!(fmt_time(1_753_900_000).ends_with('s'));
     }
 
     // ---- 面板几何记忆（位置+大小） ----

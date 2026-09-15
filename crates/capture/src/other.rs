@@ -1050,7 +1050,7 @@ pub use win_native::NativeWindow;
 
 #[cfg(target_os = "macos")]
 mod mac_native {
-    use super::{CaptureError, Result};
+    use super::Result;
     use objc2::rc::Retained;
     use objc2_app_kit::NSWindow;
 
@@ -1076,13 +1076,13 @@ mod mac_native {
 
         /// 整窗不透明度：NSWindow alphaValue（1.0 = 不透明）。
         pub fn set_opacity(&self, alpha: f32) -> Result<()> {
-            unsafe { self.0.setAlphaValue(alpha.clamp(0.0, 1.0) as f64) }
+            self.0.setAlphaValue(alpha.clamp(0.0, 1.0) as f64);
             Ok(())
         }
 
         /// 点击穿透：让窗口忽略全部鼠标事件（键盘焦点不受影响）。
         pub fn set_click_through(&self, through: bool) -> Result<()> {
-            unsafe { self.0.setIgnoresMouseEvents(through) }
+            self.0.setIgnoresMouseEvents(through);
             Ok(())
         }
     }
