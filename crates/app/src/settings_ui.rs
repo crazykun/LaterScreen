@@ -235,12 +235,12 @@ impl SettingsApp {
             )
         };
         let btn = egui::Button::new(label)
-            .min_size(egui::vec2(0.0, 32.0))
+            .min_size(egui::vec2(0.0, crate::theme::FIELD_H))
             .stroke(stroke)
             .corner_radius(6)
             .fill(field(ui));
         let resp = ui
-            .add_sized([300.0, 32.0], btn)
+            .add_sized([300.0, crate::theme::FIELD_H], btn)
             .on_hover_text("点击后按下想要的组合键（如 Ctrl+Alt+A）");
         if resp.clicked() {
             self.recording = if active { None } else { Some(idx) };

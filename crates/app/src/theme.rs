@@ -12,6 +12,10 @@ use eframe::egui;
 /// 品牌强调色（与默认标注色一致的红）
 pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(0xe5, 0x39, 0x35);
 
+/// 表单控件统一高度：输入框（`input_field` min_size）与下拉框/数字框
+/// （`spacing.interact_size.y` 下限）共用同一来源，保证同 Grid 内等高。
+pub const FIELD_H: f32 = 32.0;
+
 // ---------------------------------------------------------------- 暗色令牌
 
 const DARK_BG: egui::Color32 = egui::Color32::from_rgb(0x14, 0x14, 0x18);
@@ -87,7 +91,7 @@ pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
         v.widgets.inactive.weak_bg_fill = field;
         v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, stroke);
         style.spacing.button_padding = egui::vec2(12.0, 6.0);
-        style.spacing.interact_size.y = 30.0;
+        style.spacing.interact_size.y = FIELD_H;
         ctx.set_style_of(theme, std::sync::Arc::new(style));
     }
     ctx.set_theme(match mode {
