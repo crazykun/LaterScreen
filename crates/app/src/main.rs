@@ -8,6 +8,7 @@
 // CLI 场景由 main() 里的 attach_parent_console 兜底。
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod click_hl;
 mod config;
 mod countdown;
 mod export;
@@ -1236,25 +1237,54 @@ fn run_record(
             eprintln!("提示: GIF 输出建议使用 .gif 扩展名");
         }
         let start = std::time::Instant::now();
-        let mut frames = 0usize;
-        // 内层 grab 闭包 move 捕获，这里单独 clone 一份，外层结尾仍要用 th_status
-        let status_inner = th_status.clone();
-        let poster_inner = th_poster.clone();
+        // 采帧闭包的公共上下文（M14 收敛）：GIF/MP4 分支原先各复制一份
+        // 「截屏 → 计数 → poster → 状态上报」，点击高亮接入时收敛为单一实现，
+        // 避免分支间复制漂移。两个 move 闭包各持一份实例（分支互斥）
+        /// 首帧 poster 暂存槽（历史缩略图用）
+        type PosterSlot = Arc<Mutex<Option<(Vec<u8>, u32, u32)>>>;
+        struct GrabCtx {
+            region: (i32, i32, u32, u32),
+            frames: usize,
+            poster: PosterSlot,
+            status: Arc<Mutex<record_ui::RecordStatus>>,
+            hl: click_hl::ClickHighlight,
+            start: std::time::Instant,
+        }
+        impl GrabCtx {
+            fn grab(&mut self) -> lscreen_record::Result<(Vec<u8>, u32, u32)> {
+                let shot = lscreen_capture::capture_region(
+                    self.region.0,
+                    self.region.1,
+                    self.region.2,
+                    self.region.3,
+                )
+                .map_err(|e| lscreen_record::RecordError(e.to_string()))?;
+                self.frames += 1;
+                if self.frames == 1 {
+                    // 首帧 poster（历史缩略图）：在高亮叠加前留档，恒为纯净帧
+                    *self.poster.lock().unwrap() =
+                        Some((shot.rgba.clone(), shot.width, shot.height));
+                }
+                let (mut rgba, w, h) = (shot.rgba, shot.width, shot.height);
+                self.hl.on_frame(&mut rgba, w, h);
+                let mut st = self.status.lock().unwrap();
+                st.elapsed = self.start.elapsed().as_secs_f32();
+                st.frames = self.frames;
+                Ok((rgba, w, h))
+            }
+        }
+        let mk_grab = || GrabCtx {
+            region: (x, y, w, h),
+            frames: 0,
+            poster: th_poster.clone(),
+            status: th_status.clone(),
+            hl: click_hl::ClickHighlight::new(cfg.record_click_highlight, (x, y)),
+            start,
+        };
         let result = if mp4_final {
+            let mut ctx = mk_grab();
             lscreen_record::record_mp4(
-                move || {
-                    let shot = lscreen_capture::capture_region(x, y, w, h)
-                        .map(|s| (s.rgba, s.width, s.height))
-                        .map_err(|e| lscreen_record::RecordError(e.to_string()))?;
-                    frames += 1;
-                    if frames == 1 {
-                        *poster_inner.lock().unwrap() = Some((shot.0.clone(), shot.1, shot.2));
-                    }
-                    let mut st = status_inner.lock().unwrap();
-                    st.elapsed = start.elapsed().as_secs_f32();
-                    st.frames = frames;
-                    Ok(shot)
-                },
+                move || ctx.grab(),
                 &lscreen_record::Mp4Options {
                     fps,
                     bitrate_kbps: quality as u32,
@@ -1264,20 +1294,9 @@ fn run_record(
                 &path,
             )
         } else {
+            let mut ctx = mk_grab();
             lscreen_record::record_gif(
-                move || {
-                    let shot = lscreen_capture::capture_region(x, y, w, h)
-                        .map(|s| (s.rgba, s.width, s.height))
-                        .map_err(|e| lscreen_record::RecordError(e.to_string()))?;
-                    frames += 1;
-                    if frames == 1 {
-                        *poster_inner.lock().unwrap() = Some((shot.0.clone(), shot.1, shot.2));
-                    }
-                    let mut st = status_inner.lock().unwrap();
-                    st.elapsed = start.elapsed().as_secs_f32();
-                    st.frames = frames;
-                    Ok(shot)
-                },
+                move || ctx.grab(),
                 &lscreen_record::GifOptions {
                     fps,
                     quality: quality as u8,

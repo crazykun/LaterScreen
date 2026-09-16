@@ -469,6 +469,13 @@ impl SettingsApp {
                         .on_hover_text("录屏（GIF/MP4）的默认格式；命令行 --mp4 显式指定时优先于此");
                     ui.end_row();
 
+                    row_label(ui, "点击高亮");
+                    ui.checkbox(&mut self.cfg.record_click_highlight, "录制时高亮鼠标点击")
+                        .on_hover_text(
+                            "鼠标按下处叠加扩散圆环（300ms 淡出），GIF/MP4 均生效；教程录制友好。录制前也可用状态窗的齿轮临时修改",
+                        );
+                    ui.end_row();
+
                     row_label(ui, "历史条数");
                     // egui 0.35 的 DragValue 无 on_hover_text：经 ui.add 的 Response 挂
                     ui.add(

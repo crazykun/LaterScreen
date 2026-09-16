@@ -667,6 +667,10 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
 
 ### M14 录屏增强（音频 Win/mac + 点击高亮）
 
+分批交付（沿用 M13 先例：独立可交付、可单独热修）：**点击高亮先行**
+（跨平台、Linux 可真机验证）→ 录屏音频（仅 Win/mac，盲写平台代码 +
+CI 编译验证 + 真机验证手段齐备后再动手）。
+
 前置现状澄清：**三平台的 MP4 视频轨今天都已由 openh264 承担**——
 record/Cargo.toml 未按平台门控，Win/mac 同样编译 vendored 源，
 `record --mp4` 全平台可用。M4 所说「Win/mac 系统编码器待实现」是
@@ -685,19 +689,28 @@ record/Cargo.toml 未按平台门控，Win/mac 同样编译 vendored 源，
       （started 标志翻转后再起音频线程），音频时钟与视频帧计数独立、
       以 mp4 两条 track 各自时间戳收敛；停止时先停采帧再冲刷音频编码器，
       避免尾部截断。回放验证用 ffprobe 看 duration 差 < 一帧
-- [ ] **点击高亮**：录制时鼠标按下处叠加扩散圆环（半透明描边，半径
-      0→28px / 300ms 衰减），帧合成在采帧后纯 CPU 叠加（app 层改帧，
-      capture 不动），不改变 GIF/MP4 编码管线。默认开启、配置面板可关
-      （`record_click_highlight`）。教程录制场景第一刚需，成本远低于
+- [x] **点击高亮**（✅ 2026-09-16 第一批）：录制时鼠标按下处叠加扩散
+      圆环（半径 0→28px / 300ms 淡出，sqrt 缓动扩散 + 不透明度二次衰减），
+      帧合成在采帧后纯 CPU 叠加（app 层改帧，编码管线无感知），GIF/MP4
+      均生效。默认开启、配置面板可关（`record_click_highlight`，armed
+      阶段经状态窗齿轮修改对本次录制生效）。教程录制场景第一刚需，成本远低于
       按键显示（后者需要 X11 XRecord / Win 键盘钩子 / mac CGEventTap
       三套全局监听，先不做，视需求反馈）。
-      实现要点：按下事件取自录制状态窗的 egui 输入？**不行**——录制期间
-      指针在选区内、焦点不在状态窗，须在采帧闭包内轮询
-      `capture::cursor_position()` + 全局按键态（X11 QueryPointer 的
-      button_mask / Win GetAsyncKeyState / mac CGEventSource 按需），
-      Wayland 下 cursor_position 为 None 时该功能自然静默关闭；
-      圆环半径/透明度按经过时间插值的纯函数进 core 单测（给定 t 断言
-      半径与 alpha），叠加本身每帧 ≤4 个圆环的多边形描边，性能可忽略
+      落地：capture 新增 `pointer_state()`（X11 QueryPointer 坐标 +
+      Button1Mask / Win GetCursorPos + GetAsyncKeyState(VK_LBUTTON) /
+      mac CGEventSourceButtonState(HID 源)，Wayland 及查询失败返回 None
+      → 功能静默关闭）；`core::highlight` 纯函数（ring_at 插值 + 圆环
+      AA 描边就地混合，6 项单测：边界/单调/过期清理/帧外交集/多环并存/
+      退化帧）；app 层 `click_hl::ClickHighlight` 每帧轮询做**按压沿**
+      检测（上一帧未按 + 本帧按住才触发；首帧只建基线——armed 后点
+      「开始」的残留按住不算点击）。点击涟漪坐标允许落在帧外（点击录制
+      边框/状态窗的涟漪画不出交集，天然不进成品）；首帧 poster 在叠加前
+      留档恒为纯净帧；GIF/MP4 两个采帧闭包原先各复制一份「截屏→计数→
+      poster→状态上报」，借此收敛为单一 `GrabCtx`。真机验证：X11 会话
+      `pointer_state` 连续查询稳定、坐标/按键态正确（纯查询无干扰）；
+      涟漪视觉与按压手感**待人工点验**（验证时用户桌面被占用——M12 同款
+      情形，合成点击会干扰真实操作，不自动化的惯例延续）；Win/mac 编译
+      经 CI、运行待真机
 
 ### M15 分享集成：可插拔上传 hook（零体积方案）
 
@@ -769,9 +782,10 @@ M12 先例：env 门控的 ignored 测试（`LSCREEN_TEST_WIN`），能脚本化
 - [x] clipd 僵尸进程（✅ 2026-08-18）：父进程用分离线程 wait 子进程；
       不用 `signal(SIGCHLD, SIG_IGN)` 是因为它会全局生效，
       破坏 OCR tesseract 子进程的 wait_with_output
-- [ ] Win/mac 指针查询（capture/src/other.rs cursor_position 返回 None）：
-      windows-sys GetCursorPos / objc2 NSEvent.mouseLocation，补齐后多屏跟随生效；
-      **也是 M14 点击高亮的前置**（采帧闭包轮询指针 + 按键态），做 M14 前先落地
+- [x] Win/mac 指针查询（✅ M12 批次顺手落地，2026-09-14）：capture/src/other.rs
+      `cursor_position` 已实现——Win GetCursorPos；mac CGEventCreate +
+      CGEventGetLocation 拿 CG 逻辑点、按所在屏 scale 换算物理像素。
+      多屏跟随已生效；M14 点击高亮在其上新增 `pointer_state`（坐标+主键态）
 
 ### 已修缺陷（review 2026-09-14）
 
@@ -905,7 +919,7 @@ scripts/        package.sh 一键打包
 packaging/      图标、desktop、Info.plist 等打包素材
 crates/         所有库与可执行 crate
   core/src/     model.rs(图元) history.rs(撤销栈) render.rs(导出渲染)
-                geom.rs color.rs qr.rs
+                geom.rs color.rs qr.rs highlight.rs(录制点击圆环)
   capture/src/  lib.rs(平台分发) linux.rs(x11rb + ashpd portal) other.rs(xcap)
   ocr/src/      lib.rs(trait) tesseract.rs win_ocr.rs vision.rs
                 ocrs_engine.rs(内置兜底) lang.rs
@@ -913,7 +927,8 @@ crates/         所有库与可执行 crate
   app/src/      main.rs(CLI 入口) ui/(mod 覆盖层 / toolbar / canvas)
                 history.rs(截图历史面板) tray.rs(托盘) settings_ui.rs(配置面板)
                 pin.rs(贴图) record_ui.rs(录制状态窗) countdown.rs(延时倒计时窗)
-                selcache.rs(上次选区记忆) export.rs config.rs font.rs
+                selcache.rs(上次选区记忆) click_hl.rs(录制点击高亮)
+                export.rs config.rs font.rs
   setup/        Windows 自绘安装器
 ```
 

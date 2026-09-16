@@ -31,6 +31,7 @@ lscreen gui    # 不常驻，直接进入交互截图（框选 → 标注 → �
 lscreen shot -o out.png                  # 无界面截图（--region X,Y,W,H 指定区域）
 lscreen gui --delay 3                    # 延时 3 秒截图（shot --delay 同支持）
 lscreen record --select --fps 10         # 框选录制 GIF（--mp4 录制 MP4/H.264，Linux）
+                                          # 录制时鼠标点击处显示扩散圆环（配置面板可关）
 lscreen scroll                           # 滚动长截图（Linux X11）
 lscreen ocr --region 0,0,800,600         # OCR 识别（-i 指定图片，--lang 选语言）
 lscreen qr -i photo.png                  # 识别图片中的二维码
@@ -66,7 +67,7 @@ cargo install --path crates/app
 
 ## 配置
 
-零配置可用，不生成文件。`lscreen config` 打开面板调整（保存目录、文件名模板、配置窗口主题（自动/浅色/夜间）、默认工具/颜色、初始选区（最前窗口 / 上次选区 / 全屏 / 无——「上次选区」在显示器布局变化后自动作废回退）、录制格式、历史条数、七个全局热键等），运行中的托盘 1 秒内自动热加载。配置文件：Linux `~/.config/lscreen/config.toml`、Windows `%APPDATA%\lscreen\config.toml`、macOS `~/Library/Application Support/lscreen/config.toml`。自动主题由 egui 跟随当前操作系统配色。
+零配置可用，不生成文件。`lscreen config` 打开面板调整（保存目录、文件名模板、配置窗口主题（自动/浅色/夜间）、默认工具/颜色、初始选区（最前窗口 / 上次选区 / 全屏 / 无——「上次选区」在显示器布局变化后自动作废回退）、录制格式、录制点击高亮、历史条数、七个全局热键等），运行中的托盘 1 秒内自动热加载。配置文件：Linux `~/.config/lscreen/config.toml`、Windows `%APPDATA%\lscreen\config.toml`、macOS `~/Library/Application Support/lscreen/config.toml`。自动主题由 egui 跟随当前操作系统配色。
 
 历史副本不放配置目录，而是缓存目录（Linux `~/.cache/lscreen/history/`、Windows `%LOCALAPPDATA%\lscreen\history\`、macOS `~/Library/Caches/lscreen/history/`）：那是可随时删掉、不影响配置的派生数据，嫌占地方直接删整个目录即可。面板顶栏也能看到占用体积并一键清空。
 

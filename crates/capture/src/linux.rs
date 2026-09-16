@@ -6,7 +6,7 @@ use crate::{CaptureError, Result, Screenshot};
 
 use x11rb::connection::Connection;
 use x11rb::protocol::randr::ConnectionExt as _;
-use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, ImageOrder, Screen};
+use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, ImageOrder, KeyButMask, Screen};
 
 struct MonitorInfo {
     x: i32,
@@ -233,13 +233,25 @@ pub fn capture_all() -> Result<Vec<Screenshot>> {
 }
 
 pub fn cursor_position() -> Option<(i32, i32)> {
+    query_pointer().map(|(x, y, _)| (x, y))
+}
+
+/// 全局指针状态（M14 录制点击高亮）：虚拟桌面坐标 + 主键（左键）按住与否，
+/// 与截屏同一坐标系。调用方按帧轮询。
+pub fn pointer_state() -> Option<(i32, i32, bool)> {
+    query_pointer().map(|(x, y, mask)| (x, y, mask.contains(KeyButMask::BUTTON1)))
+}
+
+/// 一次 QueryPointer 拿坐标 + 按键掩码（每次新建连接，与 capture_region
+/// 同模式：连接建立是本机 unix socket 往返，30fps 轮询无感）
+fn query_pointer() -> Option<(i32, i32, KeyButMask)> {
     with_conn(|conn, screen| {
         let reply = conn
             .query_pointer(screen.root)
             .map_err(err)?
             .reply()
             .map_err(err)?;
-        Ok((reply.root_x as i32, reply.root_y as i32))
+        Ok((reply.root_x as i32, reply.root_y as i32, reply.mask))
     })
     .ok()
 }

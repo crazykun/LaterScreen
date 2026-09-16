@@ -3,6 +3,7 @@
 
 pub mod color;
 pub mod geom;
+pub mod highlight;
 pub mod history;
 pub mod model;
 pub mod qr;

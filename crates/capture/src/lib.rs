@@ -106,6 +106,13 @@ pub fn cursor_position() -> Option<(i32, i32)> {
     platform::cursor_position()
 }
 
+/// 全局指针状态（M14 录制点击高亮）：虚拟桌面绝对物理像素坐标 + 主键
+/// （左键）当前是否按住，供采帧闭包按帧轮询做按压沿检测。查询失败
+/// （Wayland 无全局指针查询/无设备）返回 None，调用方应把依赖功能静默降级。
+pub fn pointer_state() -> Option<(i32, i32, bool)> {
+    platform::pointer_state()
+}
+
 /// 在指针当前位置发送滚轮事件（clicks > 0 向上，< 0 向下）。
 /// 平台不支持（Win/mac 未实现）返回 Err。
 pub fn scroll_wheel(clicks: i32) -> Result<()> {

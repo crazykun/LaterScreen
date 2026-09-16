@@ -94,10 +94,14 @@ mod mac {
         ) -> *mut core::ffi::c_void;
         pub fn CGEventPost(tap: u32, event: *mut core::ffi::c_void);
         pub fn CGWarpMouseCursorPosition(new_position: CGPoint) -> i32;
+        // 全局按键态查询（M14 点击高亮）：source 由 CGEventSourceCreate 建立
+        pub fn CGEventSourceButtonState(source: *mut core::ffi::c_void, button: usize) -> bool;
     }
 
     /// kCGEventSourceStateHIDSystemState（合成滚轮事件源的标准状态）
     pub const SOURCE_HID: u32 = 1;
+    /// kCGMouseButtonLeft
+    pub const MOUSE_BUTTON_LEFT: usize = 0;
     /// kCGScrollEventUnitLine（行单位，一格滚轮 ≈ 3 行，对齐 X11 notch 语义）
     pub const SCROLL_UNIT_LINE: u32 = 1;
     /// kCGSessionEventTap：注入会话层，方向不被「自然滚动」系统设置翻转
@@ -158,10 +162,21 @@ pub fn capture_interactive() -> Result<Screenshot> {
 /// Win：GetCursorPos，物理像素（截屏/边框同一坐标系）。
 #[cfg(windows)]
 pub fn cursor_position() -> Option<(i32, i32)> {
+    pointer_state().map(|(x, y, _)| (x, y))
+}
+
+/// Win：GetCursorPos + GetAsyncKeyState(VK_LBUTTON)，物理像素坐标系。
+/// GetAsyncKeyState 最高位 = 当前按住，无需窗口焦点。
+#[cfg(windows)]
+pub fn pointer_state() -> Option<(i32, i32, bool)> {
     use windows_sys::Win32::Foundation::POINT;
-    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetAsyncKeyState, GetCursorPos, VK_LBUTTON};
     let mut pt = POINT { x: 0, y: 0 };
-    (unsafe { GetCursorPos(&mut pt) } != 0).then_some((pt.x, pt.y))
+    if unsafe { GetCursorPos(&mut pt) } == 0 {
+        return None;
+    }
+    let down = unsafe { GetAsyncKeyState(VK_LBUTTON) } as u16 & 0x8000 != 0;
+    Some((pt.x, pt.y, down))
 }
 
 /// mac：CGEventGetLocation 拿 CG 全局逻辑点，× 所在屏 scale 换算回物理像素
@@ -181,9 +196,29 @@ pub fn cursor_position() -> Option<(i32, i32)> {
     Some(((pt.x * k).round() as i32, (pt.y * k).round() as i32))
 }
 
+/// mac：坐标同 cursor_position，按键态查 HID 事件源（kCGMouseButtonLeft = 0）。
+/// source 创建失败时按未按下处理（坐标仍可用）。
+#[cfg(target_os = "macos")]
+pub fn pointer_state() -> Option<(i32, i32, bool)> {
+    let (x, y) = cursor_position()?;
+    let source = unsafe { mac::CGEventSourceCreate(mac::SOURCE_HID) };
+    if source.is_null() {
+        return Some((x, y, false));
+    }
+    let down = unsafe { mac::CGEventSourceButtonState(source, mac::MOUSE_BUTTON_LEFT) };
+    unsafe { mac::CFRelease(source) };
+    Some((x, y, down))
+}
+
 /// 其余平台（理论上仅剩非 Win/mac 的移植目标）：返回 None 时上层回退主显示器
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn cursor_position() -> Option<(i32, i32)> {
+    None
+}
+
+/// 其余平台：无指针查询，上层应把点击高亮整体降级
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn pointer_state() -> Option<(i32, i32, bool)> {
     None
 }
 

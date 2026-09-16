@@ -62,6 +62,9 @@ pub struct Config {
     pub history_close_after_copy: bool,
     /// 录制格式：gif / mp4（CLI --mp4 显式指定时优先于此配置）
     pub record_format: String,
+    /// 录制时在鼠标按下处叠加扩散圆环（点击高亮，M14）；Wayland 等无法
+    /// 查询全局指针的环境自动静默关闭
+    pub record_click_highlight: bool,
     /// 全局热键（托盘模式生效），如 "Ctrl+Alt+A"；留空 = 不注册。
     /// 截图默认 F1（Snipaste 惯例、系统冲突率低——Ctrl+Alt+A 在 Deepin
     /// 等桌面是系统截图键）；裸键仅允许 PrintScreen/F1-F12
@@ -89,6 +92,7 @@ impl Default for Config {
             history_max: 10,
             history_close_after_copy: false,
             record_format: "gif".to_string(),
+            record_click_highlight: true,
             hotkey_screenshot: "F1".to_string(),
             hotkey_delay: String::new(),
             hotkey_picker: String::new(),
@@ -437,6 +441,10 @@ mod tests {
         // 旧配置文件无此字段 → 默认值（serde default）
         let back: Config = toml::from_str("save_dir = \"/tmp\"").unwrap();
         assert_eq!(back.record_format, "gif");
+        // 点击高亮默认开；显式关闭可持久化
+        assert!(back.record_click_highlight);
+        let back: Config = toml::from_str("record_click_highlight = false").unwrap();
+        assert!(!back.record_click_highlight);
     }
 
     #[test]
