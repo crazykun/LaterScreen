@@ -9,11 +9,13 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod config;
+mod countdown;
 mod export;
 mod font;
 mod history;
 mod pin;
 mod record_ui;
+mod selcache;
 mod settings_ui;
 mod theme;
 mod tray;
@@ -108,7 +110,11 @@ enum Cmd {
         foreground: bool,
     },
     /// 交互式截图（立即打开截图覆盖层）
-    Gui,
+    Gui {
+        /// 延时秒数（0.1-60）：先弹倒计时窗，到点再截图
+        #[arg(long)]
+        delay: Option<f64>,
+    },
     /// 屏幕取色器：放大镜取景，单击复制 HEX，Ctrl+R/H/K 复制 RGB/HEX/CMYK
     Pick,
     /// 识别二维码：从屏幕区域或图片文件
@@ -119,6 +125,23 @@ enum Cmd {
         /// 从图片文件识别（PNG/JPEG），指定时忽略 --region
         #[arg(short, long)]
         input: Option<PathBuf>,
+    },
+    /// 生成二维码图片（PNG）：把文本/URL 编成码保存或打印路径
+    QrGen {
+        /// 二维码内容（URL/文本）
+        text: String,
+        /// 纠错级别 L/M/Q/H（L 7% / M 15% / Q 25% / H 30%，缺省 M）
+        #[arg(long, default_value = "M")]
+        ecc: String,
+        /// 四周静区边距（模块数，识别推荐 ≥4，缺省 4）
+        #[arg(long, default_value_t = 4)]
+        margin: u32,
+        /// 每模块像素，即码点大小（缺省 8）
+        #[arg(long, default_value_t = 8)]
+        scale: u32,
+        /// 输出文件路径（PNG）；缺省输出到保存目录（时间戳命名）
+        #[arg(short, long)]
+        output: Option<PathBuf>,
     },
     /// 文字识别（OCR）：从屏幕区域或图片文件，结果输出到 stdout
     Ocr {
@@ -208,6 +231,9 @@ enum Cmd {
         /// 同时复制到剪贴板
         #[arg(short, long)]
         clipboard: bool,
+        /// 延时秒数（0.1-60）：先弹倒计时窗，到点再截
+        #[arg(long)]
+        delay: Option<f64>,
     },
     /// 打开配置面板（保存后托盘进程自动热加载）
     Config,
@@ -329,9 +355,16 @@ fn main() {
         // 无参数 = 托盘静默驻留（用户明确要求的默认形态）
         None => run_tray(false),
         Some(Cmd::Tray { foreground }) => run_tray(foreground),
-        Some(Cmd::Gui) => run_gui(ui::Mode::Snip),
+        Some(Cmd::Gui { delay }) => run_gui_delayed(ui::Mode::Snip, delay),
         Some(Cmd::Pick) => run_gui(ui::Mode::Pick),
         Some(Cmd::Qr { region, input }) => run_qr(region, input),
+        Some(Cmd::QrGen {
+            text,
+            ecc,
+            margin,
+            scale,
+            output,
+        }) => run_qr_gen(&text, &ecc, margin, scale, output),
         Some(Cmd::Ocr {
             region,
             input,
@@ -391,7 +424,13 @@ fn main() {
             window_at,
             output,
             clipboard,
-        }) => run_shot(region, window, window_at, output, clipboard),
+            delay,
+        }) => match wait_delay(delay) {
+            // 倒计时中取消：静默退出（与 Esc 退出同语义）
+            Ok(false) => Ok(()),
+            Ok(true) => run_shot(region, window, window_at, output, clipboard),
+            Err(e) => Err(e),
+        },
         Some(Cmd::Scroll {
             region,
             steps,
@@ -678,6 +717,30 @@ fn capture_span() -> Option<OverlayShot> {
     })
 }
 
+/// 延时等待（M13）：先弹倒计时窗，到点后**等合成器回收窗口表面**再放行
+/// ——X11 关窗到真正消失有 ~200ms（RecordBorder 实测），不等会把倒计时窗
+/// 残影截进图。返回 Ok(false) = 用户取消（Esc/点取消/强关窗）。
+fn wait_delay(delay: Option<f64>) -> Result<bool, String> {
+    let Some(secs) = delay else {
+        return Ok(true);
+    };
+    if !(0.1..=60.0).contains(&secs) {
+        return Err("--delay 需在 0.1-60 秒之间".to_string());
+    }
+    if !countdown::run(secs) {
+        return Ok(false);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    Ok(true)
+}
+
+fn run_gui_delayed(mode: ui::Mode, delay: Option<f64>) -> Result<(), String> {
+    if !wait_delay(delay)? {
+        return Ok(()); // 取消 = 静默退出，与覆盖层 Esc 同语义
+    }
+    run_gui(mode)
+}
+
 fn run_gui(mode: ui::Mode) -> Result<(), String> {
     // Wayland：合成器禁止自绘覆盖层抓屏/框选，改走交互式 portal——由合成器
     // 弹原生框选 UI，回选中区域，再进标注窗。坐标由合成器保证，绕开多屏
@@ -811,8 +874,8 @@ fn overlay_window_list(
             })
         })
         .collect();
-    let initial = if config.initial_selection() == config::InitialSelection::Window {
-        // 最前窗口（活跃窗口优先）；其与当前屏无交或枚举失败时退回 Z 序最顶
+    // 最前窗口（活跃窗口优先）；其与当前屏无交或枚举失败时退回 Z 序最顶
+    let frontmost = || {
         lscreen_capture::frontmost_window()
             .and_then(|fw| {
                 lscreen_capture::window_rect_in_image(&fw, shot).map(|(x, y, w_, h_)| ui::WinRect {
@@ -821,8 +884,22 @@ fn overlay_window_list(
                 })
             })
             .or_else(|| windows.first().cloned())
-    } else {
-        None
+    };
+    let initial = match config.initial_selection() {
+        config::InitialSelection::Last => {
+            // 上次选区优先；无记录/布局已变/不在本次截图内 → 回退最前窗口
+            crate::selcache::recalled()
+                .and_then(|abs| {
+                    crate::selcache::to_image_rect(abs, shot.origin, shot.width, shot.height)
+                })
+                .map(|rect| ui::WinRect {
+                    title: "上次选区".to_string(),
+                    rect,
+                })
+                .or(frontmost())
+        }
+        config::InitialSelection::Window => frontmost(),
+        _ => None,
     };
     (windows, initial)
 }
@@ -862,6 +939,43 @@ fn run_qr(region: Option<String>, input: Option<PathBuf>) -> Result<(), String> 
     }
     for r in found {
         println!("{}", r.content);
+    }
+    Ok(())
+}
+
+/// 生成二维码 PNG（M13）。显式 -o 直接覆盖；缺省走保存目录自动命名
+/// （防覆盖顺延，与 shot 一致）。
+fn run_qr_gen(
+    text: &str,
+    ecc: &str,
+    margin: u32,
+    scale: u32,
+    output: Option<PathBuf>,
+) -> Result<(), String> {
+    let ecc = lscreen_core::qr::Ecc::parse(ecc)
+        .ok_or_else(|| format!("无效的 --ecc：{ecc}（可选 L/M/Q/H）"))?;
+    let img = lscreen_core::qr::generate(text, ecc, scale, margin)?;
+    let (w, h) = (img.width(), img.height());
+    // save_png 系列吃原始 RGBA（内部做 PNG 编码），直接传位图缓冲
+    let rgba = img.as_raw().clone();
+    match output {
+        Some(path) => {
+            export::save_png(&rgba, w, h, &path)?;
+            println!("{}", path.display());
+        }
+        None => {
+            let cfg = config::Config::load();
+            let path = export::save_path(&cfg, "png");
+            let saved = export::save_png_unique(&rgba, w, h, &path)
+                .map_err(|e| format!("保存失败: {e}"))?;
+            println!("{}", saved.display());
+            history::record_file(&saved, history::Kind::Shot, Some(&saved));
+            if cfg.open_dir_after_save {
+                if let Some(dir) = saved.parent() {
+                    export::open_in_file_manager(dir);
+                }
+            }
+        }
     }
     Ok(())
 }

@@ -106,6 +106,22 @@ fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     color_picker(app, ui);
     ui.separator();
 
+    // 文字背景（M13）：仅文本工具显示，只影响之后新建的文字
+    if app.tool == Tool::Text {
+        let active = app.text_bg;
+        let cur = egui_color(app.style.color);
+        let resp = icon_button(
+            ui,
+            active,
+            "文字背景：开 = 当前色圆角底 + 自动对比字色（仅对新建文字生效）",
+            move |p, r, _c| draw_text_bg_icon(p, r, cur, active),
+        );
+        if resp.clicked() {
+            app.text_bg = !app.text_bg;
+        }
+        ui.separator();
+    }
+
     // 线宽 / 字号
     ui.spacing_mut().slider_width = 56.0;
     let mut width = app.style.width;
@@ -142,6 +158,52 @@ fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     }
     if action_button(ui, true, "识别选区内的二维码", draw_qr) {
         app.scan_qr(ctx);
+    }
+    // 生成二维码（M13）：文本 → 位图图元插入标注层（识别+生成闭环）
+    {
+        let (rect, qr_btn) = ui.allocate_exact_size(Vec2::splat(BTN), Sense::click());
+        let vis = ui.style().interact(&qr_btn);
+        if qr_btn.hovered() {
+            ui.painter().rect_filled(rect, 4.0, vis.bg_fill);
+        }
+        draw_qr_gen(ui.painter(), rect.shrink(6.0), vis.fg_stroke.color);
+        let qr_btn = qr_btn.on_hover_text("生成二维码：输入文本插入标注层（可拖动/四角等比缩放）");
+        if qr_btn.clicked() {
+            app.qr_input = Some(String::new());
+        }
+        let mut insert = false;
+        egui::Popup::menu(&qr_btn)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_min_width(230.0);
+                let mut buf = app.qr_input.clone().unwrap_or_default();
+                ui.label("二维码内容");
+                let edit = egui::TextEdit::singleline(&mut buf).desired_width(f32::INFINITY);
+                let tr = ui.add(edit);
+                if tr.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    insert = true;
+                }
+                app.qr_input = Some(buf);
+                ui.horizontal(|ui| {
+                    if ui.button("插入").clicked() {
+                        insert = true;
+                    }
+                    if ui.button("取消").clicked() {
+                        app.qr_input = None;
+                        ui.close();
+                    }
+                });
+                if insert {
+                    ui.close();
+                }
+            });
+        if insert {
+            let text = app.qr_input.take().unwrap_or_default();
+            let text = text.trim().to_string();
+            if !text.is_empty() {
+                app.insert_qr(ctx, &text);
+            }
+        }
     }
     if action_button(ui, true, "识别选区内的文字 (OCR)", draw_ocr) {
         app.scan_ocr(ctx);
@@ -547,6 +609,16 @@ fn draw_qr(p: &egui::Painter, r: Rect, c: Color32) {
     );
 }
 
+/// 生成二维码图标（M13）：识别图标 + 右上角「+」——生成语义与识别区分。
+fn draw_qr_gen(p: &egui::Painter, r: Rect, c: Color32) {
+    draw_qr(p, r, c);
+    let (cx, cy) = (r.max.x, r.min.y);
+    let s = 2.5;
+    let plus = Stroke::new(1.2, c);
+    p.line_segment([Pos2::new(cx - s, cy), Pos2::new(cx + s, cy)], plus);
+    p.line_segment([Pos2::new(cx, cy - s), Pos2::new(cx, cy + s)], plus);
+}
+
 fn draw_ocr(p: &egui::Painter, r: Rect, c: Color32) {
     p.text(
         Pos2::new(r.center().x, r.min.y + r.height() * 0.38),
@@ -561,6 +633,33 @@ fn draw_ocr(p: &egui::Painter, r: Rect, c: Color32) {
             Pos2::new(r.max.x, r.max.y - 1.0),
         ],
         Stroke::new(1.3, c),
+    );
+}
+
+/// 文字背景图标（M13）：开 = 当前色填充块 + 对比色 A；关 = 空心块。
+/// 预览语义与真实渲染一致（底色块上自动对比字色）。
+fn draw_text_bg_icon(p: &egui::Painter, r: Rect, fill: Color32, active: bool) {
+    if active {
+        p.rect_filled(r, 2.0, fill);
+    } else {
+        p.rect_stroke(r, 2.0, Stroke::new(1.2, fill), StrokeKind::Inside);
+    }
+    let glyph = if active {
+        let luma = 0.299 * fill.r() as f32 + 0.587 * fill.g() as f32 + 0.114 * fill.b() as f32;
+        if luma < 128.0 {
+            Color32::WHITE
+        } else {
+            Color32::from_rgb(0x11, 0x11, 0x11)
+        }
+    } else {
+        fill
+    };
+    p.text(
+        r.center(),
+        egui::Align2::CENTER_CENTER,
+        "A",
+        egui::FontId::proportional(r.height() * 0.75),
+        glyph,
     );
 }
 

@@ -152,16 +152,30 @@ pub struct SnipApp {
     pub windows: Vec<WinRect>,
     pub tool: Tool,
     pub style: Style,
+    /// 文字背景开关（M13）：仅影响新建的 Text 图元；开 = 当前色圆角底 +
+    /// 对比字色（创建时定死），既有图元不受影响
+    pub text_bg: bool,
     pub hover: Option<u64>,
     pub selected: Option<u64>,
     pub drag: Option<DragOp>,
     pub text_edit: Option<TextEditState>,
     /// 马赛克预览缓存：图元 id → (几何指纹, 色块列表)。指纹见 `canvas::mosaic_key`。
     pub mosaic_cache: MosaicCache,
+    /// 位图图元纹理缓存（M13）：Arc 指针 → GPU 纹理。core 不持 UI 资源，
+    /// 缓存留在 app 层；图元删除时帧末回收
+    pub image_textures: ImageTextureCache,
+    /// 生成二维码弹层的文本缓冲（M13）：Some = 弹层打开
+    pub qr_input: Option<String>,
     /// 自定义取色器上次变更时刻：拖动取色时节流撤销快照（同滑杆）
     pub color_drag_at: f64,
     /// 指针当前所在的图像像素坐标（取色用）
     pub cursor_px: Option<P2>,
+    /// 取色历史（M13）：最近取过的色（最新在前，上限 8）。进程内存，
+    /// 跨进程不共享——覆盖层即起即退，共享需落盘，不值
+    pub color_hist: Vec<lscreen_core::Rgba>,
+    /// 从历史色块选用的颜色（M13）：Some 时 Ctrl+R/H/K 复制它而非指针
+    /// 实时像素；指针一动即失效（回到实时取色）
+    pub picked: Option<lscreen_core::Rgba>,
     /// 工具栏尺寸输入的未提交值：编辑中（聚焦/拖拽）暂存，结束时一次性应用
     pub size_edit_buf: Option<(f32, f32)>,
     /// 结果面板（二维码/OCR 共用）：(标题, 文本条目)
@@ -221,12 +235,15 @@ impl SnipApp {
         // 默认工具与样式来自配置（M8）
         let tool = config.tool();
         let style = config.style();
-        // 初始选区（M9）：Pick 模式不预选；Snip/Record 按配置（窗口/全屏/无）
+        // 初始选区（M9/M13）：Pick 模式不预选；Snip/Record 按配置
+        // （最前窗口/上次选区/全屏/无）
         let sel_window = if mode == Mode::Pick {
             None
         } else {
             match config.initial_selection() {
-                crate::config::InitialSelection::Window => initial_region,
+                crate::config::InitialSelection::Window | crate::config::InitialSelection::Last => {
+                    initial_region
+                }
                 crate::config::InitialSelection::Fullscreen => Some(WinRect {
                     title: "全屏".to_string(),
                     rect: RectF::from_points(
@@ -261,13 +278,18 @@ impl SnipApp {
             windows,
             tool,
             style,
+            text_bg: false,
             hover: None,
             selected: None,
             drag: None,
             text_edit: None,
             mosaic_cache: HashMap::new(),
+            image_textures: HashMap::new(),
+            qr_input: None,
             color_drag_at: f64::NEG_INFINITY,
             cursor_px: None,
+            color_hist: Vec::new(),
+            picked: None,
             size_edit_buf: None,
             results_panel: None,
             scan_job: None,
@@ -375,10 +397,27 @@ impl SnipApp {
             if let Some(shared) = &self.record_region {
                 *shared.lock().unwrap() = Some(self.region);
             }
+            self.remember_selection();
             self.request_close(ctx);
         } else {
             self.stage = Stage::Editing;
         }
+    }
+
+    /// 记忆本次交付选区（M13）：绝对物理像素写入 `<cache>/screen.sel`，
+    /// 供「初始选区=上次选区」的下次进覆盖层时预选。预览模式（滚动长
+    /// 截图/Wayland portal/annotate）region 是整图而非屏幕区域，不记忆。
+    fn remember_selection(&self) {
+        if self.preview {
+            return;
+        }
+        let (ox, oy) = self.shot.origin;
+        crate::selcache::remember((
+            ox + self.region.min.x as i32,
+            oy + self.region.min.y as i32,
+            self.region.width() as u32,
+            self.region.height() as u32,
+        ));
     }
 
     fn compose(&self) -> Option<(Vec<u8>, u32, u32)> {
@@ -409,6 +448,7 @@ impl SnipApp {
                 // 复制也入历史（用户最常用的出图方式就是 Ctrl+C 复制退出，
                 // 不记历史的话菜单永远只有录屏/贴图）
                 history::record_rgba(&rgba, w, h, history::Kind::Shot, None);
+                self.remember_selection();
                 if self.config.copy_auto_exit {
                     self.request_close(ctx);
                 } else {
@@ -430,6 +470,7 @@ impl SnipApp {
             Ok(saved) => {
                 println!("{}", saved.display());
                 history::record_file(&saved, history::Kind::Shot, Some(&saved));
+                self.remember_selection();
                 if self.config.open_dir_after_save {
                     if let Some(dir) = saved.parent() {
                         export::open_in_file_manager(dir);
@@ -452,6 +493,7 @@ impl SnipApp {
         // 贴图自动入历史（M11 用户定稿）：贴图本来不落盘，这条是「贴图历史」
         // 的唯一来源，在 spawn 贴图进程之前记录（即便贴图失败也保留历史）
         history::record_rgba(&rgba, w, h, history::Kind::Pin, None);
+        self.remember_selection();
         let img = image::RgbaImage::from_raw(w, h, rgba)
             .ok_or_else(|| "invalid image buffer".to_string());
         let mut png = Vec::new();
@@ -515,14 +557,16 @@ impl SnipApp {
         }
     }
 
-    /// 取色：把指针处颜色以指定格式写入剪贴板。
+    /// 取色：把指针处颜色（或历史色块选用的颜色）以指定格式写入剪贴板。
     /// Pick 模式下复制即完成使命，直接退出。
     pub fn copy_color(&mut self, ctx: &egui::Context, format: ColorFormat) {
-        let Some(p) = self.cursor_px else { return };
-        let Some(px) = self.shot.pixel(p.x as u32, p.y as u32) else {
-            return;
-        };
-        let c = Rgba(px);
+        // 历史色块选用的色优先（指针未动时 Ctrl+R/H/K 复制它）
+        let picked = self.picked.or_else(|| {
+            let p = self.cursor_px?;
+            let px = self.shot.pixel(p.x as u32, p.y as u32)?;
+            Some(Rgba(px))
+        });
+        let Some(c) = picked else { return };
         let (label, text) = match format {
             ColorFormat::Rgb => ("RGB", lscreen_core::color::to_rgb_str(c)),
             ColorFormat::Hex => ("HEX", lscreen_core::color::to_hex(c)),
@@ -530,6 +574,7 @@ impl SnipApp {
         };
         match export::copy_text_to_clipboard(&text) {
             Ok(()) => {
+                self.push_color_hist(c);
                 if self.mode == Mode::Pick {
                     self.request_close(ctx);
                 } else {
@@ -538,6 +583,13 @@ impl SnipApp {
             }
             Err(e) => self.toast(ctx, format!("复制失败: {e}")),
         }
+    }
+
+    /// 取色进历史（M13）：去重后最新置前，上限 8
+    fn push_color_hist(&mut self, c: Rgba) {
+        self.color_hist.retain(|x| *x != c);
+        self.color_hist.insert(0, c);
+        self.color_hist.truncate(8);
     }
 
     /// 全局快捷键。文本编辑中不响应（把键留给输入框）。
@@ -635,6 +687,42 @@ impl SnipApp {
         }
     }
 
+    /// 生成二维码并作为位图图元插入标注层（M13）：初始尺寸取选区短边 45%
+    /// （钳 96–320px）并保持码图宽高比；普通模式放选区中心，预览模式
+    /// （滚动长截图，选区=整图可能远大于可视区）放图像左上角 5% 边距处。
+    pub fn insert_qr(&mut self, ctx: &egui::Context, text: &str) {
+        let img = match lscreen_core::qr::generate(text, lscreen_core::qr::Ecc::M, 8, 4) {
+            Ok(img) => img,
+            Err(e) => {
+                self.toast(ctx, e);
+                return;
+            }
+        };
+        let (iw, ih) = (img.width() as f32, img.height() as f32);
+        let base = (self.region.width().min(self.region.height()) * 0.45).clamp(96.0, 320.0);
+        let (w, h) = (base, base * ih / iw);
+        let center = if self.preview {
+            P2::new(
+                self.shot.width as f32 * 0.05,
+                self.shot.height as f32 * 0.05,
+            )
+        } else {
+            self.region.center()
+        };
+        let min = P2::new(center.x - w / 2.0, center.y - h / 2.0);
+        let rect = RectF::from_points(min, P2::new(min.x + w, min.y + h));
+        self.doc.begin_change();
+        self.doc.add(
+            ElementKind::Image {
+                rect,
+                rgba: std::sync::Arc::new(img),
+            },
+            self.style,
+        );
+        self.selected = None;
+        self.toast(ctx, "已插入二维码（可拖动，四角等比缩放）");
+    }
+
     /// 扫描当前选区内的二维码（后台线程）。
     pub fn scan_qr(&mut self, ctx: &egui::Context) {
         if self.scan_job.is_some() {
@@ -650,6 +738,8 @@ impl SnipApp {
             self.toast(ctx, "选区为空");
             return;
         };
+        // 识别也是一次「交付」：这个区域是用户关心的（M13 记忆选区）
+        self.remember_selection();
         self.spawn_scan(ctx, move || {
             let found = lscreen_core::qr::detect(&rgba, w, h);
             if found.is_empty() {
@@ -683,6 +773,7 @@ impl SnipApp {
             self.toast(ctx, "选区为空");
             return;
         };
+        self.remember_selection();
         self.spawn_scan(ctx, move || match engine.recognize(&rgba, w, h) {
             Ok(out) if !out.is_empty() => {
                 ScanOutcome::Ok("文字识别结果".into(), vec![out.plain_text()])
@@ -762,8 +853,8 @@ impl SnipApp {
                             }
                             // 多条（QR 可一次识出多个码）才需要逐条复制，按钮放各条
                             // 文本上方；单条由右下角悬浮按钮负责，不再重复
-                            if multi {
-                                ui.horizontal(|ui| {
+                            ui.horizontal(|ui| {
+                                if multi {
                                     ui.label(format!("#{}", i + 1));
                                     if ui.button("复制").clicked() {
                                         match export::copy_text_to_clipboard(content) {
@@ -771,8 +862,18 @@ impl SnipApp {
                                             Err(e) => self.toast(ctx, format!("复制失败: {e}")),
                                         }
                                     }
-                                });
-                            }
+                                }
+                                // 识别 + 生成闭环（M13）：识别到的 URL 一键回贴成码
+                                if ui
+                                    .button("成码")
+                                    .on_hover_text("把这段文本生成二维码图片，插入标注层")
+                                    .clicked()
+                                {
+                                    let text = content.clone();
+                                    self.results_panel = None;
+                                    self.insert_qr(ctx, &text);
+                                }
+                            });
                             // 上限放宽到 4000 字：窗口可拉伸后 600 字反倒成了瓶颈
                             // （egui 会为不可见文本也做布局，故仍留上限防大段文本卡顿）。
                             // 复制走的是原始 content，不受此显示上限影响
@@ -881,6 +982,8 @@ pub enum ColorFormat {
 pub type MosaicCell = (f32, f32, f32, Rgba);
 /// 马赛克预览缓存：图元 id → (几何指纹, 色块列表)。指纹见 `canvas::mosaic_key`。
 pub type MosaicCache = HashMap<u64, (u64, Vec<MosaicCell>)>;
+/// 位图图元纹理缓存 key：Arc 指针
+pub type ImageTextureCache = HashMap<usize, TextureHandle>;
 
 /// 拉起独立的贴图进程：stdin 写入 PNG 后即返回（不 wait——
 /// 贴图进程独立存活，父进程退出后被 init 收养）。

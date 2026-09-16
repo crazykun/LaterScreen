@@ -11,7 +11,9 @@ use egui::{
 use lscreen_core::render::mosaic_cells;
 use lscreen_core::{Element, ElementKind, RectF, Tool, P2};
 
-use super::{egui_color, DragOp, MosaicCache, SnipApp, Stage, TextEditState, View};
+use super::{
+    egui_color, DragOp, ImageTextureCache, MosaicCache, SnipApp, Stage, TextEditState, View,
+};
 
 /// 马赛克色块缓存的几何指纹：点数 + 全部坐标 + 笔刷/格子尺寸。
 /// f32 按位取整参与哈希，坐标变化（拖动、撤销）必然改变指纹。
@@ -114,11 +116,16 @@ fn show_in(app: &mut SnipApp, ui: &mut egui::Ui, rect: Rect, texture: &TextureHa
 
     painter.image(texture.id(), rect, UV_FULL, Color32::WHITE);
 
-    // 记录指针的图像像素坐标（取色快捷键用）
+    // 记录指针的图像像素坐标（取色快捷键用）；指针一动，历史色块的
+    // 「选用」即失效（回到实时取色）
+    let prev_cursor = app.cursor_px;
     app.cursor_px = response
         .hover_pos()
         .or_else(|| response.interact_pointer_pos())
         .map(|p| view.to_px(p));
+    if app.cursor_px != prev_cursor {
+        app.picked = None;
+    }
 
     if app.mode == super::Mode::Pick {
         picking(app, ui, &response, &painter, view, rect, texture);
@@ -133,7 +140,7 @@ fn show_in(app: &mut SnipApp, ui: &mut egui::Ui, rect: Rect, texture: &TextureHa
     // 框选阶段显示取景放大镜（Editing 阶段指针要服务绘图工具，不显示）
     if matches!(app.stage, Stage::Selecting) {
         if let Some(p) = app.cursor_px {
-            draw_magnifier(app, &painter, view, rect, p, texture);
+            draw_magnifier(app, &painter, view, rect, p, texture, ui.ctx());
         }
     }
 }
@@ -151,21 +158,22 @@ fn picking(
     ui.ctx()
         .output_mut(|o| o.cursor_icon = CursorIcon::Crosshair);
     if let Some(p) = app.cursor_px {
-        draw_magnifier(app, painter, view, screen, p, texture);
+        draw_magnifier(app, painter, view, screen, p, texture, ui.ctx());
     }
     if response.clicked() {
         app.copy_color(ui.ctx(), super::ColorFormat::Hex);
     }
 }
 
-/// 取景放大镜：像素网格 + 十字线 + 颜色值 + 快捷键提示。
+/// 取景放大镜：像素网格 + 十字线 + 颜色值 + 快捷键提示 + 取色历史色块。
 fn draw_magnifier(
-    app: &SnipApp,
+    app: &mut SnipApp,
     painter: &egui::Painter,
     view: View,
     screen: Rect,
     p: P2,
     texture: &TextureHandle,
+    ctx: &egui::Context,
 ) {
     let Some(px) = app.shot.pixel(p.x as u32, p.y as u32) else {
         return;
@@ -183,9 +191,10 @@ fn draw_magnifier(
         Pos2::new((cx + half) / w, (cy + half) / h),
     );
 
-    // 面板位置：跟随指针右下，越界翻转
+    // 面板位置：跟随指针右下，越界翻转（有取色历史时底部多一行色块）
     let cursor_pt = view.to_pt(p);
-    let info_h = 64.0;
+    let chips_h = if app.color_hist.is_empty() { 0.0 } else { 22.0 };
+    let info_h = 64.0 + chips_h;
     let panel = Vec2::new(ZOOM_SIZE, ZOOM_SIZE + info_h);
     let mut anchor = cursor_pt + Vec2::new(24.0, 24.0);
     if anchor.x + panel.x > screen.max.x - 8.0 {
@@ -263,6 +272,46 @@ fn draw_magnifier(
         FontId::proportional(11.0),
         Color32::from_white_alpha(150),
     );
+
+    // 取色历史（M13）：最近取过的色横排小色块。用真正的 Area 按钮（前景
+    // 层）而非画师绘矩形——点击落在按钮上就不会传给底层画布，Pick 模式的
+    // 「单击复制」与框选阶段的选区手势都不会被误触
+    if !app.color_hist.is_empty() {
+        let hist = app.color_hist.clone();
+        let chips_pos = Pos2::new(anchor.x + pad, info_top + 52.0);
+        egui::Area::new(egui::Id::new("color-hist"))
+            .fixed_pos(chips_pos)
+            .order(egui::Order::Foreground)
+            .interactable(true)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    for c in hist {
+                        let (r, resp) =
+                            ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::click());
+                        ui.painter().rect_filled(r, 2.0, egui_color(c));
+                        let frame = if resp.hovered() {
+                            Color32::WHITE
+                        } else {
+                            Color32::from_black_alpha(120)
+                        };
+                        ui.painter().rect_stroke(
+                            r,
+                            2.0,
+                            Stroke::new(1.0, frame),
+                            StrokeKind::Inside,
+                        );
+                        let hex = lscreen_core::color::to_hex(c);
+                        let clicked = resp.clicked();
+                        resp.on_hover_text(format!("{hex} · 点击选用"));
+                        if clicked {
+                            app.style.color = c;
+                            app.picked = Some(c);
+                        }
+                    }
+                });
+            });
+    }
 }
 
 // ---------------------------------------------------------------- Selecting
@@ -512,6 +561,7 @@ fn editing(
     for e in &app.doc.elements {
         draw_element(
             &mut app.mosaic_cache,
+            &mut app.image_textures,
             &app.shot,
             editing_text_id,
             &clipped,
@@ -524,6 +574,19 @@ fn editing(
     if !app.mosaic_cache.is_empty() {
         app.mosaic_cache
             .retain(|id, _| app.doc.elements.iter().any(|e| e.id == *id));
+    }
+    // 位图纹理同款回收（按 Arc 指针为 key，元素删除即释放 GPU 纹理）
+    if !app.image_textures.is_empty() {
+        let live = app
+            .doc
+            .elements
+            .iter()
+            .filter_map(|e| match &e.kind {
+                ElementKind::Image { rgba, .. } => Some(std::sync::Arc::as_ptr(rgba) as usize),
+                _ => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
+        app.image_textures.retain(|k, _| live.contains(k));
     }
     draw_highlights(app, painter, view);
 
@@ -687,13 +750,24 @@ fn on_press(app: &mut SnipApp, view: View, p: P2, pos_pt: Pos2, shift: bool) {
         Tool::Mosaic => ElementKind::Mosaic { points: vec![p] },
         Tool::Eraser => ElementKind::Eraser { points: vec![p] },
         Tool::Text => {
+            // 文字背景（M13）：开 = 当前色做圆角底、字色取对比色（黑/白），
+            // 都在创建时定死——渲染路径只画「底 + 字」，不再算对比
+            let mut text_style = style;
+            let bg = if app.text_bg {
+                let c = text_style.color;
+                text_style.color = lscreen_core::color::contrast_text_color(c);
+                Some(c)
+            } else {
+                None
+            };
             let id = app.doc.add(
                 ElementKind::Text {
                     pos: p,
                     content: String::new(),
                     size: P2::new(0.0, 0.0),
+                    bg,
                 },
-                style,
+                text_style,
             );
             app.text_edit = Some(TextEditState {
                 id,
@@ -729,7 +803,8 @@ fn on_drag(app: &mut SnipApp, p: P2, shift: bool) {
                     }
                 }
                 ElementKind::Marker { center, .. } => *center = p,
-                ElementKind::Text { .. } => {}
+                // 位图图元不经 Draw 手势创建（工具栏生成插入），无拖拽绘制态
+                ElementKind::Text { .. } | ElementKind::Image { .. } => {}
             }
         }
         DragOp::MoveElem { id, last, began } => {
@@ -928,10 +1003,11 @@ fn size_label(painter: &egui::Painter, region_pt: Rect, region: RectF) {
 }
 
 /// 交互层图元绘制。参数为 SnipApp 的字段拆借：遍历 elements（不可变）
-/// 的同时可更新 mosaic_cache（可变），见 editing() 调用点。
+/// 的同时可更新 mosaic_cache / image_textures（可变），见 editing() 调用点。
 #[allow(clippy::too_many_arguments)]
 fn draw_element(
     mosaic_cache: &mut MosaicCache,
+    image_textures: &mut ImageTextureCache,
     shot: &lscreen_capture::Screenshot,
     editing_text_id: Option<u64>,
     painter: &egui::Painter,
@@ -981,10 +1057,20 @@ fn draw_element(
                 Color32::WHITE,
             );
         }
-        ElementKind::Text { pos, content, .. } => {
+        ElementKind::Text {
+            pos, content, bg, ..
+        } => {
             // 编辑中的文本由编辑窗口呈现，避免重影
             if editing_text_id == Some(e.id) {
                 return;
+            }
+            // 背景圆角矩形先铺（半径常量与导出层共用，物理像素换算一致）
+            if let Some(bg) = bg {
+                painter.rect_filled(
+                    view.rect_pt(e.text_bg_rect()),
+                    view.len_pt(lscreen_core::model::TEXT_BG_RADIUS),
+                    egui_color(*bg),
+                );
             }
             painter.text(
                 view.to_pt(*pos),
@@ -1015,6 +1101,29 @@ fn draw_element(
                 let cell = Rect::from_min_size(min, Vec2::splat(view.len_pt(*size)));
                 painter.rect_filled(cell, 0.0, egui_color(*c));
             }
+        }
+        ElementKind::Image { rect, rgba } => {
+            // 纹理按 Arc 指针缓存（图元移动/缩放不重建；内容恒定——
+            // 生成型位图不可变）。NEAREST 采样与导出层 nearest_scale_into
+            // 同规则，码点像素锐利
+            let key = std::sync::Arc::as_ptr(rgba) as usize;
+            let tex = image_textures.entry(key).or_insert_with(|| {
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                    [rgba.width() as usize, rgba.height() as usize],
+                    rgba.as_raw(),
+                );
+                painter.ctx().load_texture(
+                    format!("elem-image-{key}"),
+                    color_image,
+                    egui::TextureOptions::NEAREST,
+                )
+            });
+            painter.image(
+                tex.id(),
+                view.rect_pt(*rect),
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
         }
         ElementKind::Eraser { points } => {
             // 用原图纹理沿笔迹盖章，近似导出层的「原图回贴」

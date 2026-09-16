@@ -104,6 +104,15 @@ crates/
 | v0.8.2 | 2026-09-11 | 配置窗口与历史面板支持浅色/夜间/自动主题；修复 Windows 安装器暗色输入框文字不可见；修复主题切换下的 UI 配色与配置布局 |
 | **v0.9.0** | **2026-09-15** | **M12 贴图增强：Shift+滚轮调不透明度（20–100%）、点击穿透（Esc/托盘恢复）、R/H/V 旋转翻转、≥8x 像素网格、工具条缩放控件与参考风格图标重绘；托盘贴图菜单收进「贴图 ▸」子菜单（显示贴图/关闭穿透/关闭所有贴图），修复 Win/mac 两个管理项点击无响应；修复夜间模式设置输入框不可见（描边宽度被 Stroke::NONE 吃掉）** |
 
+后续版本（规划，随交付滚动更新，勿在发布后回填改写）：
+
+| 版本 | 内容 | 状态 |
+|---|---|---|
+| v0.10 | M13 截图体验补齐（记忆选区/文字背景/延时截图/取色历史 → 二维码生成压轴） | 规划中 |
+| v0.11 | M14 录屏增强（点击高亮；音频视 Win/mac 真机条件成熟度拆分）、M16 系统编码器（可选，视体积评估） | 规划中 |
+| v0.12 | M15 上传 hook | 规划中 |
+| v1.0 | M17 真机验证台账清零 + README/文档全量校对；此后进入维护期（缺陷修复为主） | 规划中 |
+
 ### M1 截图 + 标注 ✅（核心价值）
 - [x] workspace 骨架 + 体积优化 profile
 - [x] core：图元模型（矩形/椭圆/箭头/直线/曲线/标号/文本/马赛克/橡皮擦）、
@@ -138,7 +147,9 @@ crates/
       ffprobe 读回 h264/Constrained Baseline、时长帧数正确、ffmpeg 可解码；
       码率控制 Bitrate 模式 + Constrained Baseline 兼容性最好。
       Win/mac 系统编码器（MF/VideoToolbox）待实现——发布体积预算内
-      （12.4MB ≤ 20MB）。失败路径与 GIF 同语义：清半成品、join 编码线程
+      （12.4MB ≤ 20MB）。失败路径与 GIF 同语义：清半成品、join 编码线程。
+      （后续澄清：openh264 实际三平台统一编译，Win/mac 的 `--mp4` 今天
+      即可用；系统编码器只是优化项，规划见 M16）
 - [x] 滚动截图：`lscreen scroll`（托盘菜单「滚动截图」同入口）。
       capture 层新增 XTest 滚轮/指针控制（`scroll_wheel`/`warp_pointer`，
       x11rb xtest 特性，FakeInput 后 sync 保证时序）；record 层
@@ -574,37 +585,92 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       Shift+滚轮手势与工具条按钮需人工点验（验证时桌面被占用）；
       Win/mac 编译经 CI、运行待真机
 
-### M13 截图体验补齐（延时 / 记忆选区 / 二维码生成 / 文字背景 / 取色历史）
+### M13 截图体验补齐（延时 / 记忆选区 / 二维码生成 / 文字背景 / 取色历史）✅ 2026-09-15
 
-- [ ] **延时截图**：`lscreen gui --delay <秒>`、`shot --delay <秒>`；托盘
-      菜单「延时 3 秒截图」。实现：唤起前先倒计时（小 egui 置顶倒计时窗
+分批顺序（小改动先行，最大改动压轴独立交付）：**记忆选区 → 文字背景 →
+延时截图 → 取色历史**（每项独立可交付、可单独热修）→ **二维码生成**
+（`ElementKind::Image` 动图元模型、双渲染路径与命中检测，是本里程碑最大
+改动，单独一批走完整验证，v0.10 内最后落地）。
+
+- [x] **延时截图**：`lscreen gui --delay <秒>`、`shot --delay <秒>`；托盘
+      菜单「延时截图」。实现：唤起前先倒计时（小 egui 置顶倒计时窗
       或纯托盘通知），**倒计时结束先关提示窗、再 capture_screen、最后开
       覆盖层**——顺序反了提示窗会被截进图里（关窗到合成器重绘有 ~200ms
-      延迟，RecordBorder 实测数据，关窗后 sleep 300ms 再采帧）
-- [ ] **记忆上次选区**：cache/screen.sel 存上次**交付**（复制/保存/贴图/
+      延迟，RecordBorder 实测数据，关窗后 sleep 300ms 再采帧）。
+      落地：`countdown.rs`（居中主屏小窗，剩余秒 + Esc/按钮取消；
+      自然走完关窗 → main.rs `wait_delay` sleep 300ms → 再截屏）。
+      取消 = 静默退出（退出码 0）。`--delay` 校验 0.1-60，非法报错
+      （不静默 clamp）。倒计时窗 GL 不可用时降级纯 sleep（不阻塞截图），
+      错误交给后续可能的弹窗路径。后续补：`hotkey_delay` 全局热键
+      （配置面板第 7 行，默认空；X11 global-hotkey 与 Wayland
+      GlobalShortcuts（id=delay）两侧都已接线）；倒计时窗补装系统
+      字体（egui 内置字体无 CJK，中文曾显示为乱码）
+- [x] **记忆上次选区**：cache/screen.sel 存上次**交付**（复制/保存/贴图/
       OCR）的区域，物理像素 + 显示器布局指纹（monitor_bounds 拼串）。
       进入覆盖层时预选该区域（布局指纹变了作废，回退最前窗口）。
       场景：对同一窗口/区域连续多次截图（对照文档写操作步骤）。
-      与 M9 的「初始选区」配置合并：最前窗口 / 上次选区 / 全屏 / 无
-- [ ] **二维码生成**：`qrcode` crate 从 core dev-dependency 扶正为正式
+      与 M9 的「初始选区」配置合并：最前窗口 / 上次选区 / 全屏 / 无。
+      写入点与 history 的 `record_png` 收敛点同集合（交付动作发生处），
+      实现时抽公共调用避免再散一处；指纹比对失败静默降级，不提示用户。
+      落地：`selcache.rs`——单行文本 `v1 <指纹> x y w h`，tmp+rename
+      原子写；指纹 = union+主屏几何 FNV-1a。换算要求矩形**完整落在
+      本次截图内**（跨屏缓冲天然满足；单屏回退下选区在另一块屏直接
+      判无效，不做裁剪到边缘的细条预选）。写入点比规划多覆盖两类
+      交付：QR/OCR 识别触发（crop 成功即记）与录屏框选确认
+      （confirm_region Record 分支）；预览模式（滚动长截图/annotate，
+      region=整图非屏幕区域）不记忆。坐标语义 = 绝对物理像素
+      （虚拟桌面系），与覆盖层来源解耦
+- [x] **二维码生成**：`qrcode` crate 从 core dev-dependency 扶正为正式
       依赖（纯 Rust 零增量）。core/qr.rs 加 `generate(text, ecc, size)
       -> RgbaImage`；CLI `lscreen qr-gen "文本" -o out.png`（--ecc 纠错
       级别 L/M/Q/H，--margin 边距模块数）；覆盖层工具栏加「生成二维码」：
       弹文本框 → 生成**图片图元**插入标注层（可拖动/缩放，与截图一起导出）
       ——识别 + 生成闭环（识别到的 URL 一键回贴成码）。注意现有图元模型
       没有位图图元，需新增 `ElementKind::Image`（双渲染路径都要支持：
-      egui `texture` + tiny-skia `draw_pixmap`，绘制顺序与其他图元一致）
-- [ ] **文字标注背景色**：Text 图元加 `bg: Option<Color>`（None 保持现状）。
+      egui `texture` + tiny-skia `draw_pixmap`，绘制顺序与其他图元一致）。
+      Image 图元细节：`Image { rect, rgba: Arc<RgbaImage> }`——rgba 装箱
+      放 Arc，撤销快照只克隆指针，延续「图片本体不进快照」原则（快照仍
+      是全量 `Vec<Element>`，无需改成句柄表）；命中检测 = rect 含点；
+      手柄缩放**恒等比**（码图拉伸畸变会影响回扫识别，rqrr 对透视/纵横
+      比敏感）；egui 纹理句柄缓存在 app 层（core 不持 UI 资源，以
+      `rgba` 指针为 key），导出侧 Pixmap 按需构建、不缓存。
+      落地补充：GUI 弹层 ECC 固定 M、每模块 8px、静区 4 模块（CLI 全可
+      调）；导出侧 nearest 预缩放（`nearest_scale_into`）+ 整像素贴入，
+      交互侧 NEAREST 纹理——码点像素锐利，双线性会让码点糊边；识别
+      结果面板每条加「成码」按钮（生成→插标注层→关面板）；QR 生成图元
+      初始尺寸 = 选区短边 45%（钳 96–320px）放选区中心，预览模式放
+      图像左上 5%（整图中心可能不可见）。真机验证：`qr-gen --ecc H`
+      328×328 PNG → `lscreen qr -i` 识回原文；core 测试含 generate→detect
+      闭环（三种内容 × L/M/H）、尺寸/参数校验、Image 等比缩放与导出渲染
+- [x] **文字标注背景色**：Text 图元加 `bg: Option<Color>`（None 保持现状）。
       工具栏文本工具激活时「背景色」开关：关 = 透明，开 = 取当前色 + 圆角
       底（半径常量 2pt，两边共用 `Element::text_bg_rect` 保证一致）。
       egui 层 `rect_filled` + tiny-skia `fill_path(RoundRect)`。浅色截图上
-      白字不可读的现状痛点。图元不持久化，无迁移问题
-- [ ] **取色历史**：pick 模式与覆盖层取色器共享的环形缓冲（进程内存，
+      白字不可读的现状痛点。图元不持久化，无迁移问题。
+      落地补充：开 = 当前色做底 + **字色自动取对比色**（按 BT.601 亮度
+      选白/近黑，`color::contrast_text_color`），且都在**创建时定死**
+      （element.style.color = 对比色、kind.bg = 原色）——两条渲染路径
+      只画「底 + 字」不算对比，杜绝路径间漂移；开关只影响新建文字，
+      既有文字编辑不受影响（颜色保持存储值）。tiny-skia 0.12 无
+      RoundedRect 助手，圆角用立方角路径（kappa≈0.5523）手绘
+      （`push_rounded_rect`），半径钳到短边一半
+- [x] **取色历史**：pick 模式与覆盖层取色器共享的环形缓冲（进程内存，
       最近 8 个 {RGBA, HEX}），放大镜旁横排小色块显示，单击选用为当前
       色（可继续 Ctrl+R/H/K 复制）。跨进程不共享（截图覆盖层即起即退，
-      共享需落盘，不值）
+      共享需落盘，不值）。
+      落地补充：色块用真正的 `egui::Area` 按钮（Foreground 层）而非画师
+      绘矩形——点击落在按钮上不会传给底层画布，Pick 模式「单击复制」与
+      框选阶段的选区手势都不会被色块误触（画师绘矩形做不到这一点）。
+      选用色（`picked`）优先于指针实时像素参与 Ctrl+R/H/K 复制，
+      指针一动即失效回实时取色；入历史动作 = 每次成功复制色值
+      （RGB/HEX/CMYK 任一格式），去重后最新置前
 
 ### M14 录屏增强（音频 Win/mac + 点击高亮）
+
+前置现状澄清：**三平台的 MP4 视频轨今天都已由 openh264 承担**——
+record/Cargo.toml 未按平台门控，Win/mac 同样编译 vendored 源，
+`record --mp4` 全平台可用。M4 所说「Win/mac 系统编码器待实现」是
+体积/性能优化项（见 M16），**不是功能缺口**；本里程碑的音频是纯增量。
 
 - [ ] **录屏音频（仅 Win/mac）**：MP4 加音轨。Win Media Foundation
       （麦克风 + WASAPI loopback 系统声）→ AAC 编码 → mp4 crate 加
@@ -614,13 +680,24 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       或标注不支持。`record --audio mic|system|both|off`（默认 off 保持
       现状）。体积影响必须评估：mac objc2 avfoundation 绑定可能明显增
       体积，release.yml 已有 ≤20MB 逐产物门槛兜底；超预算则 mac 降级
-      只录麦克风（CoreAudio 最小绑定）或整体推迟
+      只录麦克风（CoreAudio 最小绑定）或整体推迟。
+      **A/V 对齐**：armed 语义下音频起采点必须 = 视频第一帧时刻
+      （started 标志翻转后再起音频线程），音频时钟与视频帧计数独立、
+      以 mp4 两条 track 各自时间戳收敛；停止时先停采帧再冲刷音频编码器，
+      避免尾部截断。回放验证用 ffprobe 看 duration 差 < 一帧
 - [ ] **点击高亮**：录制时鼠标按下处叠加扩散圆环（半透明描边，半径
       0→28px / 300ms 衰减），帧合成在采帧后纯 CPU 叠加（app 层改帧，
       capture 不动），不改变 GIF/MP4 编码管线。默认开启、配置面板可关
       （`record_click_highlight`）。教程录制场景第一刚需，成本远低于
       按键显示（后者需要 X11 XRecord / Win 键盘钩子 / mac CGEventTap
-      三套全局监听，先不做，视需求反馈）
+      三套全局监听，先不做，视需求反馈）。
+      实现要点：按下事件取自录制状态窗的 egui 输入？**不行**——录制期间
+      指针在选区内、焦点不在状态窗，须在采帧闭包内轮询
+      `capture::cursor_position()` + 全局按键态（X11 QueryPointer 的
+      button_mask / Win GetAsyncKeyState / mac CGEventSource 按需），
+      Wayland 下 cursor_position 为 None 时该功能自然静默关闭；
+      圆环半径/透明度按经过时间插值的纯函数进 core 单测（给定 t 断言
+      半径与 alpha），叠加本身每帧 ≤4 个圆环的多边形描边，性能可忽略
 
 ### M15 分享集成：可插拔上传 hook（零体积方案）
 
@@ -632,7 +709,57 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       ShareX 式上传生态与「离线单文件小而美」冲突，外部命令零依赖零体积，
       用户自配 uPic/PicGo/sup 自定义脚本均可。CLI：`lscreen upload <file>`
       直接走同一条路径（脚本可用）。安全：命令只来自用户配置文件，
-      路径只经 stdin 不进 argv（避免文件名含空格/特殊字符的注入面）
+      路径只经 stdin 不进 argv（避免文件名含空格/特殊字符的注入面）。
+      实现收敛：三处入口（覆盖层工具栏 / 贴图工具条 / CLI）共用 app 层
+      `upload::run(path)`——spawn（`Stdio::piped` 两端）→ 写路径 → 读
+      stdout，**默认 30s 超时 kill 并报「上传超时」**（外置脚本可能
+      挂死，覆盖层不能陪等）；覆盖层期间按钮转「上传中…」禁用态防连点。
+      历史兼容：`url` 是 index.toml 新字段，旧二进制按「未知字段忽略」
+      读新索引安全；新二进制读旧索引 url 缺省即无。录屏产物（GIF/MP4）
+      走同一入口，「上传」对路径类型不敏感
+
+### M16 Win/mac 系统视频编码器（可选优化，体积/性能驱动）
+
+现状：openh264 vendored C++ 三平台统一编译，**功能无缺口**。切换系统
+编码器的动机只有两个——省产物体积与编译时间（当前 12.4MB 预算充足，
+非刚需）、硬件编码提速省电（VideoToolbox / MF 硬件 MFT，长录制才有感）。
+优先级最低：**没有 M17 对应真机验证手段前不动手**。
+
+- [ ] Windows：Media Foundation H.264 MFT（软/硬自动协商）→ mp4 crate
+      封装（AVCC + avcC，同 Linux 管线）；windows-sys 已在依赖树，
+      无新增链接依赖；失败路径回落 openh264（沿用「系统 API 优先 +
+      内置兜底」惯例，回落意味着两种编码器并存，体积只增不减——
+      若最终体积反超纯 openh264 方案则不做切换）
+- [ ] macOS：VideoToolbox VTCompressionSession（objc2 绑定体积先做
+      空壳评估，超 20MB 预算直接放弃）；回落逻辑同上
+- [ ] 验收：ffprobe 读回 h264、时长/帧数/码率与 openh264 基线一致；
+      硬件不可用（无 GPU 虚机）时静默回落且日志可查
+
+### M17 真机验证台账（v1.0 前置验收）
+
+CI 无桌面环境，Win/mac/Wayland 的 GUI 能力只能人工验证。散落在各里程碑
+的「待真机」项在此收敛成台账，**v1.0 发布前清零**；每验一项回对应里程碑
+勾选并注日期与机器环境，避免「计划里写过、实际没人验过」。验证方法沿用
+M12 先例：env 门控的 ignored 测试（`LSCREEN_TEST_WIN`），能脚本化的尽量
+脚本化，人工点验项写清操作步骤与预期。
+
+- [ ] **Windows**：托盘 + 全局热键（M8）；Windows.Media.Ocr 原生 OCR
+      中英文（M3）；窗口枚举 Z 序与默认选区（M9）；贴图不透明度/穿透/
+      旋转/像素网格（M12）；安装器 + 卸载（含运行中卸载失败提示，
+      review 2026-09-14）；历史面板 125%/150% 缩放定位（v0.8.1）；
+      MP4 录屏真机出片 + ffprobe 回读（M4）；滚动截图 SendInput（v0.8.0）
+- [ ] **macOS**：托盘 Accessory（不占 Dock）+ 左键菜单（v0.6.1）；
+      Vision OCR（M3）；CG 逻辑↔物理坐标换算 + Retina 窗口矩形
+      （M9 / v0.8.0）；贴图全套（M12）；滚动截图 CGEvent 滚轮合成
+      （v0.8.0）；MP4 录屏真机出片（M4）
+- [ ] **Wayland（GNOME 或 KDE 任一真会话）**：portal 交互式截图进
+      预览标注（M5）；GlobalShortcuts 热键绑定与触发（M5，注意 KDE
+      与 GNOME 的绑定 UX 不同）；portal 整屏快照的多屏坐标映射（M5）
+- [ ] **混合 DPI 双屏**：Win 125%/150% 覆盖层与窗口吸附；mac Retina +
+      外接 1x 屏的窗口矩形换算；X11 xrandr --scale 假混合 DPI 的
+      回退路径（M5）
+- [ ] **其他 WM**：GNOME/i3 下跨屏覆盖层 `_NET_WM_FULLSCREEN_MONITORS`
+      与窗口定位（M5；可等社区反馈，v1.0 不强求）
 
 ### 遗留 TODO（review 2026-08-17）
 
@@ -643,7 +770,8 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       不用 `signal(SIGCHLD, SIG_IGN)` 是因为它会全局生效，
       破坏 OCR tesseract 子进程的 wait_with_output
 - [ ] Win/mac 指针查询（capture/src/other.rs cursor_position 返回 None）：
-      windows-rs GetCursorPos / objc2 NSEvent.mouseLocation，补齐后多屏跟随生效
+      windows-sys GetCursorPos / objc2 NSEvent.mouseLocation，补齐后多屏跟随生效；
+      **也是 M14 点击高亮的前置**（采帧闭包轮询指针 + 按键态），做 M14 前先落地
 
 ### 已修缺陷（review 2026-09-14）
 
@@ -762,10 +890,11 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
 | 全局热键被占用/注册失败 | 热键静默失效 | ✅ 已实现：注册返回值逐条检查，失败告警（含默认 F1 与 Deepin 系统键冲突的实测经验）并保留托盘菜单手动入口；仍支持桌面环境绑定 `lscreen gui` 命令 |
 | X11 剪贴板随进程退出丢失 | 复制不可靠 | ✅ 已解决：分离守护子进程（arboard wait()）持有剪贴板，被覆盖后自动退出；遗留确认回执/僵尸收割见「遗留 TODO」 |
 | 混合 DPI 多显示器 | 覆盖层/坐标错位 | 单屏已自洽（View 比例映射）；多屏混合 DPI 在 M5 与 capture_all 一并处理 |
-| 纯 Rust 无 H.264 编码器 | MP4 依赖问题 | ✅ 已解决：Linux openh264 静态链接（零动态库），release 12.4MB 在预算内；Win/mac 系统编码器待实现 |
+| 纯 Rust 无 H.264 编码器 | MP4 依赖问题 | ✅ 已解决：Linux openh264 静态链接（零动态库），release 12.4MB 在预算内；Win/mac 的 MP4 同样由 openh264 全平台承担（非缺口），切换系统编码器是 M16 可选优化 |
 | 滚动截图拼接不稳 | 长图错位 | ✅ 尾部块两阶段匹配 + SAD 阈值校验；悬浮头/动画返回 Mismatch 即停保留已拼部分 |
 | egui 版本 API 变动快 | 升级成本 | 锁定 minor 版本，UI 层薄、核心不受影响 |
 | 产物漏动态库依赖 | 用户机器上打不开 | ✅ v0.5.1：MSVC 默认动态链 CRT，v0.5.0 的 Windows 包在没装 VC++ 运行库的机器上缺 VCRUNTIME140.dll 直接打不开。`.cargo/config.toml` 开 `+crt-static`；`package.sh` 的 `check_win_deps` 扫导入表在出包期拦住（**打包机装过运行库，这类缺陷本地永远测不出来，只能在流水线卡**）。Linux 侧同类门槛见 ci.yml 的 ldd 白名单 |
+| CI 无桌面，Win/mac/Wayland 回归靠人工 | 平台缺陷漏到用户端 | M17 真机验证台账收敛清点、v1.0 前清零；env 门控 ignored 测试（`LSCREEN_TEST_WIN` 先例）让手动验证可脚本化复跑，而非一次性肉眼过 |
 
 ## 6. 目录规范
 
@@ -783,7 +912,8 @@ crates/         所有库与可执行 crate
   record/src/   lib.rs(GIF/MP4 编码 + 采帧) scroll.rs(滚动拼接)
   app/src/      main.rs(CLI 入口) ui/(mod 覆盖层 / toolbar / canvas)
                 history.rs(截图历史面板) tray.rs(托盘) settings_ui.rs(配置面板)
-                pin.rs(贴图) record_ui.rs(录制状态窗) export.rs config.rs font.rs
+                pin.rs(贴图) record_ui.rs(录制状态窗) countdown.rs(延时倒计时窗)
+                selcache.rs(上次选区记忆) export.rs config.rs font.rs
   setup/        Windows 自绘安装器
 ```
 

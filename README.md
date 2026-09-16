@@ -19,9 +19,9 @@ lscreen        # 托盘常驻，之后按 F1 随时截图
 lscreen gui    # 不常驻，直接进入交互截图（框选 → 标注 → 复制/保存）
 ```
 
-交互标注含 8 种工具（矩形 / 椭圆 / 箭头 / 画笔 / 自增标号 / 文本 / 马赛克 / 橡皮擦），元素可再编辑（拖拽 / 控制点 / 双击改文本），支持撤销重做、贴图（Ctrl+P）、二维码 / OCR 识别、复制（Ctrl+C）与保存（Ctrl+S）。
+交互标注含 8 种工具（矩形 / 椭圆 / 箭头 / 画笔 / 自增标号 / 文本 / 马赛克 / 橡皮擦），元素可再编辑（拖拽 / 控制点 / 双击改文本），支持撤销重做、贴图（Ctrl+P）、二维码 / OCR 识别、复制（Ctrl+C）与保存（Ctrl+S）。文本工具可开**背景色**（当前色圆角底 + 自动黑/白对比字色，浅色截图上白字不可读的解法）；工具栏可**生成二维码**（输入文本插入标注层，可拖动、四角等比缩放，与截图一起导出）；取景放大镜旁有**取色历史**色块（最近 8 色，点击选用后 Ctrl+R/H/K 复制其它格式）。
 
-托盘常驻时菜单含截图 / 取色 / 贴图 ▸（显示贴图 / 关闭穿透 / 关闭所有贴图）/ 录屏 / 滚动截图 / 历史 / 配置，六个动作可各自绑定全局热键（默认只有 F1 截图）。其中**「历史」是一个缩略图浮窗**，列出最近的截图 / 贴图 / 录屏：点击缩略图复制，录屏则用默认播放器播放；右键可贴图 / 打开目录 / 删除；顶栏显示条数与占用体积，可一键清空。同一时刻只有一个面板，面板在后台时再按热键会把它唤到前台。
+托盘常驻时菜单含截图 / 取色 / 贴图 ▸（显示贴图 / 关闭穿透 / 关闭所有贴图）/ 录屏 / 滚动截图 / 延时截图 / 历史 / 配置，七个动作可各自绑定全局热键（默认只有 F1 截图）。其中**「历史」是一个缩略图浮窗**，列出最近的截图 / 贴图 / 录屏：点击缩略图复制，录屏则用默认播放器播放；右键可贴图 / 打开目录 / 删除；顶栏显示条数与占用体积，可一键清空。同一时刻只有一个面板，面板在后台时再按热键会把它唤到前台。
 
 **贴图**（Snipaste 式置顶悬浮）：滚轮缩放，工具条有 −/百分比/＋ 控件（点百分比重置 100%，键盘 +/−/0）；**Shift+滚轮调不透明度（20–100%）**；R 旋转 90°、H/V 水平/垂直翻转（复制与保存所见即所得）；高倍放大（≥8x）显示像素网格；**点击穿透**——点击穿到下层窗口，Esc 或托盘菜单「贴图 → 关闭穿透」恢复。
 
@@ -29,10 +29,12 @@ lscreen gui    # 不常驻，直接进入交互截图（框选 → 标注 → �
 
 ```bash
 lscreen shot -o out.png                  # 无界面截图（--region X,Y,W,H 指定区域）
+lscreen gui --delay 3                    # 延时 3 秒截图（shot --delay 同支持）
 lscreen record --select --fps 10         # 框选录制 GIF（--mp4 录制 MP4/H.264，Linux）
 lscreen scroll                           # 滚动长截图（Linux X11）
 lscreen ocr --region 0,0,800,600         # OCR 识别（-i 指定图片，--lang 选语言）
 lscreen qr -i photo.png                  # 识别图片中的二维码
+lscreen qr-gen "https://example.com" -o qr.png   # 生成二维码 PNG（--ecc L/M/Q/H）
 lscreen pick                             # 屏幕取色器
 lscreen pin -i img.png                   # 把图片钉在屏幕上
 lscreen history                          # 历史面板（最近截图 / 贴图 / 录屏）
@@ -64,7 +66,7 @@ cargo install --path crates/app
 
 ## 配置
 
-零配置可用，不生成文件。`lscreen config` 打开面板调整（保存目录、文件名模板、配置窗口主题（自动/浅色/夜间）、默认工具/颜色、录制格式、历史条数、六个全局热键等），运行中的托盘 1 秒内自动热加载。配置文件：Linux `~/.config/lscreen/config.toml`、Windows `%APPDATA%\lscreen\config.toml`、macOS `~/Library/Application Support/lscreen/config.toml`。自动主题由 egui 跟随当前操作系统配色。
+零配置可用，不生成文件。`lscreen config` 打开面板调整（保存目录、文件名模板、配置窗口主题（自动/浅色/夜间）、默认工具/颜色、初始选区（最前窗口 / 上次选区 / 全屏 / 无——「上次选区」在显示器布局变化后自动作废回退）、录制格式、历史条数、七个全局热键等），运行中的托盘 1 秒内自动热加载。配置文件：Linux `~/.config/lscreen/config.toml`、Windows `%APPDATA%\lscreen\config.toml`、macOS `~/Library/Application Support/lscreen/config.toml`。自动主题由 egui 跟随当前操作系统配色。
 
 历史副本不放配置目录，而是缓存目录（Linux `~/.cache/lscreen/history/`、Windows `%LOCALAPPDATA%\lscreen\history\`、macOS `~/Library/Caches/lscreen/history/`）：那是可随时删掉、不影响配置的派生数据，嫌占地方直接删整个目录即可。面板顶栏也能看到占用体积并一键清空。
 

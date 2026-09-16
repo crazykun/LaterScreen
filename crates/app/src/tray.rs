@@ -32,6 +32,8 @@ pub fn run() -> Result<(), String> {
 #[derive(Clone, PartialEq, Debug)]
 pub enum Action {
     Screenshot,
+    /// 延时截图（M13）：倒计时窗到点再进截图覆盖层（默认 3 秒）
+    DelayShot,
     Picker,
     Pin,
     /// 退出全部贴图的点击穿透（广播 pins.ctl；穿透中的贴图收不到任何
@@ -54,6 +56,7 @@ const MENU_ACTIONS: &[(Action, &str)] = &[
     (Action::Picker, "取色"),
     (Action::Record, "录屏"),
     (Action::Scroll, "滚动截图"),
+    (Action::DelayShot, "延时截图"),
     (Action::History, "历史"),
     (Action::Config, "配置"),
     (Action::Quit, "退出"),
@@ -67,7 +70,7 @@ const PIN_MENU: &[(Action, &str)] = &[
     (Action::PinsClose, "关闭所有贴图"),
 ];
 
-/// 子菜单在主菜单中的插入位：截图、取色之后（即历史版本「贴图」的位置）。
+/// 子菜单在主菜单中的插入位：截图、取色之后。
 const PIN_SUBMENU_POS: usize = 2;
 
 /// 执行动作：除退出外都是拉起独立子进程（detached + 分离线程收割，防僵尸）。
@@ -76,6 +79,7 @@ fn dispatch(a: Action) -> bool {
     // 返回 false 表示应当退出托盘进程
     match a {
         Action::Screenshot => spawn_detached(&["gui"]),
+        Action::DelayShot => spawn_detached(&["gui", "--delay", "3"]),
         Action::Picker => spawn_detached(&["pick"]),
         Action::Record => spawn_detached(&["record", "--select"]),
         Action::Scroll => spawn_detached(&["scroll"]),
@@ -413,6 +417,7 @@ impl Hotkeys {
                 &cfg.hotkey_screenshot,
                 Action::Screenshot,
             ),
+            ("hotkey_delay", &cfg.hotkey_delay, Action::DelayShot),
             ("hotkey_picker", &cfg.hotkey_picker, Action::Picker),
             ("hotkey_pin", &cfg.hotkey_pin, Action::Pin),
             ("hotkey_record", &cfg.hotkey_record, Action::Record),
@@ -442,6 +447,7 @@ impl Hotkeys {
 fn action_shortcut_id(a: &Action) -> Option<&'static str> {
     Some(match a {
         Action::Screenshot => "screenshot",
+        Action::DelayShot => "delay",
         Action::Picker => "picker",
         Action::Pin => "pin",
         Action::Record => "record",
@@ -455,6 +461,7 @@ fn action_shortcut_id(a: &Action) -> Option<&'static str> {
 fn action_from_shortcut_id(id: &str) -> Option<Action> {
     Some(match id {
         "screenshot" => Action::Screenshot,
+        "delay" => Action::DelayShot,
         "picker" => Action::Picker,
         "pin" => Action::Pin,
         "record" => Action::Record,
@@ -508,8 +515,8 @@ fn shortcut_specs(cfg: &Config) -> Vec<lscreen_capture::ShortcutSpec> {
         };
         let raw = match action {
             Action::Screenshot => &cfg.hotkey_screenshot,
+            Action::DelayShot => &cfg.hotkey_delay,
             Action::Picker => &cfg.hotkey_picker,
-            Action::Pin => &cfg.hotkey_pin,
             Action::Record => &cfg.hotkey_record,
             Action::Scroll => &cfg.hotkey_scroll,
             Action::History => &cfg.hotkey_history,
@@ -534,8 +541,8 @@ fn menu_label(cfg: &Config, a: &Action) -> String {
         .unwrap_or("");
     let hk = match a {
         Action::Screenshot => &cfg.hotkey_screenshot,
+        Action::DelayShot => &cfg.hotkey_delay,
         Action::Picker => &cfg.hotkey_picker,
-        Action::Pin => &cfg.hotkey_pin,
         Action::Record => &cfg.hotkey_record,
         Action::Scroll => &cfg.hotkey_scroll,
         Action::History => &cfg.hotkey_history,

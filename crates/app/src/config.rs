@@ -49,7 +49,8 @@ pub struct Config {
     pub default_color: String,
     /// 默认线宽 1-12
     pub default_width: f32,
-    /// 进入截图时的初始选区：window=最前窗口 / fullscreen=全屏 / none=无（手动框选）
+    /// 进入截图时的初始选区：window=最前窗口 / last=上次选区（M13，
+    /// 布局变化自动作废回退窗口）/ fullscreen=全屏 / none=无（手动框选）
     pub default_selection: String,
     /// 复制到剪贴板后自动退出
     pub copy_auto_exit: bool,
@@ -65,6 +66,7 @@ pub struct Config {
     /// 截图默认 F1（Snipaste 惯例、系统冲突率低——Ctrl+Alt+A 在 Deepin
     /// 等桌面是系统截图键）；裸键仅允许 PrintScreen/F1-F12
     pub hotkey_screenshot: String,
+    pub hotkey_delay: String,
     pub hotkey_picker: String,
     pub hotkey_pin: String,
     pub hotkey_record: String,
@@ -88,6 +90,7 @@ impl Default for Config {
             history_close_after_copy: false,
             record_format: "gif".to_string(),
             hotkey_screenshot: "F1".to_string(),
+            hotkey_delay: String::new(),
             hotkey_picker: String::new(),
             hotkey_pin: String::new(),
             hotkey_record: String::new(),
@@ -186,12 +189,13 @@ impl Config {
         match self.default_selection.trim().to_ascii_lowercase().as_str() {
             "fullscreen" => InitialSelection::Fullscreen,
             "none" => InitialSelection::None,
+            "last" => InitialSelection::Last,
             _ => InitialSelection::Window,
         }
     }
 }
 
-/// 进入截图覆盖层时的初始选区（M9）
+/// 进入截图覆盖层时的初始选区（M9；M13 增 Last）
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum InitialSelection {
     /// 最前（活跃）窗口矩形——一步 Enter/双击即可出图
@@ -200,6 +204,9 @@ pub enum InitialSelection {
     Fullscreen,
     /// 不预选，保持纯手动框选（旧行为）
     None,
+    /// 上次交付选区（复制/保存/贴图/识别/录屏框选）；布局变了或无记录
+    /// 时回退最前窗口（见 selcache）
+    Last,
 }
 
 /// 配置文件路径。
@@ -288,6 +295,7 @@ pub const TOOL_NAMES: &[(&str, &str)] = &[
 /// 初始选区选项：(配置值, 面板文案)
 pub const SELECTION_NAMES: &[(&str, &str)] = &[
     ("window", "最前窗口"),
+    ("last", "上次选区"),
     ("fullscreen", "全屏"),
     ("none", "无"),
 ];
@@ -474,6 +482,8 @@ mod tests {
         assert_eq!(c.initial_selection(), InitialSelection::Fullscreen);
         let c = cfg("default_selection = \"none\"\n");
         assert_eq!(c.initial_selection(), InitialSelection::None);
+        let c = cfg("default_selection = \"last\"\n");
+        assert_eq!(c.initial_selection(), InitialSelection::Last);
         // 未知值回退默认（最前窗口）
         let c = cfg("default_selection = \"bogus\"\n");
         assert_eq!(c.initial_selection(), InitialSelection::Window);

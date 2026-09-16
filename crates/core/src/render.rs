@@ -15,7 +15,7 @@ use tiny_skia::{
 };
 
 use crate::geom::{RectF, P2};
-use crate::model::{Element, ElementKind, Rgba};
+use crate::model::{Element, ElementKind, Rgba, TEXT_BG_RADIUS};
 
 pub struct Renderer {
     font: Option<FontArc>,
@@ -137,7 +137,25 @@ impl Renderer {
                     Rgba([255, 255, 255, 255]),
                 );
             }
-            ElementKind::Text { pos, content, .. } => {
+            ElementKind::Text {
+                pos, content, bg, ..
+            } => {
+                // 文字背景（M13）：圆角矩形（立方角，kappa≈0.5523），
+                // 半径/外扩常量与交互层共用（model::TEXT_BG_*）
+                if let Some(bg) = bg {
+                    let r = e.text_bg_rect();
+                    let radius = TEXT_BG_RADIUS;
+                    let mut pb = PathBuilder::new();
+                    push_rounded_rect(&mut pb, r, radius);
+                    if let Some(path) = pb.finish() {
+                        let mut p = Paint {
+                            anti_alias: true,
+                            ..Paint::default()
+                        };
+                        p.set_color_rgba8(bg.r(), bg.g(), bg.b(), bg.a());
+                        canvas.fill_path(&path, &p, FillRule::Winding, Transform::identity(), None);
+                    }
+                }
                 self.draw_text(canvas, content, pos.x, pos.y, e.style.font_size, c);
             }
             ElementKind::Mosaic { points } => {
@@ -181,6 +199,25 @@ impl Renderer {
                             }
                         }
                     }
+                }
+            }
+            ElementKind::Image { rect, rgba } => {
+                // 位图图元（M13）：nearest 预缩放到 rect 的整数尺寸后整像素
+                // 贴入——二维码要像素锐利（双线性会让码点糊边），且整像素
+                // 对齐与交互层的 NEAREST 纹理采样一致
+                let dw = rect.width().round().max(1.0) as u32;
+                let dh = rect.height().round().max(1.0) as u32;
+                if let Some(mut scaled) = Pixmap::new(dw, dh) {
+                    nearest_scale_into(&mut scaled, rgba);
+                    let pp = tiny_skia::PixmapPaint::default();
+                    canvas.draw_pixmap(
+                        rect.min.x.round() as i32,
+                        rect.min.y.round() as i32,
+                        scaled.as_ref(),
+                        &pp,
+                        Transform::identity(),
+                        None,
+                    );
                 }
             }
         }
@@ -420,6 +457,51 @@ fn polyline_path(points: &[P2]) -> Option<tiny_skia::Path> {
     pb.finish()
 }
 
+/// 圆角矩形路径（顺时针，立方角近似圆弧，kappa≈0.5523）。
+/// 半径自动钳到短边一半，退化矩形（r≈0）为直角矩形。
+fn push_rounded_rect(pb: &mut PathBuilder, r: RectF, radius: f32) {
+    let (x0, y0, x1, y1) = (r.min.x, r.min.y, r.max.x, r.max.y);
+    let rad = radius.min((x1 - x0).max(0.0).min(y1 - y0) * 0.5);
+    if rad <= 0.0 {
+        if let Some(rect) = SkRect::from_ltrb(x0, y0, x1, y1) {
+            pb.push_rect(rect);
+        }
+        return;
+    }
+    let k = rad * 0.5523;
+    pb.move_to(x0 + rad, y0);
+    pb.line_to(x1 - rad, y0);
+    pb.cubic_to(x1 - k, y0, x1, y0 + k, x1, y0 + rad);
+    pb.line_to(x1, y1 - rad);
+    pb.cubic_to(x1, y1 - k, x1 - k, y1, x1 - rad, y1);
+    pb.line_to(x0 + rad, y1);
+    pb.cubic_to(x0 + k, y1, x0, y1 - k, x0, y1 - rad);
+    pb.line_to(x0, y0 + rad);
+    pb.cubic_to(x0, y0 + k, x0 + k, y0, x0 + rad, y0);
+    pb.close();
+}
+
+/// 位图 nearest 缩放（M13 Image 图元导出用）。目标尺寸由 rect 取整而来，
+/// 源为不透明的 RGBA8；与 GPU 侧 NEAREST 采样同规则。
+fn nearest_scale_into(dst: &mut Pixmap, src: &image::RgbaImage) {
+    let (sw, sh) = (src.width() as usize, src.height() as usize);
+    let (dw, dh) = (dst.width() as usize, dst.height() as usize);
+    if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+        return;
+    }
+    let s = src.as_raw();
+    let d = dst.data_mut();
+    for y in 0..dh {
+        let sy = (y * sh / dh).min(sh - 1);
+        for x in 0..dw {
+            let sx = (x * sw / dw).min(sw - 1);
+            let si = (sy * sw + sx) * 4;
+            let di = (y * dw + x) * 4;
+            d[di..di + 4].copy_from_slice(&s[si..si + 4]);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,6 +541,63 @@ mod tests {
         let out = r.render(&src, 64, 64, &elems);
         assert_ne!(out, src);
         assert_eq!(out.len(), src.len());
+    }
+
+    #[test]
+    fn image_element_renders_scaled() {
+        // M13 位图图元：nearest 缩放贴入，源图的红色应出现在目标矩形中心
+        let r = Renderer::new(None);
+        let src = blank(64, 64);
+        let img = image::RgbaImage::from_pixel(10, 10, image::Rgba([0xe5, 0x39, 0x35, 0xff]));
+        let elems = vec![Element {
+            id: 1,
+            kind: ElementKind::Image {
+                rect: RectF::from_points(P2::new(8.0, 8.0), P2::new(40.0, 40.0)),
+                rgba: std::sync::Arc::new(img),
+            },
+            style: Style::default(),
+        }];
+        let out = r.render(&src, 64, 64, &elems);
+        let px = |x: usize, y: usize| &out[(y * 64 + x) * 4..(y * 64 + x) * 4 + 3];
+        assert_eq!(px(24, 24), &[0xe5, 0x39, 0x35], "矩形中心为源图红");
+        assert_eq!(px(4, 24), &[255, 255, 255], "矩形外保持原样");
+    }
+
+    #[test]
+    fn text_bg_fills_padding_and_uses_contrast() {
+        // M13 文字背景：bg 矩形（pos-2 ~ pos+size+2）应被底色填充；
+        // 文字色按创建约定已由 UI 层写成对比色，这里验证渲染层忠实画底
+        let r = Renderer::new(None);
+        let src = blank(64, 64);
+        let bg = Rgba([0xe5, 0x39, 0x35, 0xff]); // 红
+        let elems = vec![Element {
+            id: 1,
+            kind: ElementKind::Text {
+                pos: P2::new(20.0, 20.0),
+                content: String::new(),
+                size: P2::new(24.0, 12.0),
+                bg: Some(bg),
+            },
+            style: Style::default(),
+        }];
+        let out = r.render(&src, 64, 64, &elems);
+        let px = |x: usize, y: usize| &out[(y * 64 + x) * 4..(y * 64 + x) * 4 + 3];
+        // 背景矩形中心（字空着无字形遮挡）
+        assert_eq!(px(32, 26), &[0xe5, 0x39, 0x35]);
+        // 上边距带（pos.y-1，在 pad=2 内）
+        assert_eq!(px(32, 19), &[0xe5, 0x39, 0x35]);
+        // 矩形外 3px 保持原样
+        assert_eq!(px(32, 15), &[255, 255, 255]);
+        assert_eq!(px(10, 26), &[255, 255, 255]);
+        // 对比色：红底 → 白字
+        assert_eq!(
+            crate::color::contrast_text_color(bg),
+            Rgba([0xff, 0xff, 0xff, 0xff])
+        );
+        assert_eq!(
+            crate::color::contrast_text_color(Rgba([0xfd, 0xd8, 0x35, 0xff])), // 黄底
+            Rgba([0x11, 0x11, 0x11, 0xff])
+        );
     }
 
     #[test]

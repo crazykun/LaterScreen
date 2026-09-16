@@ -36,6 +36,18 @@ pub fn to_cmyk_str(c: Rgba) -> String {
     format!("{}%, {}%, {}%, {}%", cy, m, y, k)
 }
 
+/// 按亮度取与底色对比的文字颜色（黑/白，M13 文字背景）。
+/// 亮度用 BT.601 系数（与 CMYK 朴素公式同一族，简单且够用）。
+/// 创建文字图元时由 UI 层调用一次写入 style.color，渲染路径不再算。
+pub fn contrast_text_color(bg: Rgba) -> Rgba {
+    let luma = 0.299 * bg.r() as f32 + 0.587 * bg.g() as f32 + 0.114 * bg.b() as f32;
+    if luma < 128.0 {
+        Rgba([0xff, 0xff, 0xff, 0xff])
+    } else {
+        Rgba([0x11, 0x11, 0x11, 0xff])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

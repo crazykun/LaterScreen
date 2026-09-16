@@ -106,6 +106,7 @@ impl SettingsApp {
         // 先取副本再校验：避免循环持有 &self.cfg 的同时调 self.toast 可变借用
         let hotkeys = [
             ("截图热键", self.cfg.hotkey_screenshot.clone()),
+            ("延时截图热键", self.cfg.hotkey_delay.clone()),
             ("取色热键", self.cfg.hotkey_picker.clone()),
             ("贴图热键", self.cfg.hotkey_pin.clone()),
             ("录屏热键", self.cfg.hotkey_record.clone()),
@@ -201,10 +202,11 @@ impl SettingsApp {
     fn hotkey_field_mut(&mut self, idx: usize) -> &mut String {
         match idx {
             0 => &mut self.cfg.hotkey_screenshot,
-            1 => &mut self.cfg.hotkey_picker,
-            2 => &mut self.cfg.hotkey_pin,
-            3 => &mut self.cfg.hotkey_record,
-            4 => &mut self.cfg.hotkey_scroll,
+            1 => &mut self.cfg.hotkey_delay,
+            2 => &mut self.cfg.hotkey_picker,
+            3 => &mut self.cfg.hotkey_pin,
+            4 => &mut self.cfg.hotkey_record,
+            5 => &mut self.cfg.hotkey_scroll,
             _ => &mut self.cfg.hotkey_history,
         }
     }
@@ -594,7 +596,10 @@ impl SettingsApp {
                             }
                         })
                         .response
-                        .on_hover_text("进入截图时预选的区域：最前窗口可直接 Enter/双击出图");
+                        .on_hover_text(
+                            "进入截图时预选的区域：最前窗口/上次选区可直接 Enter/双击出图；\
+                             上次选区在显示器布局变化后自动作废回退最前窗口",
+                        );
                     ui.end_row();
                 });
             ui.add_space(6.0);
@@ -614,20 +619,23 @@ impl SettingsApp {
                     row_label(ui, "截图");
                     self.hotkey_capture(ui, 0, &self.cfg.hotkey_screenshot.clone());
                     ui.end_row();
+                    row_label(ui, "延时截图");
+                    self.hotkey_capture(ui, 1, &self.cfg.hotkey_delay.clone());
+                    ui.end_row();
                     row_label(ui, "取色");
-                    self.hotkey_capture(ui, 1, &self.cfg.hotkey_picker.clone());
+                    self.hotkey_capture(ui, 2, &self.cfg.hotkey_picker.clone());
                     ui.end_row();
                     row_label(ui, "贴图");
-                    self.hotkey_capture(ui, 2, &self.cfg.hotkey_pin.clone());
+                    self.hotkey_capture(ui, 3, &self.cfg.hotkey_pin.clone());
                     ui.end_row();
                     row_label(ui, "录屏");
-                    self.hotkey_capture(ui, 3, &self.cfg.hotkey_record.clone());
+                    self.hotkey_capture(ui, 4, &self.cfg.hotkey_record.clone());
                     ui.end_row();
                     row_label(ui, "滚动截图");
-                    self.hotkey_capture(ui, 4, &self.cfg.hotkey_scroll.clone());
+                    self.hotkey_capture(ui, 5, &self.cfg.hotkey_scroll.clone());
                     ui.end_row();
                     row_label(ui, "历史");
-                    self.hotkey_capture(ui, 5, &self.cfg.hotkey_history.clone());
+                    self.hotkey_capture(ui, 6, &self.cfg.hotkey_history.clone());
                     ui.end_row();
                 });
             ui.add_space(2.0);
@@ -660,9 +668,10 @@ fn row_label(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).color(muted(ui)));
 }
 
-/// 通用加高输入框（min_size 保证 32px 高）。
+/// 通用加高输入框：高度取 `theme::FIELD_H`，与下拉框/数字框（interact_size
+/// 下限）保持同一来源，同 Grid 内等高。
 fn input_field(ui: &mut egui::Ui, builder: egui::TextEdit<'_>) -> egui::Response {
-    ui.add(builder.min_size(egui::vec2(0.0, 32.0)))
+    ui.add(builder.min_size(egui::vec2(0.0, crate::theme::FIELD_H)))
 }
 
 fn egui_to_rgba(c: egui::Color32) -> lscreen_core::Rgba {

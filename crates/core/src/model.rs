@@ -8,6 +8,11 @@
 use crate::geom::{dist_to_polyline, RectF, P2};
 use crate::history::History;
 
+/// 文字背景矩形外扩（物理像素）与圆角半径（物理像素）。
+/// 两条渲染路径共用，勿单侧改动。
+pub const TEXT_BG_PAD: f32 = 2.0;
+pub const TEXT_BG_RADIUS: f32 = 2.0;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Rgba(pub [u8; 4]);
 
@@ -86,10 +91,14 @@ pub enum ElementKind {
         number: u32,
     },
     /// size 为 UI 层测量后的包围盒尺寸，用于命中检测与导出布局。
+    /// bg = 文字底色（M13 文字背景）：None 透明；Some 时文字颜色在创建时
+    /// 已按底色亮度取对比色（见 color::contrast_text_color），两条渲染
+    /// 路径都只管「先画 bg 圆角矩形、再按 style.color 画字」。
     Text {
         pos: P2,
         content: String,
         size: P2,
+        bg: Option<Rgba>,
     },
     Mosaic {
         points: Vec<P2>,
@@ -97,6 +106,15 @@ pub enum ElementKind {
     /// 橡皮擦：渲染时将原图对应区域贴回，擦掉此前绘制的标注。
     Eraser {
         points: Vec<P2>,
+    },
+    /// 位图图元（M13 二维码生成）：小位图贴入标注层，与截图一起导出。
+    /// rgba 装箱放 Arc——撤销快照只克隆指针，延续「图片本体不进快照」
+    /// 原则（快照仍是全量 `Vec<Element>`，无需句柄表）。
+    /// **恒等比缩放**（set_control_point 保证 rect 宽高比 = 位图宽高比）：
+    /// 码图拉伸畸变会影响回扫识别。
+    Image {
+        rect: RectF,
+        rgba: std::sync::Arc<image::RgbaImage>,
     },
 }
 
@@ -143,6 +161,8 @@ impl Element {
                 dist_to_polyline(p, points) <= tol + self.mosaic_brush() + self.mosaic_cell()
             }
             ElementKind::Eraser { points } => dist_to_polyline(p, points) <= self.eraser_brush(),
+            // 实心命中（与 Marker 同语义）：码图任意点可选中
+            ElementKind::Image { rect, .. } => rect.expand(tol).contains(p),
         }
     }
 
@@ -164,19 +184,23 @@ impl Element {
             }
             ElementKind::Marker { center, .. } => *center = center.offset(dx, dy),
             ElementKind::Text { pos, .. } => *pos = pos.offset(dx, dy),
+            ElementKind::Image { rect, .. } => *rect = rect.translate(dx, dy),
         }
     }
 
-    /// 可拖拽的控制点（矩形/椭圆四角、线段两端）。其余图元返回空，只支持整体移动。
+    /// 可拖拽的控制点（矩形/椭圆四角、线段两端、位图四角）。其余图元返回空，只支持整体移动。
     pub fn control_points(&self) -> Vec<P2> {
         match &self.kind {
             ElementKind::Rect { rect } | ElementKind::Ellipse { rect } => rect.corners().to_vec(),
+            ElementKind::Image { rect, .. } => rect.corners().to_vec(),
             ElementKind::Arrow { from, to } | ElementKind::Line { from, to } => vec![*from, *to],
             _ => Vec::new(),
         }
     }
 
-    /// 拖拽第 idx 个控制点到 p。矩形/椭圆按「对角固定」语义调整。
+    /// 拖拽第 idx 个控制点到 p。矩形/椭圆按「对角固定」语义调整；
+    /// 位图同语义但**恒等比**（宽高比锁定为位图宽高比，码图拉伸
+    /// 畸变会影响回扫识别）。
     pub fn set_control_point(&mut self, idx: usize, p: P2) {
         match &mut self.kind {
             ElementKind::Rect { rect } | ElementKind::Ellipse { rect } => {
@@ -184,6 +208,22 @@ impl Element {
                 if idx < 4 {
                     let opposite = corners[(idx + 2) % 4];
                     *rect = RectF::from_points(opposite, p);
+                }
+            }
+            ElementKind::Image { rect, rgba } => {
+                let corners = rect.corners();
+                if idx < 4 {
+                    let opposite = corners[(idx + 2) % 4];
+                    let aspect = rgba.width() as f32 / rgba.height() as f32;
+                    let (dx, dy) = (p.x - opposite.x, p.y - opposite.y);
+                    // 取两轴换算后的较大边长，保证拖拽方向不被截断
+                    let width = dx.abs().max(dy.abs() * aspect).max(1.0);
+                    let height = width / aspect;
+                    let corner = P2::new(
+                        opposite.x + width * dx.signum(),
+                        opposite.y + height * dy.signum(),
+                    );
+                    *rect = RectF::from_points(opposite, corner);
                 }
             }
             ElementKind::Arrow { from, to } | ElementKind::Line { from, to } => match idx {
@@ -221,11 +261,24 @@ impl Element {
             ElementKind::Text { pos, size, .. } => {
                 RectF::from_points(*pos, pos.offset(size.x, size.y))
             }
+            ElementKind::Image { rect, .. } => *rect,
         }
     }
 
     pub fn marker_radius(&self) -> f32 {
         self.style.font_size * 0.75
+    }
+
+    /// 文字背景（M13）：底色矩形（图像像素坐标）。两边渲染路径共用，
+    /// 保证交互层与导出层几何一致；pad/radius 为常量（物理像素）。
+    pub fn text_bg_rect(&self) -> RectF {
+        let ElementKind::Text { pos, size, .. } = &self.kind else {
+            return RectF::default();
+        };
+        RectF {
+            min: P2::new(pos.x - TEXT_BG_PAD, pos.y - TEXT_BG_PAD),
+            max: P2::new(pos.x + size.x + TEXT_BG_PAD, pos.y + size.y + TEXT_BG_PAD),
+        }
     }
 
     pub fn mosaic_brush(&self) -> f32 {
@@ -350,6 +403,31 @@ mod tests {
         let e = doc.get(id).unwrap();
         assert!(e.hit_test(P2::new(10.0, 30.0), 4.0)); // 左边缘
         assert!(!e.hit_test(P2::new(55.0, 35.0), 4.0)); // 中空处
+    }
+
+    /// 位图图元（M13）：四角拖拽恒等比（宽高比锁定位图宽高比）、实心命中。
+    #[test]
+    fn image_element_aspect_lock_and_hit() {
+        let img = image::RgbaImage::from_pixel(100, 50, image::Rgba([255, 0, 0, 255]));
+        let mut doc = Document::default();
+        doc.begin_change();
+        let id = doc.add(
+            ElementKind::Image {
+                rect: RectF::from_points(P2::new(0.0, 0.0), P2::new(100.0, 50.0)),
+                rgba: std::sync::Arc::new(img),
+            },
+            Style::default(),
+        );
+        let e = doc.get_mut(id).unwrap();
+        // 只往右拖 60px（y 不动），等比语义下高度同步增长（50 * 1.6 = 80）
+        e.set_control_point(2, P2::new(160.0, 0.0));
+        let ElementKind::Image { rect, .. } = &doc.get(id).unwrap().kind else {
+            unreachable!()
+        };
+        assert!((rect.width() - 160.0).abs() < 0.01);
+        assert!((rect.height() - 80.0).abs() < 0.01, "高应随宽等比增长");
+        // 实心命中（内部可选，与 Rect 的中空语义相反）
+        assert!(doc.get(id).unwrap().hit_test(rect.center(), 2.0));
     }
 
     #[test]
