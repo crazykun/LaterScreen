@@ -853,6 +853,7 @@ mod native_impl {
             let action = match ev {
                 UserEvent::Menu(id) => match id.as_str() {
                     "shot" => Some(Action::Screenshot),
+                    "delay_shot" => Some(Action::DelayShot),
                     "pick" => Some(Action::Picker),
                     "pin" => Some(Action::Pin),
                     // 子菜单两个保底入口：此前漏了分发分支，点了没反应
@@ -911,6 +912,7 @@ mod native_impl {
     fn action_id(a: &Action) -> String {
         match a {
             Action::Screenshot => "shot",
+            Action::DelayShot => "delay_shot",
             Action::Picker => "pick",
             Action::Pin => "pin",
             Action::PinThrough => "pin_through",

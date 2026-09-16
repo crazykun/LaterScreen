@@ -106,11 +106,11 @@ impl SettingsApp {
         // 先取副本再校验：避免循环持有 &self.cfg 的同时调 self.toast 可变借用
         let hotkeys = [
             ("截图热键", self.cfg.hotkey_screenshot.clone()),
-            ("延时截图热键", self.cfg.hotkey_delay.clone()),
             ("取色热键", self.cfg.hotkey_picker.clone()),
             ("贴图热键", self.cfg.hotkey_pin.clone()),
             ("录屏热键", self.cfg.hotkey_record.clone()),
             ("滚动截图热键", self.cfg.hotkey_scroll.clone()),
+            ("延时截图热键", self.cfg.hotkey_delay.clone()),
             ("历史热键", self.cfg.hotkey_history.clone()),
         ];
         for (name, raw) in hotkeys {
@@ -202,11 +202,11 @@ impl SettingsApp {
     fn hotkey_field_mut(&mut self, idx: usize) -> &mut String {
         match idx {
             0 => &mut self.cfg.hotkey_screenshot,
-            1 => &mut self.cfg.hotkey_delay,
-            2 => &mut self.cfg.hotkey_picker,
-            3 => &mut self.cfg.hotkey_pin,
-            4 => &mut self.cfg.hotkey_record,
-            5 => &mut self.cfg.hotkey_scroll,
+            1 => &mut self.cfg.hotkey_picker,
+            2 => &mut self.cfg.hotkey_pin,
+            3 => &mut self.cfg.hotkey_record,
+            4 => &mut self.cfg.hotkey_scroll,
+            5 => &mut self.cfg.hotkey_delay,
             _ => &mut self.cfg.hotkey_history,
         }
     }
@@ -619,20 +619,20 @@ impl SettingsApp {
                     row_label(ui, "截图");
                     self.hotkey_capture(ui, 0, &self.cfg.hotkey_screenshot.clone());
                     ui.end_row();
-                    row_label(ui, "延时截图");
-                    self.hotkey_capture(ui, 1, &self.cfg.hotkey_delay.clone());
-                    ui.end_row();
                     row_label(ui, "取色");
-                    self.hotkey_capture(ui, 2, &self.cfg.hotkey_picker.clone());
+                    self.hotkey_capture(ui, 1, &self.cfg.hotkey_picker.clone());
                     ui.end_row();
                     row_label(ui, "贴图");
-                    self.hotkey_capture(ui, 3, &self.cfg.hotkey_pin.clone());
+                    self.hotkey_capture(ui, 2, &self.cfg.hotkey_pin.clone());
                     ui.end_row();
                     row_label(ui, "录屏");
-                    self.hotkey_capture(ui, 4, &self.cfg.hotkey_record.clone());
+                    self.hotkey_capture(ui, 3, &self.cfg.hotkey_record.clone());
                     ui.end_row();
                     row_label(ui, "滚动截图");
-                    self.hotkey_capture(ui, 5, &self.cfg.hotkey_scroll.clone());
+                    self.hotkey_capture(ui, 4, &self.cfg.hotkey_scroll.clone());
+                    ui.end_row();
+                    row_label(ui, "延时截图");
+                    self.hotkey_capture(ui, 5, &self.cfg.hotkey_delay.clone());
                     ui.end_row();
                     row_label(ui, "历史");
                     self.hotkey_capture(ui, 6, &self.cfg.hotkey_history.clone());
