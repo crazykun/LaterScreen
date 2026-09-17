@@ -21,6 +21,7 @@ mod settings_ui;
 mod theme;
 mod tray;
 mod ui;
+mod upload;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -240,6 +241,12 @@ enum Cmd {
     Config,
     /// 打开截图历史面板（最近截图/贴图/录屏，缩略图网格）
     History,
+    /// 上传文件：把路径经 stdin 交给配置的上传命令（config.toml [upload].command），
+    /// stdout 第一个非空行作为 URL 打印并复制到剪贴板
+    Upload {
+        /// 要上传的文件（PNG/GIF/MP4 均可，路径类型不敏感）
+        file: PathBuf,
+    },
     /// 标注预览：把图片开进带完整工具栏的标注窗口（内部命令，滚动截图
     /// 拼接结果的预览走它，--help 不显示）
     #[command(hide = true)]
@@ -471,6 +478,7 @@ fn main() {
         Some(Cmd::Pin { input, pos, scale }) => run_pin(input, pos, scale),
         Some(Cmd::Config) => run_settings(),
         Some(Cmd::History) => run_history(),
+        Some(Cmd::Upload { file }) => run_upload(file),
         Some(Cmd::Annotate { input }) => run_annotate(input),
     };
     if let Err(e) = result {
@@ -977,6 +985,39 @@ fn run_qr_gen(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// `lscreen upload <file>`（M15）：外部命令式上传。路径经 stdin 交给
+/// 配置的 [upload].command（argv 数组不经 shell），stdout 第一个非空行
+/// 作为 URL：打印到 stdout（脚本可管道消费）+ 按源路径回填历史条目的
+/// url 字段 + 尽力复制到剪贴板。剪贴板/历史失败不影响退出码——
+/// 脚本场景以 stdout 与进程状态为准。
+fn run_upload(file: PathBuf) -> Result<(), String> {
+    if !file.exists() {
+        return Err(format!("文件不存在: {}", file.display()));
+    }
+    // 相对路径补全为绝对路径：上传脚本的工作目录不保证与调用方一致
+    let path = if file.is_absolute() {
+        file
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("无法定位当前目录: {e}"))?
+            .join(file)
+    };
+    let cfg = config::Config::load();
+    let cmd = cfg
+        .upload_command()
+        .ok_or_else(|| {
+            "未配置上传命令：在 config.toml 添加\n[upload]\ncommand = [\"sup\", \"up\"]".to_string()
+        })?
+        .to_vec();
+    let url = upload::run(&cmd, &path)?;
+    println!("{url}");
+    history::set_url_by_source(&path, &url);
+    if let Err(e) = export::copy_text_to_clipboard(&url) {
+        eprintln!("lscreen: URL 已生成但复制到剪贴板失败: {e}");
     }
     Ok(())
 }

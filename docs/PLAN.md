@@ -714,7 +714,7 @@ record/Cargo.toml 未按平台门控，Win/mac 同样编译 vendored 源，
 
 ### M15 分享集成：可插拔上传 hook（零体积方案）
 
-- [ ] **外部命令 hook**：`config.toml` `[upload] command = [...]`（argv
+- [x] **外部命令 hook**（✅ 2026-09-17）：`config.toml` `[upload] command = [...]`（argv
       数组形式，不经 shell，杜绝注入；缺省无上传能力）。覆盖层/贴图/
       CLI 加「上传」动作：把产物**路径**经 stdin 传给命令，stdout 期望
       返回 URL → 复制到剪贴板 + toast + 历史条目记 `url` 字段；非零退出
@@ -729,7 +729,27 @@ record/Cargo.toml 未按平台门控，Win/mac 同样编译 vendored 源，
       挂死，覆盖层不能陪等）；覆盖层期间按钮转「上传中…」禁用态防连点。
       历史兼容：`url` 是 index.toml 新字段，旧二进制按「未知字段忽略」
       读新索引安全；新二进制读旧索引 url 缺省即无。录屏产物（GIF/MP4）
-      走同一入口，「上传」对路径类型不敏感
+      走同一入口，「上传」对路径类型不敏感。
+      落地补充：app 层 `upload::run` 防了两处死锁——stdout/stderr 各起
+      独立线程排空（子进程填满管道缓冲时串行 read 会互卡），stdin 写完
+      立即 drop 让 `cat` 型脚本拿到 EOF 退出；超时用 `try_wait` 50ms
+      轮询至 deadline 后 kill+wait（回收僵尸，排空线程随 EOF 自然返回）。
+      stdout 取**第一个非空行**为 URL（容忍脚本打印 banner/进度行）。
+      异步接线沿用 spawn_scan 模式：后台线程 + mpsc + 完成时跨线程
+      `request_repaint()` 唤醒 UI（贴图/覆盖层无输入事件时不重绘，与
+      pins.ctl 心跳同坑）。上传成功但剪贴板复制失败时覆盖层降级开结果
+      面板展示 URL（带复制按钮，不让链接无处可取）、贴图降级 toast 文本
+      携带 URL。回填历史：GUI 入口按副本文件名精确 `set_url`，CLI 按
+      源路径 `set_url_by_source`（同源多条全回填）；面板右键菜单加
+      「复制链接」。按钮可见性：未配置 `[upload].command` 时三入口均
+      不显示（零配置零打扰）；贴图工具条排布从 const 数组改为运行时
+      分组表，上传按钮仅在配置时参与贪心装入、优先级最低（最先被挤掉）。
+      验证：121 项单测全绿（upload 8 项含 300ms 短超时挂死脚本、历史
+      url 双向兼容）；CLI 端到端（隔离 XDG + 假上传脚本）成功/未配置/
+      文件不存在三路径符合预期，旧格式 index.toml 上传后 url 正确落盘；
+      图标离屏渲染核对通过（上行箭头 + 双肩云碗，与保存图标一眼可辨）。
+      覆盖层/贴图按钮的 GUI 交互**待人工点验**（桌面占用，沿用不合成
+      输入惯例）；Win/mac 经 CI 编译验证
 
 ### M16 Win/mac 系统视频编码器（可选优化，体积/性能驱动）
 

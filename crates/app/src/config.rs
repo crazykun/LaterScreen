@@ -33,6 +33,16 @@ impl ThemeMode {
     }
 }
 
+/// 上传 hook（M15）：外部命令式上传，缺省不配置 = 无上传能力。
+/// command 为 argv 数组（**不经 shell**，杜绝注入），产物路径经 stdin
+/// 传给命令、stdout 第一个非空行作为 URL——契约见 app 层 `upload` 模块。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct UploadConfig {
+    /// 如 `["sup", "up"]` 或 `["/home/me/up.sh"]`；空 = 未配置
+    pub command: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(default)]
 pub struct Config {
@@ -75,6 +85,8 @@ pub struct Config {
     pub hotkey_record: String,
     pub hotkey_scroll: String,
     pub hotkey_history: String,
+    /// 外部上传命令（M15）：缺省空 = 无上传能力，UI 不显示上传入口
+    pub upload: UploadConfig,
 }
 
 impl Default for Config {
@@ -100,6 +112,7 @@ impl Default for Config {
             hotkey_record: String::new(),
             hotkey_scroll: String::new(),
             hotkey_history: String::new(),
+            upload: UploadConfig::default(),
         }
     }
 }
@@ -174,6 +187,16 @@ impl Config {
     /// 录制格式是否为 MP4（非法/未知值按 GIF 处理）
     pub fn record_mp4(&self) -> bool {
         self.record_format.trim().eq_ignore_ascii_case("mp4")
+    }
+
+    /// 已配置的上传命令（非空且首项非空白才 Some）
+    pub fn upload_command(&self) -> Option<&[String]> {
+        let cmd = &self.upload.command;
+        if cmd.first().is_some_and(|p| !p.trim().is_empty()) {
+            Some(cmd)
+        } else {
+            None
+        }
     }
 
     /// 截图历史保留条数（钳到 1-50；0 或非法值回退默认 10）
@@ -445,6 +468,39 @@ mod tests {
         assert!(back.record_click_highlight);
         let back: Config = toml::from_str("record_click_highlight = false").unwrap();
         assert!(!back.record_click_highlight);
+    }
+
+    #[test]
+    fn upload_section_parsing() {
+        // 默认无上传能力
+        assert!(Config::default().upload_command().is_none());
+        // 旧配置（无 [upload] 节）→ 缺省
+        let back: Config = toml::from_str("save_dir = \"/tmp\"").unwrap();
+        assert!(back.upload_command().is_none());
+        // argv 数组形式；首个空串/空白视同未配置
+        let c = cfg("[upload]\ncommand = [\"sup\", \"up\"]\n");
+        assert_eq!(
+            c.upload_command(),
+            Some(&["sup".to_string(), "up".to_string()][..])
+        );
+        let c = cfg("[upload]\ncommand = [\" \"]\n");
+        assert!(c.upload_command().is_none());
+        // 空数组 = 未配置
+        let c = cfg("[upload]\ncommand = []\n");
+        assert!(c.upload_command().is_none());
+        // 节内未知字段忽略（向前兼容）
+        let c = cfg("[upload]\ncommand = [\"x\"]\nfuture = 1\n");
+        assert!(c.upload_command().is_some());
+        // 往返持久化
+        let c = Config {
+            upload: UploadConfig {
+                command: vec!["/opt/up.sh".into()],
+            },
+            ..Default::default()
+        };
+        let text = toml::to_string_pretty(&c).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back, c);
     }
 
     #[test]

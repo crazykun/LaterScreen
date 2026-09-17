@@ -38,11 +38,14 @@ lscreen qr -i photo.png                  # 识别图片中的二维码
 lscreen qr-gen "https://example.com" -o qr.png   # 生成二维码 PNG（--ecc L/M/Q/H）
 lscreen pick                             # 屏幕取色器
 lscreen pin -i img.png                   # 把图片钉在屏幕上
+lscreen upload img.png                   # 上传：交给自配命令，stdout 返回 URL 并复制
 lscreen history                          # 历史面板（最近截图 / 贴图 / 录屏）
 lscreen config                           # 配置面板
 ```
 
 > `--region X,Y,W,H` 均为**物理像素**坐标，多显示器时基于虚拟桌面原点。
+>
+> `upload` 需先在配置文件启用上传命令（见下节），未配置时工具栏/贴图也不显示上传按钮。
 
 ## 安装
 
@@ -70,6 +73,15 @@ cargo install --path crates/app
 零配置可用，不生成文件。`lscreen config` 打开面板调整（保存目录、文件名模板、配置窗口主题（自动/浅色/夜间）、默认工具/颜色、初始选区（最前窗口 / 上次选区 / 全屏 / 无——「上次选区」在显示器布局变化后自动作废回退）、录制格式、录制点击高亮、历史条数、七个全局热键等），运行中的托盘 1 秒内自动热加载。配置文件：Linux `~/.config/lscreen/config.toml`、Windows `%APPDATA%\lscreen\config.toml`、macOS `~/Library/Application Support/lscreen/config.toml`。自动主题由 egui 跟随当前操作系统配色。
 
 历史副本不放配置目录，而是缓存目录（Linux `~/.cache/lscreen/history/`、Windows `%LOCALAPPDATA%\lscreen\history\`、macOS `~/Library/Caches/lscreen/history/`）：那是可随时删掉、不影响配置的派生数据，嫌占地方直接删整个目录即可。面板顶栏也能看到占用体积并一键清空。
+
+**上传 hook（可选）**：不内置任何图床 SDK，配置 `[upload]` 后把产物交给任意外部命令（uPic/PicGo/sup 或自写脚本均可）：
+
+```toml
+[upload]
+command = ["/usr/local/bin/uploader", "--token", "xxx"]
+```
+
+约定：产物**路径**经 stdin 传给命令（不经 shell、路径不进 argv，无注入面）；stdout 第一个非空行视为 URL，自动复制到剪贴板并记入历史条目（面板右键可「复制链接」）；非零退出把 stderr 提示给用户；命令挂死 30 秒自动终止。配置后覆盖层工具栏与贴图工具条会出现「上传」按钮，`lscreen upload <file>` 是同一入口的脚本化用法。
 
 ## 运行环境
 

@@ -153,6 +153,18 @@ fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     if action_button(ui, true, "保存为 PNG (Ctrl+S)", draw_save) {
         app.save_and_exit(ctx);
     }
+    // 上传（M15）：仅在配置了 [upload].command 时显示；上传中转禁用态防连点
+    if app.config.upload_command().is_some() {
+        let busy = app.upload_job.is_some();
+        let tip = if busy {
+            "上传中…"
+        } else {
+            "上传：保存并交给外部命令，链接自动复制"
+        };
+        if action_button(ui, !busy, tip, draw_upload) {
+            app.upload_and_exit(ctx);
+        }
+    }
     if action_button(ui, true, "贴图：把选区钉在屏幕上 (Ctrl+P)", draw_pin) {
         app.pin_and_exit(ctx);
     }
@@ -586,6 +598,41 @@ pub(crate) fn draw_pin(p: &egui::Painter, r: Rect, c: Color32) {
     let tip = Pos2::new(r.center().x, r.max.y);
     p.line_segment([Pos2::new(head.x - rad, head.y + rad * 0.45), tip], s);
     p.line_segment([Pos2::new(head.x + rad, head.y + rad * 0.45), tip], s);
+}
+
+/// 上传（M15）：云朵 + 上行箭头——「发出去」语义，与保存（下行入托盘）对仗。
+/// 云底用三段折线拼碗形，避免圆弧 API 的跨版本差异。
+pub(crate) fn draw_upload(p: &egui::Painter, r: Rect, c: Color32) {
+    let s = Stroke::new(1.4, c);
+    let w = r.width();
+    let cx = r.center().x;
+    // 上行箭头：竖干 + 两翼
+    p.line_segment(
+        [
+            Pos2::new(cx, r.min.y + w * 0.16),
+            Pos2::new(cx, r.min.y + w * 0.52),
+        ],
+        s,
+    );
+    for dx in [-w * 0.2, w * 0.2] {
+        p.line_segment(
+            [
+                Pos2::new(cx + dx, r.min.y + w * 0.34),
+                Pos2::new(cx, r.min.y + w * 0.52),
+            ],
+            s,
+        );
+    }
+    // 云碗：左沿—左肩—中凹—右肩—右沿，五点折线。肩部起伏给足，
+    // 缩到 16px 也保得住「云」的轮廓而不是一条平线
+    let bowl = [
+        Pos2::new(r.min.x + w * 0.08, r.min.y + w * 0.76),
+        Pos2::new(r.min.x + w * 0.22, r.min.y + w * 0.58),
+        Pos2::new(r.min.x + w * 0.44, r.min.y + w * 0.70),
+        Pos2::new(r.min.x + w * 0.66, r.min.y + w * 0.54),
+        Pos2::new(r.max.x - w * 0.08, r.min.y + w * 0.76),
+    ];
+    p.add(Shape::line(bowl.to_vec(), s));
 }
 
 fn draw_qr(p: &egui::Painter, r: Rect, c: Color32) {

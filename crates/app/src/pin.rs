@@ -158,6 +158,12 @@ pub struct PinApp {
     /// 文件里的 nonce（吞掉历史命令，新贴图不响应「上一轮」广播）
     ctl_seen: u64,
     last_ctl_check: f64,
+    /// 上传命令（M15）：启动时从配置读一次；None = 未配置，工具条不显示按钮
+    upload_cmd: Option<Vec<String>>,
+    /// 后台上传任务：Some = 上传中（按钮转禁用态防连点）
+    upload_job: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    /// 上传条目的历史副本文件名（record_file 返回值，成功后回填 url）
+    upload_filename: Option<String>,
 }
 
 struct ZoomAnchor {
@@ -205,6 +211,9 @@ impl PinApp {
         };
         // 吞掉启动前残留的广播命令：新贴图不该响应「上一轮」穿透切换
         let ctl_seen = read_ctl().map(|(_, n)| n).unwrap_or(0);
+        let upload_cmd = crate::config::Config::load()
+            .upload_command()
+            .map(|c| c.to_vec());
         Self {
             rgba,
             w,
@@ -223,6 +232,9 @@ impl PinApp {
             through: false,
             ctl_seen,
             last_ctl_check: 0.0,
+            upload_cmd,
+            upload_job: None,
+            upload_filename: None,
         }
     }
 
@@ -242,6 +254,66 @@ impl PinApp {
                 self.toast(ctx, format!("已保存 {}", p.display()));
             }
             Err(e) => self.toast(ctx, format!("保存失败: {e}")),
+        }
+    }
+
+    /// 上传（M15）：先按保存语义落盘 + 入历史，再把路径交给外部上传命令
+    /// （后台线程跑，贴图不关不卡）。成功复制 URL + 回填历史 url；失败 toast。
+    fn do_upload(&mut self, ctx: &egui::Context) {
+        if self.upload_job.is_some() {
+            return;
+        }
+        let Some(cmd) = self.upload_cmd.clone() else {
+            return;
+        };
+        let path = export::default_save_path("png");
+        let saved = match export::save_png_unique(&self.rgba, self.w, self.h, &path) {
+            Ok(p) => p,
+            Err(e) => {
+                self.toast(ctx, format!("保存失败: {e}"));
+                return;
+            }
+        };
+        let copy = history::record_file(&saved, history::Kind::Pin, self.source.as_deref());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let r = crate::upload::run(&cmd, &saved);
+            let _ = tx.send(r);
+            repaint.request_repaint();
+        });
+        self.upload_job = Some(rx);
+        self.upload_filename = copy;
+        self.toast(ctx, "上传中…");
+    }
+
+    /// 每帧轮询后台上传结果（线程完成时主动 request_repaint 唤醒——
+    /// 贴图窗口无输入事件时 eframe 不会再重绘，与 pins.ctl 心跳同一坑）。
+    fn poll_upload(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.upload_job else { return };
+        match rx.try_recv() {
+            Ok(Ok(url)) => {
+                self.upload_job = None;
+                if let Some(name) = self.upload_filename.take() {
+                    history::set_url(&name, &url);
+                }
+                match export::copy_text_to_clipboard(&url) {
+                    Ok(()) => self.toast(ctx, "已上传，链接已复制"),
+                    // URL 不丢：直接进 toast 展示（贴图无结果面板可复用）
+                    Err(e) => self.toast(ctx, format!("已上传（复制失败 {e}）：{url}")),
+                }
+            }
+            Ok(Err(e)) => {
+                self.upload_job = None;
+                self.upload_filename = None;
+                self.toast(ctx, format!("上传失败: {e}"));
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.upload_job = None;
+                self.upload_filename = None;
+                self.toast(ctx, "上传线程异常退出");
+            }
         }
     }
 
@@ -486,35 +558,52 @@ impl PinApp {
     ///
     /// 条带宽度放不下全部按钮时**按优先级贪心装入**（前缀和 ≤ 预算），
     /// 优先级：复制并关闭 > 关闭 > 缩放组(−/%/+) > 置顶 > 穿透 > 旋转 >
-    /// 翻转 > 保存；视觉顺序固定：
-    /// 置顶 | 穿透 | 旋转 | 翻转 | [− % +] | 保存 | 关闭 | 复制并关闭。
+    /// 翻转 > 保存 > 上传（仅配置了上传命令时参与）；视觉顺序固定：
+    /// 置顶 | 穿透 | 旋转 | 翻转 | [− % +] | 保存 | 上传 | 关闭 | 复制并关闭。
     fn show_toolbar(&mut self, ctx: &egui::Context, bar: Rect) {
-        use crate::ui::toolbar::{action_button, draw_check, draw_close, draw_save, icon_button};
-        // 单图标 24pt + 间距 2pt = 26pt；缩放组 = 24 + 40 + 24 + 双间距 = 92pt
-        const WIDTHS: [f32; 8] = [26.0, 26.0, 92.0, 26.0, 26.0, 26.0, 26.0, 26.0];
-        // 与 WIDTHS 同序的优先级 id（前缀和判定用）
-        const ORDER: [&str; 8] = [
-            "copy", "close", "zoomgrp", "top", "through", "rotate", "flip", "save",
+        use crate::ui::toolbar::{
+            action_button, draw_check, draw_close, draw_save, draw_upload, icon_button,
+        };
+        // 单图标 24pt + 间距 2pt = 26pt；缩放组 = 24 + 40 + 24 + 双间距 = 92pt。
+        // 上传按钮（M15）仅在配置了上传命令时参与排布，优先级最低。
+        let mut groups: Vec<(&str, f32)> = vec![
+            ("copy", 26.0),
+            ("close", 26.0),
+            ("zoomgrp", 92.0),
+            ("top", 26.0),
+            ("through", 26.0),
+            ("rotate", 26.0),
+            ("flip", 26.0),
+            ("save", 26.0),
         ];
+        let has_upload = self.upload_cmd.is_some();
+        if has_upload {
+            groups.push(("upload", 26.0));
+        }
         let budget = bar.width() - 8.0;
-        let mut prefix = [0.0f32; 8];
+        let mut prefix = vec![0.0f32; groups.len()];
         let mut acc = 0.0;
-        for (i, w) in WIDTHS.iter().enumerate() {
+        for (i, (_, w)) in groups.iter().enumerate() {
             acc += w;
             prefix[i] = acc;
         }
         // id 显示条件：它及比它更高优先级的项都装得下
-        let show = |id: &str| prefix[ORDER.iter().position(|x| *x == id).unwrap()] <= budget;
+        let show = |id: &str| prefix[groups.iter().position(|(x, _)| *x == id).unwrap()] <= budget;
         // 实际装入的总宽（定位居中用）
         let mut shown = 0.0;
-        for p in prefix {
-            if p <= budget {
-                shown = p;
+        for p in &prefix {
+            if *p <= budget {
+                shown = *p;
             }
         }
         let pos = Pos2::new(bar.center().x - shown / 2.0 + 4.0, bar.center().y - 12.0);
         let mut action: Option<u8> = None;
-        let (topmost, through, zoom) = (self.topmost, self.through, self.zoom);
+        let (topmost, through, zoom, upload_busy) = (
+            self.topmost,
+            self.through,
+            self.zoom,
+            self.upload_job.is_some(),
+        );
         egui::Area::new(egui::Id::new("pin-bar"))
             .order(egui::Order::Foreground)
             .fixed_pos(pos)
@@ -572,6 +661,16 @@ impl PinApp {
                     {
                         action = Some(1);
                     }
+                    if show("upload") {
+                        let tip = if upload_busy {
+                            "上传中…"
+                        } else {
+                            "上传：保存并交给外部命令，链接自动复制"
+                        };
+                        if action_button(ui, !upload_busy, tip, draw_upload) {
+                            action = Some(11);
+                        }
+                    }
                     if show("close")
                         && action_button(ui, true, "关闭贴图 (Esc / Delete)", draw_close)
                     {
@@ -600,6 +699,7 @@ impl PinApp {
             Some(8) => self.step_zoom(ctx, false),
             Some(9) => self.set_zoom(ctx, 1.0),
             Some(10) => self.step_zoom(ctx, true),
+            Some(11) => self.do_upload(ctx),
             _ => {}
         }
     }
@@ -688,6 +788,8 @@ impl eframe::App for PinApp {
         if self.through {
             self.poll_ctl(&ctx);
         }
+        // 上传结果轮询（线程完成时 request_repaint 唤醒本循环）
+        self.poll_upload(&ctx);
 
         let response = ui.allocate_rect(full, egui::Sense::click_and_drag());
         if let Some(tex) = &self.texture {
@@ -1027,7 +1129,9 @@ mod tests {
     #[test]
     #[ignore = "生成 /tmp/lscreen_icon_preview.png 供人工核对图标造型"]
     fn icon_preview() {
-        use crate::ui::toolbar::{action_button, draw_check, draw_close, draw_save, icon_button};
+        use crate::ui::toolbar::{
+            action_button, draw_check, draw_close, draw_save, draw_upload, icon_button,
+        };
         use egui::epaint::{Primitive, WHITE_UV};
 
         let ctx = egui::Context::default();
@@ -1053,6 +1157,7 @@ mod tests {
                     );
                     action_button(ui, true, "", draw_plus);
                     action_button(ui, true, "", draw_save);
+                    action_button(ui, true, "", draw_upload);
                     action_button(ui, true, "", draw_close);
                     action_button(ui, true, "", draw_check);
                 });

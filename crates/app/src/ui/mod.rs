@@ -182,6 +182,10 @@ pub struct SnipApp {
     pub results_panel: Option<(String, Vec<String>)>,
     /// 后台识别任务（OCR/QR 在线程中跑，避免 UI 假死）
     scan_job: Option<std::sync::mpsc::Receiver<ScanOutcome>>,
+    /// 后台上传任务（M15）：Some = 上传中，按钮转「上传中…」禁用态防连点
+    upload_job: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    /// 上传中条目的历史副本文件名（record_file 返回值，成功后回填 url）
+    upload_filename: Option<String>,
     toast: Option<(String, f64)>,
     /// 复制/保存出错时置 false 阻止退出
     close_requested: bool,
@@ -293,6 +297,8 @@ impl SnipApp {
             size_edit_buf: None,
             results_panel: None,
             scan_job: None,
+            upload_job: None,
+            upload_filename: None,
             toast: None,
             close_requested: false,
             config,
@@ -479,6 +485,78 @@ impl SnipApp {
                 self.request_close(ctx);
             }
             Err(e) => self.toast(ctx, format!("保存失败: {e}")),
+        }
+    }
+
+    /// 上传并退出（M15）：先按保存语义落盘（防覆盖 + 入历史），再把路径
+    /// 交给外部上传命令（后台线程，覆盖层不陪等）。成功后复制 URL、回填
+    /// 历史 url 并退出；失败 toast 留窗（文件已保存，可改用其它动作）。
+    pub fn upload_and_exit(&mut self, ctx: &egui::Context) {
+        if self.upload_job.is_some() {
+            return;
+        }
+        let Some(cmd) = self.config.upload_command().map(|c| c.to_vec()) else {
+            return;
+        };
+        let Some((rgba, w, h)) = self.compose_for_export() else {
+            self.toast(ctx, "选区为空");
+            return;
+        };
+        let path = export::save_path(&self.config, "png");
+        let saved = match export::save_png_unique(&rgba, w, h, &path) {
+            Ok(p) => p,
+            Err(e) => {
+                self.toast(ctx, format!("保存失败: {e}"));
+                return;
+            }
+        };
+        println!("{}", saved.display());
+        let copy = history::record_file(&saved, history::Kind::Shot, Some(&saved));
+        self.remember_selection();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let r = crate::upload::run(&cmd, &saved);
+            let _ = tx.send(r);
+            repaint.request_repaint();
+        });
+        self.upload_job = Some(rx);
+        self.upload_filename = copy;
+        self.toast(ctx, "上传中…");
+    }
+
+    /// 每帧轮询后台上传结果（线程完成时主动 request_repaint 唤醒）。
+    fn poll_upload(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.upload_job else { return };
+        match rx.try_recv() {
+            Ok(Ok(url)) => {
+                self.upload_job = None;
+                if let Some(name) = self.upload_filename.take() {
+                    history::set_url(&name, &url);
+                }
+                println!("{url}");
+                match export::copy_text_to_clipboard(&url) {
+                    // URL 已在剪贴板，直接收工（stdout 也留了一份）
+                    Ok(()) => self.request_close(ctx),
+                    // 复制失败不能让 URL 无处可取：结果面板展示 + 手动复制按钮
+                    Err(e) => {
+                        self.toast = None;
+                        self.results_panel =
+                            Some((format!("上传成功（复制失败：{e}）"), vec![url]));
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                self.upload_job = None;
+                self.upload_filename = None;
+                self.toast(ctx, format!("上传失败: {e}"));
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.upload_job = None;
+                self.upload_filename = None;
+                self.toast(ctx, "上传线程异常退出");
+            }
         }
     }
 
@@ -945,6 +1023,7 @@ impl eframe::App for SnipApp {
         self.pump_span(&ctx);
         self.handle_keys(&ctx);
         self.poll_scan(&ctx);
+        self.poll_upload(&ctx);
 
         let texture = self.texture(&ctx);
         if self.preview {

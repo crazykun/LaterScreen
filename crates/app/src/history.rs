@@ -46,6 +46,10 @@ pub struct Item {
     /// 源文件路径（录屏=实际 GIF/MP4 文件；截图/贴图=原保存路径）。
     /// 空 = 无独立源文件，「打开目录」指向副本自身。
     pub source: String,
+    /// 上传后回填的 URL（M15）：空 = 未上传过。旧索引无此字段按空读入；
+    /// 旧二进制读新索引按「未知字段忽略」跳过，双向兼容。
+    #[serde(default)]
+    pub url: String,
 }
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -471,9 +475,14 @@ pub fn record_rgba(rgba: &[u8], w: u32, h: u32, kind: Kind, source: Option<&std:
 /// 记录一个已落盘的图片文件（PNG）到历史：解码 → 复制为 PNG 副本。
 /// `source` 为源文件路径（录屏传实际 GIF/MP4 文件）；MP4 无法解码，
 /// 调用方应传录制时另存的首帧 poster PNG。
-pub fn record_file(path: &std::path::Path, kind: Kind, source: Option<&std::path::Path>) {
+/// 返回新建条目的副本文件名（失败 None）——上传流程拿它回填 `url`。
+pub fn record_file(
+    path: &std::path::Path,
+    kind: Kind,
+    source: Option<&std::path::Path>,
+) -> Option<String> {
     let Ok(img) = image::open(path) else {
-        return;
+        return None;
     };
     let img = img.into_rgba8();
     let (w, h) = (img.width(), img.height());
@@ -482,7 +491,7 @@ pub fn record_file(path: &std::path::Path, kind: Kind, source: Option<&std::path
         .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
         .is_err()
     {
-        return;
+        return None;
     }
     record_png(
         &png,
@@ -491,12 +500,13 @@ pub fn record_file(path: &std::path::Path, kind: Kind, source: Option<&std::path
         w,
         h,
         crate::config::Config::load().history_max(),
-    );
+    )
 }
 
 /// 追加一条历史记录并裁到 `history_max` 上限。png 为副本字节。
 /// max 由公开入口从配置读取后传入：内部函数不碰用户配置，
 /// 测试也因此不依赖宿主机的 config.toml（否则本机改过上限会漂移）。
+/// 返回新建条目的副本文件名（失败 None）。
 fn record_png(
     png: &[u8],
     kind: Kind,
@@ -504,10 +514,10 @@ fn record_png(
     w: u32,
     h: u32,
     max: usize,
-) {
+) -> Option<String> {
     let dir = history_dir();
     if std::fs::create_dir_all(&dir).is_err() {
-        return;
+        return None;
     }
     let (millis, secs) = now();
     // 同毫秒撞名时追加序号，绝不清掉旧副本（同秒两次保存的既有语义）
@@ -518,7 +528,7 @@ fn record_png(
         n += 1;
     }
     if std::fs::write(dir.join(&filename), png).is_err() {
-        return;
+        return None;
     }
 
     // 跨进程写锁：GUI 落盘与面板删除并发时，无锁的 load→push→save 会
@@ -526,15 +536,44 @@ fn record_png(
     let _guard = lock_index();
     let mut index = load_index();
     index.items.push(Item {
-        filename,
+        filename: filename.clone(),
         timestamp: secs,
         kind,
         width: w,
         height: h,
         source: source.map(|p| p.display().to_string()).unwrap_or_default(),
+        url: String::new(),
     });
     trim(&mut index, max);
     save_index(&index);
+    Some(filename)
+}
+
+/// 回填上传 URL 到指定副本文件名的条目（上传成功后调用，GUI 流程用——
+/// record_file 的返回值即此参数）。与面板删除共用同一把跨进程写锁。
+pub fn set_url(copy_filename: &str, url: &str) {
+    let _guard = lock_index();
+    let mut index = load_index();
+    if let Some(item) = index.items.iter_mut().find(|i| i.filename == copy_filename) {
+        item.url = url.to_string();
+        save_index(&index);
+    }
+}
+
+/// 按源文件路径回填上传 URL（CLI `lscreen upload <file>` 用：上传的文件
+/// 不在本进程产生，只能靠 source 匹配）。同一文件多次入历史则全部回填。
+pub fn set_url_by_source(source: &std::path::Path, url: &str) {
+    let s = source.display().to_string();
+    let _guard = lock_index();
+    let mut index = load_index();
+    let mut hit = false;
+    for item in index.items.iter_mut().filter(|i| i.source == s) {
+        item.url = url.to_string();
+        hit = true;
+    }
+    if hit {
+        save_index(&index);
+    }
 }
 
 /// 历史副本占用的总字节数（用于面板顶栏显示「历史 · 12 张 · 3.4 MB」，
@@ -1228,7 +1267,7 @@ impl eframe::App for HistoryApp {
                                     }
                                 }
                             }
-                            // 右键菜单挂在缩略图：贴图 / 打开目录 / 删除
+                            // 右键菜单挂在缩略图：贴图 / 打开目录 / 复制链接 / 删除
                             click_resp.context_menu(|ui| {
                                 if ui.button("贴图").clicked() {
                                     self.pin_item(item);
@@ -1236,6 +1275,14 @@ impl eframe::App for HistoryApp {
                                 }
                                 if ui.button("打开目录").clicked() {
                                     self.open_item(&ctx, item);
+                                    ui.close();
+                                }
+                                // 上传过的条目可再取链接（M15）
+                                if !item.url.is_empty() && ui.button("复制链接").clicked() {
+                                    match export::copy_text_to_clipboard(&item.url) {
+                                        Ok(()) => self.toast(&ctx, "链接已复制"),
+                                        Err(e) => self.toast(&ctx, format!("复制失败: {e}")),
+                                    }
                                     ui.close();
                                 }
                                 if ui.button("删除").clicked() {
@@ -1384,6 +1431,7 @@ mod tests {
             width: 1,
             height: 1,
             source: String::new(),
+            url: String::new(),
         }
     }
 
@@ -1403,6 +1451,43 @@ mod tests {
         assert!(copy.starts_with(history_dir()));
         let head = std::fs::read(&copy).unwrap();
         assert_eq!(&head[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    /// url 回填（M15）：旧索引无 url 字段按空读入；set_url 按副本名、
+    /// set_url_by_source 按源路径回填；不匹配的键是无操作。
+    #[test]
+    fn url_backfill() {
+        let _t = TestDir::new("url-backfill");
+        // 旧版本写的索引（条目无 url 字段）
+        std::fs::write(
+            index_path(),
+            "[[items]]\nfilename = \"1.png\"\ntimestamp = 1\nkind = \"shot\"\nwidth = 1\nheight = 1\nsource = \"/tmp/a.png\"\n",
+        )
+        .unwrap();
+        assert!(list()[0].url.is_empty());
+        // record_png 返回副本名，新条目 url 为空
+        let name = record_png(
+            &tiny_png(),
+            Kind::Shot,
+            Some(std::path::Path::new("/tmp/b.png")),
+            3,
+            2,
+            10,
+        )
+        .unwrap();
+        assert_eq!(list().len(), 2);
+        // 按副本名回填（只动目标条目；list 按时间戳倒序，新条目在前）
+        set_url(&name, "https://cdn/b.png");
+        let items = list();
+        assert_eq!(items[0].url, "https://cdn/b.png");
+        assert_eq!(items[1].url, "");
+        // 按源路径回填：同源条目全部命中
+        set_url_by_source(std::path::Path::new("/tmp/b.png"), "https://cdn/b2.png");
+        assert_eq!(list()[0].url, "https://cdn/b2.png");
+        // 不存在的键：无操作不报错
+        set_url("nope.png", "https://x");
+        set_url_by_source(std::path::Path::new("/tmp/nope"), "https://x");
+        assert_eq!(list()[0].url, "https://cdn/b2.png");
     }
 
     #[test]
