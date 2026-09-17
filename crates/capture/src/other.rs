@@ -166,16 +166,20 @@ pub fn cursor_position() -> Option<(i32, i32)> {
 }
 
 /// Win：GetCursorPos + GetAsyncKeyState(VK_LBUTTON)，物理像素坐标系。
-/// GetAsyncKeyState 最高位 = 当前按住，无需窗口焦点。
+/// GetAsyncKeyState 最高位 = 当前按住，无需窗口焦点。注意 GetAsyncKeyState /
+/// VK_LBUTTON 在 KeyboardAndMessaging 之外的 Input::KeyboardAndMouse 模块
+/// （SendInput 同源，feature 已开）。
 #[cfg(windows)]
 pub fn pointer_state() -> Option<(i32, i32, bool)> {
     use windows_sys::Win32::Foundation::POINT;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GetAsyncKeyState, GetCursorPos, VK_LBUTTON};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
     let mut pt = POINT { x: 0, y: 0 };
     if unsafe { GetCursorPos(&mut pt) } == 0 {
         return None;
     }
-    let down = unsafe { GetAsyncKeyState(VK_LBUTTON) } as u16 & 0x8000 != 0;
+    // VK_LBUTTON 是 VIRTUAL_KEY（= u16 类型别名）；返回 i16 最高位 = 按下
+    let down = unsafe { GetAsyncKeyState(VK_LBUTTON as i32) } as u16 & 0x8000 != 0;
     Some((pt.x, pt.y, down))
 }
 
