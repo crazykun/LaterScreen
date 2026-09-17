@@ -344,22 +344,33 @@ pub fn acquire_single_instance() -> bool {
     if slot.is_some() {
         return true; // 本进程已持锁（理论不可达：单例入口只走一次）
     }
-    match FileLock::try_lock(&lock) {
-        Ok(Some(mut l)) => {
-            let _ = l.write_pid(std::process::id());
-            // 顺手清掉上次会话残留的唤起与退出信号，免得新面板刚开就自我
-            // Focus 或立刻自关。
-            let _ = std::fs::remove_file(raise_path());
-            let _ = std::fs::remove_file(quit_path());
-            *slot = Some(l);
-            true
+    // flock 冲突可能是瞬时假冲突：多线程 fd 高速更替下，「close 旧句柄后
+    // 立刻重开同一路径」偶尔 EWOULDBLOCK，此刻系统里并没有真实持有者
+    //（测试环境可稳定复现）。与 lock_index 同款短重试：真持有者会一直
+    // 持续到超时（走唤起信号路径，语义不变），假冲突微秒级消散、重试即
+    // 拿到——也顺带修复了「快速关面板再立刻打开打不开」的真实场景。
+    let deadline = Instant::now() + Duration::from_millis(150);
+    loop {
+        match FileLock::try_lock(&lock) {
+            Ok(Some(mut l)) => {
+                let _ = l.write_pid(std::process::id());
+                // 顺手清掉上次会话残留的唤起与退出信号，免得新面板刚开就自我
+                // Focus 或立刻自关。
+                let _ = std::fs::remove_file(raise_path());
+                let _ = std::fs::remove_file(quit_path());
+                *slot = Some(l);
+                return true;
+            }
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Ok(None) => {
+                // 活着的持有者：留唤起信号让它上前台
+                let _ = std::fs::write(raise_path(), b"1");
+                return false;
+            }
+            Err(_) => return false, // IO 异常：宁可放过也不锁死用户
         }
-        Ok(None) => {
-            // 活着的持有者：留唤起信号让它上前台
-            let _ = std::fs::write(raise_path(), b"1");
-            false
-        }
-        Err(_) => false, // IO 异常：宁可放过也不锁死用户
     }
 }
 

@@ -72,6 +72,9 @@ pub struct Config {
     pub history_close_after_copy: bool,
     /// 录制格式：gif / mp4（CLI --mp4 显式指定时优先于此配置）
     pub record_format: String,
+    /// 录屏音频源（M14，仅 Linux + MP4 生效）：mic / system / both / off；
+    /// CLI --audio 显式指定时优先于此配置。运行时依赖 arecord/parec + ffmpeg
+    pub record_audio: String,
     /// 录制时在鼠标按下处叠加扩散圆环（点击高亮，M14）；Wayland 等无法
     /// 查询全局指针的环境自动静默关闭
     pub record_click_highlight: bool,
@@ -104,6 +107,7 @@ impl Default for Config {
             history_max: 10,
             history_close_after_copy: false,
             record_format: "gif".to_string(),
+            record_audio: "off".to_string(),
             record_click_highlight: true,
             hotkey_screenshot: "F1".to_string(),
             hotkey_delay: String::new(),
@@ -330,6 +334,14 @@ pub const SELECTION_NAMES: &[(&str, &str)] = &[
 /// 录制格式选项：(配置值, 面板文案)
 pub const RECORD_FORMAT_NAMES: &[(&str, &str)] = &[("gif", "GIF 动图"), ("mp4", "MP4 视频")];
 
+/// 录屏音频源（仅 Linux + MP4 生效）的中文名（配置面板下拉）
+pub const RECORD_AUDIO_NAMES: &[(&str, &str)] = &[
+    ("off", "关"),
+    ("mic", "麦克风"),
+    ("system", "系统声"),
+    ("both", "麦克风+系统声"),
+];
+
 pub fn tool_from_name(name: &str) -> Option<Tool> {
     Some(match name.trim().to_ascii_lowercase().as_str() {
         "select" => Tool::Select,
@@ -468,6 +480,11 @@ mod tests {
         assert!(back.record_click_highlight);
         let back: Config = toml::from_str("record_click_highlight = false").unwrap();
         assert!(!back.record_click_highlight);
+        // 音频源默认 off（不录）；旧配置无此字段也是 off
+        assert_eq!(Config::default().record_audio, "off");
+        assert_eq!(back.record_audio, "off");
+        let back: Config = toml::from_str("record_audio = \"system\"").unwrap();
+        assert_eq!(back.record_audio, "system");
     }
 
     #[test]

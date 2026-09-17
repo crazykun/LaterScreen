@@ -665,30 +665,51 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
       指针一动即失效回实时取色；入历史动作 = 每次成功复制色值
       （RGB/HEX/CMYK 任一格式），去重后最新置前
 
-### M14 录屏增强（音频 Win/mac + 点击高亮）
+### M14 录屏增强（音频 + 点击高亮）
 
 分批交付（沿用 M13 先例：独立可交付、可单独热修）：**点击高亮先行**
-（跨平台、Linux 可真机验证）→ 录屏音频（仅 Win/mac，盲写平台代码 +
-CI 编译验证 + 真机验证手段齐备后再动手）。
+（跨平台、Linux 可真机验证）→ **Linux 音频（方案 A 子进程链）** →
+Win/mac 音频（盲写平台代码 + CI 编译验证 + 真机验证手段齐备后再动手）。
 
 前置现状澄清：**三平台的 MP4 视频轨今天都已由 openh264 承担**——
 record/Cargo.toml 未按平台门控，Win/mac 同样编译 vendored 源，
 `record --mp4` 全平台可用。M4 所说「Win/mac 系统编码器待实现」是
 体积/性能优化项（见 M16），**不是功能缺口**；本里程碑的音频是纯增量。
 
+- [x] **录屏音频·Linux（✅ 2026-09-17 方案 A：子进程全链路）**：原判断
+      「Linux 无纯 Rust 音频采集方案」只对链接型依赖成立——按系统 OCR
+      （tesseract 子进程）先例改走子进程链，产物仍是零动态库单文件。
+      采集（raw S16LE/48k/立体声）：麦克风 `arecord -D default`
+      （实测起流 ~30ms，首选）→ `parec` 兜底；系统声 `parec -d
+      @DEFAULT_MONITOR@`（默认输出监视源，PipeWire/pulseaudio 通用，
+      起流实测 ~1.9s）。编码：`ffmpeg` 子进程 PCM→AAC-LC ADTS（管道），
+      混流时剥 ADTS 头按 1024 样本/帧打点（音轨 timescale=采样率）。
+      `both` = 双源 PCM 饱和混合单音轨。工具缺失/启动失败 = 录制开始前
+      硬错误（不让用户录完才发现没声）；运行中音频故障只告警不毁视频
+      （收尾对账：零数据/音轨比视频短 >1.5s 提示）。
+      **A/V 对齐（关键设计）**：不信任采集端起流时刻——armed 阶段就
+      预热 spawn，零点（视频第一帧）前 PCM 丢弃；零点后首块晚到则补
+      等长静音（钳 60s），音轨时间 0 恒对齐视频时间 0，误差 ≤ 一帧
+      （21ms）。停止顺序：先杀采集再等 ffmpeg 冲刷（10s 看门狗）。
+      音轨尾部比视频长 ~0.3s（收尾期音频仍在流入），无害。
+      CLI `record --mp4 --audio mic|system|both|off`（缺省读配置
+      `record_audio`，默认 off 保持现状；GIF+音频 = 参数矛盾报错）；
+      配置面板 Linux 显示「录制音频」下拉（armed 阶段齿轮热改对本次
+      生效：源变了自动重开管线）。arm 阶段取消 → Drop 杀全部子进程。
+      真机验证：静音回录 e2e（3.5s 双轨 MP4 读回 + ffprobe h264/aac
+      48k 双轨）绿；**音画同步人工点验待办**（录一段带声音的内容核对
+      唇形/音效）。评估过的备选：oxideav-aac 纯 Rust 编码器（2026-09
+      才发 0.1.7、文档自相矛盾，观察名单，成熟后可换掉 ffmpeg 子进程
+      消除运行时依赖）；/dev/snd ioctl 直连（需混音器协商/权限，不可行）
 - [ ] **录屏音频（仅 Win/mac）**：MP4 加音轨。Win Media Foundation
       （麦克风 + WASAPI loopback 系统声）→ AAC 编码 → mp4 crate 加
       audio track；mac AVFoundation 采集 + AudioToolbox AAC。
-      **Linux 无纯 Rust 音频采集方案**（PipeWire/ALSA 都是动态库，违反
-      硬约束）——按系统 OCR 先例做平台差异，配置面板 Linux 上不显示该项
-      或标注不支持。`record --audio mic|system|both|off`（默认 off 保持
-      现状）。体积影响必须评估：mac objc2 avfoundation 绑定可能明显增
+      体积影响必须评估：mac objc2 avfoundation 绑定可能明显增
       体积，release.yml 已有 ≤20MB 逐产物门槛兜底；超预算则 mac 降级
-      只录麦克风（CoreAudio 最小绑定）或整体推迟。
-      **A/V 对齐**：armed 语义下音频起采点必须 = 视频第一帧时刻
-      （started 标志翻转后再起音频线程），音频时钟与视频帧计数独立、
-      以 mp4 两条 track 各自时间戳收敛；停止时先停采帧再冲刷音频编码器，
-      避免尾部截断。回放验证用 ffprobe 看 duration 差 < 一帧
+      只录麦克风（CoreAudio 最小绑定）或整体推迟。CLI/config 面已按
+      Linux 方案 A 预留好（`--audio` 参数校验与非 Linux 拦截就位），
+      落地时只需实现平台采集编码层。A/V 对齐复用「armed 预热 + 零点
+      对齐」语义。
 - [x] **点击高亮**（✅ 2026-09-16 第一批）：录制时鼠标按下处叠加扩散
       圆环（半径 0→28px / 300ms 淡出，sqrt 缓动扩散 + 不透明度二次衰减），
       帧合成在采帧后纯 CPU 叠加（app 层改帧，编码管线无感知），GIF/MP4

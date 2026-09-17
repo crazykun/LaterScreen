@@ -8,6 +8,9 @@
 
 pub mod scroll;
 
+#[cfg(target_os = "linux")]
+pub(crate) mod audio;
+
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -193,6 +196,42 @@ pub fn record_gif(
 
 // ---------------------------------------------------------------- MP4（M4）
 
+/// 录屏音频源（M14 方案 A，Linux 子进程管线）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioSource {
+    /// 麦克风（默认输入源）
+    Mic,
+    /// 系统声（默认输出设备回录）
+    System,
+    /// 麦克风 + 系统声（PCM 饱和混合为单音轨）
+    Both,
+}
+
+/// 已启动的音频管线句柄。armed 阶段经 [`start_audio`] 预热 spawn（采集端
+/// 起流有秒级延迟），录制零点由 record_mp4 对齐；传给 `record_mp4` 混流。
+/// Drop 即杀掉全部子进程。
+#[cfg(target_os = "linux")]
+pub struct AudioHandle(audio::Pipeline);
+
+#[cfg(target_os = "linux")]
+impl AudioHandle {
+    /// 本管线采集的源（armed 阶段经配置面板热改音频默认后，比对是否重开）
+    pub fn source(&self) -> AudioSource {
+        self.0.source
+    }
+}
+
+/// 非 Linux 占位：音频尚未实现（系统 API 方案见 PLAN M14），不可构造
+#[cfg(not(target_os = "linux"))]
+pub struct AudioHandle;
+
+/// 启动音频管线（Linux）：探测系统采集工具（arecord/parec）与 ffmpeg，
+/// 任一必需工具缺失直接报错（快速失败，不让用户录完才发现没声）。
+#[cfg(target_os = "linux")]
+pub fn start_audio(source: AudioSource) -> Result<AudioHandle> {
+    audio::Pipeline::start(source).map(AudioHandle)
+}
+
 pub struct Mp4Options {
     pub fps: u32,
     /// 目标码率（kbps）
@@ -277,12 +316,17 @@ fn annexb_to_avcc(data: &[u8]) -> (Vec<u8>, bool) {
 ///
 /// Linux 走 openh264（静态链接 C++ 源）；Win/mac 系统编码器（MF/VideoToolbox）
 /// 待 M4 后续——当前在那些平台调用直接返回「不支持」错误。
+///
+/// `audio`：armed 预热的音频管线（[`start_audio`]），Some 则并行采集编码，
+/// 收尾时作为第二条轨道混入（AAC-LC，48k 立体声，1024 样本/帧）。
+/// 音轨时间 0 与视频时间 0 对齐（音频侧按首块到达时刻补静音，见 audio 模块）。
 pub fn record_mp4(
     mut grab_frame: impl FnMut() -> Result<(Vec<u8>, u32, u32)>,
     opts: &Mp4Options,
     max_duration: Duration,
     stop: &AtomicBool,
     out_path: &Path,
+    audio: Option<AudioHandle>,
 ) -> Result<usize> {
     let fps = opts.fps.clamp(1, 60);
     let bitrate = opts.bitrate_kbps.clamp(200, 50_000) * 1000;
@@ -299,9 +343,19 @@ pub fn record_mp4(
 
     let interval = Duration::from_secs_f64(1.0 / fps as f64);
     let start = Instant::now();
+    // 音频管线对齐零点 = 视频 PTS 零点（此后采集端晚到的首块自动补静音）
+    #[cfg(target_os = "linux")]
+    let mut audio = audio.map(|h| {
+        h.0.set_origin(start);
+        h.0
+    });
+    #[cfg(not(target_os = "linux"))]
+    let _ = audio;
     let mut count = 0usize;
     let mut frame_size: Option<(u32, u32)> = None;
     let mut abort: Option<RecordError> = None;
+    #[cfg(target_os = "linux")]
+    let mut audio_added = false;
 
     while abort.is_none() && !stop.load(Ordering::Relaxed) && start.elapsed() < max_duration {
         let tick = Instant::now();
@@ -421,6 +475,20 @@ pub fn record_mp4(
                     abort = Some(e);
                     break;
                 }
+                // 音频：非阻塞拉取已编码完成的 AAC 帧入轨。muxer 必已建立
+                // （视频步骤在同一次迭代里先跑，首帧即建轨 1）
+                #[cfg(target_os = "linux")]
+                if let Some(pipe) = audio.as_mut() {
+                    let frames = pipe.pull();
+                    if !frames.is_empty() {
+                        if let Err(e) =
+                            write_audio_frames(muxer.as_mut().unwrap(), &mut audio_added, &frames)
+                        {
+                            abort = Some(e);
+                            break;
+                        }
+                    }
+                }
                 frame_size = Some((w, h));
                 count += 1;
             }
@@ -429,6 +497,28 @@ pub fn record_mp4(
 
         if let Some(rest) = interval.checked_sub(tick.elapsed()) {
             std::thread::sleep(rest);
+        }
+    }
+
+    // 音频收尾：停采集 → 冲刷编码器 → 残余帧入轨（必须在 write_end 之前）。
+    // abort 路径同样要 finish（回收子进程/线程），帧丢弃（文件即将清理）
+    #[cfg(target_os = "linux")]
+    {
+        let (tail, warn) = match audio.as_mut() {
+            Some(pipe) => pipe.finish(),
+            None => (Vec::new(), None),
+        };
+        if !tail.is_empty() && abort.is_none() {
+            if let Some(m) = muxer.as_mut() {
+                if let Err(e) = write_audio_frames(m, &mut audio_added, &tail) {
+                    abort = Some(e);
+                }
+            }
+        }
+        if let Some(w) = warn {
+            // 运行期音频故障但视频完好：保留可用部分而非毁掉整段录制，
+            // stderr 提示让用户知情（record crate 唯一的直接打印路径）
+            eprintln!("lscreen: 音频录制异常（已保留可用部分）: {w}");
         }
     }
 
@@ -451,6 +541,50 @@ pub fn record_mp4(
         return Err(RecordError("未采集到任何帧".into()));
     }
     Ok(count)
+}
+
+/// 把一批 AAC 帧写入音轨。首次调用按 ADTS 元信息建轨（轨道 id 恒为 2：
+/// 视频轨先建）；每帧 1024 样本，音轨 timescale = 采样率，即一帧 1024 tick。
+#[cfg(target_os = "linux")]
+fn write_audio_frames(
+    muxer: &mut mp4::Mp4Writer<BufWriter<TrackedWriter>>,
+    added: &mut bool,
+    frames: &[(audio::AacMeta, Vec<u8>)],
+) -> Result<()> {
+    if !*added {
+        let m = frames[0].0;
+        let freq = audio::freq_hz(m.freq_index)
+            .ok_or_else(|| RecordError(format!("音频采样率索引无效: {}", m.freq_index)))?;
+        muxer
+            .add_track(&mp4::TrackConfig {
+                track_type: mp4::TrackType::Audio,
+                timescale: freq,
+                language: "und".into(),
+                media_conf: mp4::MediaConfig::AacConfig(mp4::AacConfig {
+                    bitrate: audio::BITRATE_KBPS * 1000,
+                    profile: mp4::AudioObjectType::try_from(m.aot).map_err(err)?,
+                    freq_index: mp4::SampleFreqIndex::try_from(m.freq_index).map_err(err)?,
+                    chan_conf: mp4::ChannelConfig::try_from(m.chan_conf).map_err(err)?,
+                }),
+            })
+            .map_err(err)?;
+        *added = true;
+    }
+    for (_, bytes) in frames {
+        muxer
+            .write_sample(
+                2,
+                &mp4::Mp4Sample {
+                    start_time: 0,
+                    duration: audio::SAMPLES_PER_FRAME,
+                    rendering_offset: 0,
+                    is_sync: true,
+                    bytes: bytes::Bytes::from(bytes.clone()),
+                },
+            )
+            .map_err(err)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -605,6 +739,7 @@ mod tests {
             Duration::from_millis(450),
             &stop,
             &dir,
+            None,
         )
         .unwrap();
         assert!(n >= 3, "帧数过少: {n}");
@@ -641,6 +776,7 @@ mod tests {
             Duration::from_millis(350),
             &stop,
             &dir,
+            None,
         )
         .unwrap();
         assert!(n >= 2, "帧数过少: {n}");
@@ -650,5 +786,67 @@ mod tests {
         assert_eq!(track.width(), 64);
         assert_eq!(track.height(), 48);
         std::fs::remove_file(&dir).ok();
+    }
+
+    /// 真机端到端：合成视频帧 + 系统声回录（默认输出静音，无隐私/无干扰）
+    /// → 双轨 MP4。验证音频管线、混流与读回。
+    /// `LSCREEN_TEST_AUDIO=1 cargo test -p lscreen-record -- --ignored`
+    #[cfg(target_os = "linux")]
+    #[ignore = "需要本机音频服务与 ffmpeg（LSCREEN_TEST_AUDIO=1 显式开启）"]
+    #[test]
+    fn synthetic_mp4_with_audio() {
+        if std::env::var("LSCREEN_TEST_AUDIO").ok().as_deref() != Some("1") {
+            return;
+        }
+        let dir = std::env::temp_dir().join("lscreen-record-audio-test.mp4");
+        let handle = start_audio(AudioSource::System).unwrap();
+        let stop = AtomicBool::new(false);
+        let mut tick = 0u8;
+        let n = record_mp4(
+            move || {
+                tick = tick.wrapping_add(40);
+                let (w, h) = (64u32, 48u32);
+                let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+                for y in 0..h {
+                    for x in 0..w {
+                        rgba.extend_from_slice(&[(x * 4) as u8, (y * 5) as u8, tick, 255]);
+                    }
+                }
+                Ok((rgba, w, h))
+            },
+            &Mp4Options {
+                fps: 10,
+                bitrate_kbps: 500,
+            },
+            Duration::from_millis(3500),
+            &stop,
+            &dir,
+            Some(handle),
+        )
+        .unwrap();
+        assert!(n >= 25, "帧数过少: {n}");
+
+        // 读回：双轨，轨道 2 为音频，样本数与时长合理（3.5s ≈ 164 帧 AAC）
+        let f = std::fs::File::open(&dir).unwrap();
+        let reader = mp4::read_mp4(f).unwrap();
+        assert_eq!(reader.tracks().len(), 2, "应含视频+音频双轨");
+        let audio = reader.tracks().get(&2).unwrap();
+        assert_eq!(audio.track_type().unwrap(), mp4::TrackType::Audio);
+        let samples = audio.sample_count();
+        assert!((100..250).contains(&samples), "音频帧数异常: {samples}");
+        let dur = samples as f64 * 1024.0 / 48000.0;
+        let video_dur = n as f64 / 10.0;
+        let drift = (dur - video_dur).abs();
+        assert!(
+            drift < 0.5,
+            "A/V 时长偏差过大: 音频{dur:.2}s vs 视频{video_dur:.2}s"
+        );
+        println!("{n} 视频帧 + {samples} 音频帧（{dur:.2}s），A/V 偏差 {drift:.3}s");
+
+        if std::env::var("LSCREEN_TEST_AUDIO_KEEP").is_ok() {
+            println!("保留产物供人工检查: {}", dir.display());
+        } else {
+            std::fs::remove_file(&dir).ok();
+        }
     }
 }

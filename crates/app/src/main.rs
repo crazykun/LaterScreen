@@ -177,6 +177,9 @@ enum Cmd {
         /// 编码质量 1-100（GIF，缺省 90）；MP4 为目标码率 kbps 200-50000（缺省 4000）
         #[arg(long)]
         quality: Option<u64>,
+        /// 录制音频（仅 MP4 且当前仅 Linux）：mic | system | both | off；缺省读配置
+        #[arg(long, value_name = "mic|system|both|off")]
+        audio: Option<String>,
         /// 输出文件路径（.gif/.mp4）；缺省输出到 ~/Pictures
         #[arg(short, long)]
         output: Option<PathBuf>,
@@ -385,6 +388,7 @@ fn main() {
             duration,
             fps,
             quality,
+            audio,
             output,
         }) => {
             // --select 优先：先框选再录；取消框选则静默退出（非错误）
@@ -409,6 +413,9 @@ fn main() {
                         if let Some(q) = quality {
                             extra.extend(["--quality".to_string(), q.to_string()]);
                         }
+                        if let Some(a) = audio {
+                            extra.extend(["--audio".to_string(), a]);
+                        }
                         if let Some(o) = output {
                             extra.extend(["--output".to_string(), o.display().to_string()]);
                         }
@@ -423,7 +430,7 @@ fn main() {
                     }
                 }
             } else {
-                run_record(region, mp4, duration, fps, quality, output)
+                run_record(region, mp4, duration, fps, quality, audio, output)
             }
         }
         Some(Cmd::Shot {
@@ -1130,12 +1137,45 @@ fn status_window_pos(
     ((right.max(dx), bottom.max(dy)), true)
 }
 
+/// 解析音频源选择：CLI 显式值优先于配置默认（`record_audio`，默认 off）。
+/// None = 不录音频。CLI 非法值报 Err（前置校验已拦，此处兜底）；配置非法
+/// 值仅告警并按 off 处理（与「配置损坏仅告警」策略一致）。
+fn resolve_audio_choice(
+    cli: &Option<String>,
+    cfg: &config::Config,
+) -> Result<Option<lscreen_record::AudioSource>, String> {
+    if let Some(s) = cli.as_deref() {
+        return match s {
+            "off" => Ok(None),
+            "mic" => Ok(Some(lscreen_record::AudioSource::Mic)),
+            "system" => Ok(Some(lscreen_record::AudioSource::System)),
+            "both" => Ok(Some(lscreen_record::AudioSource::Both)),
+            other => Err(format!(
+                "无效的 --audio {other}（应为 mic/system/both/off）"
+            )),
+        };
+    }
+    match cfg.record_audio.as_str() {
+        "mic" => Ok(Some(lscreen_record::AudioSource::Mic)),
+        "system" => Ok(Some(lscreen_record::AudioSource::System)),
+        "both" => Ok(Some(lscreen_record::AudioSource::Both)),
+        "off" | "" => Ok(None),
+        other => {
+            eprintln!(
+                "警告: 配置 record_audio 值非法 {other}（应为 mic/system/both/off），本次不录音频"
+            );
+            Ok(None)
+        }
+    }
+}
+
 fn run_record(
     region: Option<String>,
     mp4_out: bool,
     duration: f32,
     fps: u32,
     quality: Option<u64>,
+    audio: Option<String>,
     output: Option<PathBuf>,
 ) -> Result<(), String> {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1153,7 +1193,24 @@ fn run_record(
     }
     // 预估格式（仅用于区域取整与快速失败）：最终格式在 armed 确认后重读
     // 配置定案（状态窗齿轮可在 armed 阶段改格式/目录，对本次录制生效）
-    let mp4_guess = mp4_out || config::Config::load().record_mp4();
+    let cfg_pre = config::Config::load();
+    let mp4_guess = mp4_out || cfg_pre.record_mp4();
+    // 音频参数早期校验（无头环境也能快速报错）；平台不支持时显式请求直接拦
+    if let Some(a) = &audio {
+        if !matches!(a.as_str(), "mic" | "system" | "both" | "off") {
+            return Err(format!("无效的 --audio {a}（应为 mic/system/both/off）"));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if audio.as_deref().is_some_and(|a| a != "off") {
+            return Err("音频录制暂仅支持 Linux（其余平台方案见 PLAN M14）".into());
+        }
+        // 配置来自 Linux 机器迁移等场景：非 off 仅提示，不拦录制
+        if cfg_pre.record_audio != "off" {
+            eprintln!("提示: 音频录制暂仅支持 Linux，已忽略配置 record_audio");
+        }
+    }
     if let Some(q) = quality {
         let ok = if mp4_guess {
             (200..=50_000).contains(&q)
@@ -1232,7 +1289,37 @@ fn run_record(
     // 首帧 poster（M11 历史缩略图）：GIF/MP4 都无法事后解码，录制时留首帧
     let poster = Arc::new(Mutex::new(None::<(Vec<u8>, u32, u32)>));
     let th_poster = poster.clone();
+    let th_audio = audio;
+    let th_cfg_pre = cfg_pre;
     let recorder = std::thread::spawn(move || {
+        // 音频预热（仅 Linux + 预估 MP4）：armed 等待期就 spawn 采集/编码
+        // 子进程，把秒级起流延迟挡在录制零点之前；零点未定期间混写线程
+        // 丢弃 PCM。armed 取消时 Drop 自动杀掉全部子进程
+        #[cfg(target_os = "linux")]
+        let mut audio_h: Option<lscreen_record::AudioHandle> = if mp4_guess {
+            match resolve_audio_choice(&th_audio, &th_cfg_pre) {
+                Ok(Some(src)) => match lscreen_record::start_audio(src) {
+                    Ok(h) => Some(h),
+                    Err(e) => {
+                        th_status.lock().unwrap().done = true;
+                        return (0.0, Err(e), PathBuf::new(), false);
+                    }
+                },
+                Ok(None) => None,
+                Err(e) => {
+                    th_status.lock().unwrap().done = true;
+                    return (
+                        0.0,
+                        Err(lscreen_record::RecordError(e)),
+                        PathBuf::new(),
+                        false,
+                    );
+                }
+            }
+        } else {
+            None
+        };
+
         // armed：等待用户点「开始」/按 Enter；stop 先到（Esc/关窗/Ctrl+C）= 取消
         while !th_started.load(Ordering::Relaxed) && !th_stop.load(Ordering::Relaxed) {
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1277,6 +1364,52 @@ fn run_record(
         } else if path.extension().is_some_and(|e| e != "gif") {
             eprintln!("提示: GIF 输出建议使用 .gif 扩展名");
         }
+        // 音频最终决策（armed 后配置已重读，齿轮可能改过音频默认/格式）：
+        // - 最终 GIF：CLI 显式音频 = 参数矛盾直接报错；配置默认 = 忽略
+        // - 最终 MP4：与预热源一致则沿用；变化/未预热则此刻（重）开——
+        //   此刻起流的管线由补静音对齐，仅头部 ~2s 静音（parec 起流延迟）
+        #[cfg(target_os = "linux")]
+        let audio_h = if !mp4_final {
+            if th_audio.as_deref().is_some_and(|a| a != "off") {
+                th_status.lock().unwrap().done = true;
+                return (
+                    0.0,
+                    Err(lscreen_record::RecordError(
+                        "--audio 需要 MP4 格式（GIF 不含音轨）：请加 --mp4 或在配置中改用 MP4"
+                            .into(),
+                    )),
+                    PathBuf::new(),
+                    false,
+                );
+            }
+            None
+        } else {
+            let want = match resolve_audio_choice(&th_audio, &cfg) {
+                Ok(w) => w,
+                Err(e) => {
+                    th_status.lock().unwrap().done = true;
+                    return (
+                        0.0,
+                        Err(lscreen_record::RecordError(e)),
+                        PathBuf::new(),
+                        false,
+                    );
+                }
+            };
+            match (audio_h.take(), want) {
+                (Some(h), Some(src)) if h.source() == src => Some(h),
+                (_, Some(src)) => match lscreen_record::start_audio(src) {
+                    Ok(h) => Some(h),
+                    Err(e) => {
+                        th_status.lock().unwrap().done = true;
+                        return (0.0, Err(e), PathBuf::new(), false);
+                    }
+                },
+                (_, None) => None,
+            }
+        };
+        #[cfg(not(target_os = "linux"))]
+        let audio_h: Option<lscreen_record::AudioHandle> = None;
         let start = std::time::Instant::now();
         // 采帧闭包的公共上下文（M14 收敛）：GIF/MP4 分支原先各复制一份
         // 「截屏 → 计数 → poster → 状态上报」，点击高亮接入时收敛为单一实现，
@@ -1333,6 +1466,7 @@ fn run_record(
                 th_duration,
                 &th_stop,
                 &path,
+                audio_h,
             )
         } else {
             let mut ctx = mk_grab();
