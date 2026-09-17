@@ -38,5 +38,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 ## 环境注意事项
 
 - 交互模式（`cargo run`）需要真实 X11 桌面（`DISPLAY`）；无头环境只能测 CLI 无界面模式（`lscreen shot` 等）和单元测试。
+- 真机验证套件（M17）见 `docs/VERIFY.md`：env 门控的 ignored 测试（`LSCREEN_TEST_E2E=1` / `LSCREEN_TEST_AUDIO=1`），CI 不跑，真机手动执行。
 - `.gitignore` 忽略所有 `*.png`（`docs/` 除外）：测试图请用代码生成（core 的 dev-dependency `qrcode` 即此用途），勿提交图片文件。
 - 本仓库文档与提交信息使用中文，提交格式为中文 Conventional Commits（如 `feat: M2 取色器+二维码识别+CLI 子命令`）。

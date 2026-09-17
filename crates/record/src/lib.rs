@@ -774,18 +774,15 @@ mod tests {
         std::fs::remove_file(&dir).ok();
     }
 
-    /// 真机端到端：合成视频帧 + 系统声回录（默认输出静音，无隐私/无干扰）
-    /// → 双轨 MP4。验证音频管线、混流与读回。
-    /// `LSCREEN_TEST_AUDIO=1 cargo test -p lscreen-record -- --ignored`
-    #[cfg(target_os = "linux")]
-    #[ignore = "需要本机音频服务与 ffmpeg（LSCREEN_TEST_AUDIO=1 显式开启）"]
-    #[test]
-    fn synthetic_mp4_with_audio() {
+    /// 真机端到端（共享体，三平台同断言）：合成视频帧 + 真实音频管线 →
+    /// 双轨 MP4，读回验证轨道/时长/A-V 对齐。
+    /// `LSCREEN_TEST_AUDIO=1 cargo test -p lscreen-record -- --ignored audio_e2e`
+    fn run_audio_e2e(src: AudioSource) {
         if std::env::var("LSCREEN_TEST_AUDIO").ok().as_deref() != Some("1") {
             return;
         }
         let dir = std::env::temp_dir().join("lscreen-record-audio-test.mp4");
-        let handle = start_audio(AudioSource::System).unwrap();
+        let handle = start_audio(src).unwrap();
         let stop = AtomicBool::new(false);
         let mut tick = 0u8;
         let n = record_mp4(
@@ -812,7 +809,8 @@ mod tests {
         .unwrap();
         assert!(n >= 25, "帧数过少: {n}");
 
-        // 读回：双轨，轨道 2 为音频，样本数与时长合理（3.5s ≈ 164 帧 AAC）
+        // 读回：双轨，轨道 2 为音频，样本数与时长合理（3.5s ≈ 164 帧 AAC；
+        // Win/mac 编码器 priming ~44ms 含在 0.5s 偏差窗内）
         let f = std::fs::File::open(&dir).unwrap();
         let reader = mp4::read_mp4(f).unwrap();
         assert_eq!(reader.tracks().len(), 2, "应含视频+音频双轨");
@@ -834,5 +832,38 @@ mod tests {
         } else {
             std::fs::remove_file(&dir).ok();
         }
+    }
+
+    /// Linux 系统声：parec 默认输出监视源回录（默认输出静音，无隐私/无干扰）
+    #[cfg(target_os = "linux")]
+    #[ignore = "需要本机音频服务与 ffmpeg（LSCREEN_TEST_AUDIO=1 显式开启）"]
+    #[test]
+    fn audio_e2e_system() {
+        run_audio_e2e(AudioSource::System);
+    }
+
+    /// Windows 麦克风（WASAPI 采集 + MFT AAC，M17 真机点验 M14 盲写路径）
+    #[cfg(windows)]
+    #[ignore = "需要可用麦克风（LSCREEN_TEST_AUDIO=1 显式开启）"]
+    #[test]
+    fn audio_e2e_mic() {
+        run_audio_e2e(AudioSource::Mic);
+    }
+
+    /// Windows 系统声（WASAPI loopback 静音回录，无隐私/无干扰）
+    #[cfg(windows)]
+    #[ignore = "需要有音频输出设备（LSCREEN_TEST_AUDIO=1 显式开启）"]
+    #[test]
+    fn audio_e2e_system() {
+        run_audio_e2e(AudioSource::System);
+    }
+
+    /// macOS 麦克风（CoreAudio + AudioToolbox，M17 真机点验 M14 盲写路径；
+    /// 首次运行系统会弹麦克风权限（TCC），需允许终端/cargo）
+    #[cfg(target_os = "macos")]
+    #[ignore = "需要麦克风权限与输入设备（LSCREEN_TEST_AUDIO=1 显式开启）"]
+    #[test]
+    fn audio_e2e_mic() {
+        run_audio_e2e(AudioSource::Mic);
     }
 }

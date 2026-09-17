@@ -28,3 +28,7 @@ objc2-vision = { version = "0.3", features = [
     "VNRequestHandler",
     "VNObservation",
 ] }
+
+# M17 真机验证测试用（生成中英文测试图）；dev 依赖不进产物
+[target.'cfg(any(windows, target_os = "macos"))'.dev-dependencies]
+ab_glyph = "0.2"

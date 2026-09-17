@@ -811,6 +811,18 @@ CI 无桌面环境，Win/mac/Wayland 的 GUI 能力只能人工验证。散落�
 M12 先例：env 门控的 ignored 测试（`LSCREEN_TEST_WIN`），能脚本化的尽量
 脚本化，人工点验项写清操作步骤与预期。
 
+**验证套件已就绪（✅ 2026-09-17 第一批，操作手册见 [VERIFY.md](VERIFY.md)）**：
+
+- `LSCREEN_TEST_E2E=1`：窗口枚举 Z 序 + 全屏截屏冒烟（capture/tests/
+  windows_e2e.rs，Win/mac）；系统 OCR 中英文（ocr/tests/system_e2e.rs，
+  WinRT/Vision，测试图 ab_glyph 现场渲染）
+- `LSCREEN_TEST_AUDIO=1`：录屏音频真机端到端（record 单测 audio_e2e_mic /
+  audio_e2e_system，三平台同断言：双轨 MP4 读回、A/V 偏差 <0.5s）——
+  即 M14 盲写路径（Win WASAPI+MFT / mac CoreAudio+AudioToolbox）的
+  点验入口
+- 人工项（托盘/热键/贴图/安装器/DPI/Wayland/滚动截图）步骤与预期已
+  写入 VERIFY.md，验完回此处勾选
+
 - [ ] **Windows**：托盘 + 全局热键（M8）；Windows.Media.Ocr 原生 OCR
       中英文（M3）；窗口枚举 Z 序与默认选区（M9）；贴图不透明度/穿透/
       旋转/像素网格（M12）；安装器 + 卸载（含运行中卸载失败提示，
