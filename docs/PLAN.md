@@ -720,8 +720,16 @@ record/Cargo.toml 未按平台门控，Win/mac 同样编译 vendored 源，
       配置值自动降级麦克风并提示，面板下拉只给 关/麦克风（选项表
       `RECORD_AUDIO_NAMES` 按平台收敛）。全部门槛绿：三平台
       fmt/clippy/test + win(msvc)/mac(aarch64-darwin) 交叉编译零错误；
-      **真机点验待办**：Win 麦克风/loopback 采集与 MFT 码率、mac 麦克风
-      采集与 AAC priming（~44ms 解码延迟，无 edit list 修剪，记录在案）。
+      **真机点验**：Win ✅ 2026-09-17（Win11 25H2 / AMD / ToDesk 虚拟声卡，
+      默认麦 44.1kHz 顺带验证重采样）：麦克风与 loopback e2e 全过（A/V
+      偏差 0.044s），点验揪出并修复 3 处盲写缺陷——①Ready 就绪信号在
+      采集线程退出时才发（start() 5s 必超时）②`MF_MT_AUDIO_AVG_BYTES_
+      PER_SECOND` 单位是字节/秒漏除 8（128k 写成 1M，MFT 报
+      MF_E_INVALIDMEDIATYPE）③编码线程 MFStartup 前缺 CoInitializeEx；
+      另修 3 处 CI（Linux）不可见的 windows-only clippy 违规。实测认知
+      修正：loopback 无渲染流时**完全不产包**（非持续静音包），静默桌面
+      录制走零数据对账告警。mac 麦克风采集与 AAC priming（~44ms 解码
+      延迟，无 edit list 修剪）仍待真机。
       依赖 objc2-core-audio/audio-toolbox/types 0.3（默认特性），体积走
       release.yml ≤20MB 逐产物门槛兜底。
 - [x] **点击高亮**（✅ 2026-09-16 第一批）：录制时鼠标按下处叠加扩散
@@ -823,8 +831,10 @@ M12 先例：env 门控的 ignored 测试（`LSCREEN_TEST_WIN`），能脚本化
 - 人工项（托盘/热键/贴图/安装器/DPI/Wayland/滚动截图）步骤与预期已
   写入 VERIFY.md，验完回此处勾选
 
-- [ ] **Windows**：托盘 + 全局热键（M8）；Windows.Media.Ocr 原生 OCR
-      中英文（M3）；窗口枚举 Z 序与默认选区（M9）；贴图不透明度/穿透/
+- [ ] **Windows**（脚本项 ✅ 2026-09-17，Win11 25H2 / AMD / ToDesk 虚拟
+      声卡：OCR 中英数、窗口枚举 Z 序+全屏截屏、M14 音频麦克风+loopback
+      全过 A/V 偏差 0.044s，盲写缺陷 3 处已修见 M14 节；以下人工项待验）：
+      托盘 + 全局热键（M8）；默认选区 GUI（M9）；贴图不透明度/穿透/
       旋转/像素网格（M12）；安装器 + 卸载（含运行中卸载失败提示，
       review 2026-09-14）；历史面板 125%/150% 缩放定位（v0.8.1）；
       MP4 录屏真机出片 + ffprobe 回读（M4）；滚动截图 SendInput（v0.8.0）

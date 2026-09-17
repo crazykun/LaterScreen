@@ -335,6 +335,7 @@ pub(crate) struct Core {
     /// 运行期首个错误（编码器写失败/读失败）
     pub(crate) err: Arc<Mutex<Option<String>>>,
     /// 平台编码器诊断信息槽（Linux = ffmpeg stderr 首段；Win/mac 预留）
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) ffmpeg_stderr: Arc<Mutex<String>>,
     /// 零点后是否有 PCM 进过编码器（录得比起流延迟还短 = 零音轨，需提示）
     pub(crate) flowed: Arc<AtomicBool>,

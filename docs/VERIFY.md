@@ -34,7 +34,10 @@ cargo test -p lscreen-ocr --test system_e2e -- --ignored --nocapture
 $env:LSCREEN_TEST_AUDIO=1
 cargo test -p lscreen-record audio_e2e_mic -- --ignored --nocapture
 
-# 4. 录屏音频·系统声（WASAPI loopback 静音回录；对着测试说话更直观）
+# 4. 录屏音频·系统声（WASAPI loopback 回录）
+#    ⚠ 先让系统出声再跑（真机实测：无渲染流时 loopback 不产包，测试会
+#    零数据失败）：另开 PowerShell 循环播放 $p = New-Object Media.SoundPlayer
+#    'C:\Windows\Media\Alarm01.wav'; while(1){$p.PlaySync()}，播着不关
 #    预期：同上；建议加 LSCREEN_TEST_AUDIO_KEEP=1 播放产物听声音
 cargo test -p lscreen-record audio_e2e_system -- --ignored --nocapture
 ```

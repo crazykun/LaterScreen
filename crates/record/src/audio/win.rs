@@ -1,8 +1,10 @@
 //! Windows 录屏音频：WASAPI 采集 + Media Foundation AAC 编码（全系统 API）。
 //!
 //! - 麦克风：共享模式 IAudioClient（eCapture/eConsole 默认设备）
-//! - 系统声：默认渲染设备 + `AUDCLNT_STREAMFLAGS_LOOPBACK` 回录（共享模式
-//!   引擎持续产包，无声播放时段为静音包，不会出现 Linux 那种起流延迟）
+//! - 系统声：默认渲染设备 + `AUDCLNT_STREAMFLAGS_LOOPBACK` 回录。真机
+//!   实测（2026-09-17）：**无渲染流时 loopback 完全不产包**（并非持续
+//!   静音包）——静默桌面录完收尾对账走「零数据」告警按无音轨保存，
+//!   有播放流后每包正常（无声时段才是静音包）
 //! - 编码：MFT 的微软 AAC 编码器（同步 MFT），输入 s16/48k/立体声 PCM，
 //!   输出裸 AAC 帧（1024 样本/帧，与混流层假设一致）
 //!
@@ -80,11 +82,11 @@ impl Pipeline {
             let flow = *flow;
             let loopback = *loopback;
             workers.push(std::thread::spawn(move || {
-                let r = capture_thread(flow, loopback, &stop, &tx, i);
-                let _ = rtx.send(match r {
-                    Ok(()) => Ready::Ok,
-                    Err(e) => Ready::Fail(e),
-                });
+                // 就绪信号（Ready::Ok）由 run_capture 在起流成功时发出，
+                // 这里只兜失败（对齐 mac.rs 的快速失败语义）
+                if let Err(e) = capture_thread(flow, loopback, &stop, &tx, &rtx, i) {
+                    let _ = rtx.send(Ready::Fail(e));
+                }
                 let _ = tx.send(ToMixer::Eof(i));
             }));
         }
@@ -179,16 +181,17 @@ fn capture_thread(
     loopback: bool,
     stop: &AtomicBool,
     tx: &Sender<ToMixer>,
+    rtx: &Sender<Ready>,
     idx: usize,
 ) -> Result<(), String> {
     unsafe {
         let _com = ComGuard::new()?;
-        run_capture(flow, loopback, stop, tx, idx)
+        run_capture(flow, loopback, stop, tx, rtx, idx)
     }
 }
 
-/// CoInitializeEx/CoUninitialize 配对守卫
-struct ComGuard(bool);
+/// CoInitializeEx/CoUninitialize 配对守卫（new 失败不构造，无需记结果）
+struct ComGuard;
 
 impl ComGuard {
     unsafe fn new() -> Result<Self, String> {
@@ -196,7 +199,7 @@ impl ComGuard {
         if hr.is_err() {
             return Err(format!("COM 初始化失败: {hr}"));
         }
-        Ok(Self(true))
+        Ok(Self)
     }
 }
 
@@ -213,6 +216,7 @@ unsafe fn run_capture(
     loopback: bool,
     stop: &AtomicBool,
     tx: &Sender<ToMixer>,
+    rtx: &Sender<Ready>,
     idx: usize,
 ) -> Result<(), String> {
     let what = if loopback {
@@ -253,6 +257,8 @@ unsafe fn run_capture(
         .GetService()
         .map_err(|e| format!("采集接口获取失败: {e}"))?;
     client.Start().map_err(|e| format!("采集启动失败: {e}"))?;
+    // 起流成功即报告就绪（start() 的 5s 等待解除），此后进入采集循环
+    let _ = rtx.send(Ready::Ok);
 
     let mut conv = ToStereo48::new(rate, ch as usize);
     let silent_flag = AUDCLNT_BUFFERFLAGS_SILENT.0 as u32;
@@ -339,11 +345,12 @@ struct AacMft {
 impl AacMft {
     unsafe fn new() -> windows::core::Result<Self> {
         let in_type = audio_mt(MFAudioFormat_PCM)?;
-        let mut out_type = audio_mt(MFAudioFormat_AAC)?;
-        // 128kbps：用 AVG_BYTES_PER_SECOND 指定码率（比 ICodecAPI 依赖少）
+        let out_type = audio_mt(MFAudioFormat_AAC)?;
+        // 128kbps：用 AVG_BYTES_PER_SECOND 指定码率（单位字节/秒须 /8，
+        // 超出编码器支持范围会报 MF_E_INVALIDMEDIATYPE）
         out_type.SetUINT32(
             &MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
-            super::BITRATE_KBPS * 1000,
+            super::BITRATE_KBPS * 1000 / 8,
         )?;
 
         let transform = enum_aac_encoder()?;
@@ -498,6 +505,16 @@ fn encoder_thread(
     err: &Arc<Mutex<Option<String>>>,
 ) {
     unsafe {
+        // MFT/激活器是 COM 对象：MFStartup 前须初始化本线程 COM 单元
+        // （真机点验：不初始化时 MFTEnumEx 激活的编码器 SetOutputType
+        // 报 MF_E_INVALIDMEDIATYPE）
+        let _com = match ComGuard::new() {
+            Ok(g) => g,
+            Err(e) => {
+                *err.lock().unwrap() = Some(format!("COM 初始化失败: {e}"));
+                return;
+            }
+        };
         if let Err(e) = MFStartup(MF_VERSION, MFSTARTUP_LITE) {
             *err.lock().unwrap() = Some(format!("Media Foundation 启动失败: {e}"));
             return;
