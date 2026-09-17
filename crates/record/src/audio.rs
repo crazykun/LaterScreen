@@ -337,7 +337,7 @@ impl Pipeline {
                 let mut out = ffmpeg_stderr;
                 let _ = out.read_to_string(&mut buf);
                 if let Ok(mut s) = slot.lock() {
-                    s.truncate(0);
+                    s.clear();
                     s.push_str(&buf[..buf.len().min(400)]);
                 }
             }));
