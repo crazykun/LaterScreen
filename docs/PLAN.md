@@ -669,7 +669,7 @@ Snipaste/系统截图的基础体验：进入截图时不必手动框选，**默
 
 分批交付（沿用 M13 先例：独立可交付、可单独热修）：**点击高亮先行**
 （跨平台、Linux 可真机验证）→ **Linux 音频（方案 A 子进程链）** →
-Win/mac 音频（盲写平台代码 + CI 编译验证 + 真机验证手段齐备后再动手）。
+Win/mac 音频（✅ 已按「盲写平台代码 + CI 编译验证」交付，真机点验待办）。
 
 前置现状澄清：**三平台的 MP4 视频轨今天都已由 openh264 承担**——
 record/Cargo.toml 未按平台门控，Win/mac 同样编译 vendored 源，
@@ -701,15 +701,30 @@ record/Cargo.toml 未按平台门控，Win/mac 同样编译 vendored 源，
       唇形/音效）。评估过的备选：oxideav-aac 纯 Rust 编码器（2026-09
       才发 0.1.7、文档自相矛盾，观察名单，成熟后可换掉 ffmpeg 子进程
       消除运行时依赖）；/dev/snd ioctl 直连（需混音器协商/权限，不可行）
-- [ ] **录屏音频（仅 Win/mac）**：MP4 加音轨。Win Media Foundation
-      （麦克风 + WASAPI loopback 系统声）→ AAC 编码 → mp4 crate 加
-      audio track；mac AVFoundation 采集 + AudioToolbox AAC。
-      体积影响必须评估：mac objc2 avfoundation 绑定可能明显增
-      体积，release.yml 已有 ≤20MB 逐产物门槛兜底；超预算则 mac 降级
-      只录麦克风（CoreAudio 最小绑定）或整体推迟。CLI/config 面已按
-      Linux 方案 A 预留好（`--audio` 参数校验与非 Linux 拦截就位），
-      落地时只需实现平台采集编码层。A/V 对齐复用「armed 预热 + 零点
-      对齐」语义。
+- [x] **录屏音频·Win/mac（✅ 2026-09-16 盲写 + 交叉编译验证，真机点验待办）**：
+      音频层重构为 `record/src/audio/{mod,linux,win,mac}.rs`——共享层
+      （`AlignMixer` 零点对齐/补静音/双源饱和混合、`run_mixer` 线程体、
+      `Core` 帧出口/错误槽/收尾对账、`ToStereo48` 纯 Rust 采集格式转换
+      f32 原生格式→s16le/48k/立体声，线性插值跨块连续）抽出，三平台
+      `Pipeline` 同接口，Linux 子进程链语义不变（重构后 e2e 回归零损）。
+      **Win**：WASAPI 共享模式（麦克风 eCapture/eConsole + 系统声
+      eRender + `AUDCLNT_STREAMFLAGS_LOOPBACK` 连续静音包），mix-format
+      f32 → `ToStereo48`；编码走 Media Foundation 同步 MFT AAC（s16 →
+      裸 AAC 1024 样本/帧，码率 `MF_MT_AUDIO_AVG_BYTES_PER_SECOND`，
+      DRAIN 冲刷）；每线程 COM MTA，Ready 通道握手 5s 快速失败（无设备
+      即报错不空录）。**mac**：CoreAudio HAL 默认输入设备 +
+      `AudioDeviceCreateIOProcID`（IOProc 实时回调只 memcpy 入队，转换
+      在转储线程，遵守实时线程约束）；AudioToolbox `AudioConverter`
+      AAC-LC 128kbps（拉取式 `FillComplexBuffer`）。**系统声内录 mac
+      明确不做**（无公开 loopback API，需 ScreenCaptureKit 的 SCStream
+      音频输出，盲写风险过高）：CLI 显式 `--audio system|both` 硬错，
+      配置值自动降级麦克风并提示，面板下拉只给 关/麦克风（选项表
+      `RECORD_AUDIO_NAMES` 按平台收敛）。全部门槛绿：三平台
+      fmt/clippy/test + win(msvc)/mac(aarch64-darwin) 交叉编译零错误；
+      **真机点验待办**：Win 麦克风/loopback 采集与 MFT 码率、mac 麦克风
+      采集与 AAC priming（~44ms 解码延迟，无 edit list 修剪，记录在案）。
+      依赖 objc2-core-audio/audio-toolbox/types 0.3（默认特性），体积走
+      release.yml ≤20MB 逐产物门槛兜底。
 - [x] **点击高亮**（✅ 2026-09-16 第一批）：录制时鼠标按下处叠加扩散
       圆环（半径 0→28px / 300ms 淡出，sqrt 缓动扩散 + 不透明度二次衰减），
       帧合成在采帧后纯 CPU 叠加（app 层改帧，编码管线无感知），GIF/MP4

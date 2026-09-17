@@ -30,10 +30,10 @@ lscreen gui    # 不常驻，直接进入交互截图（框选 → 标注 → �
 ```bash
 lscreen shot -o out.png                  # 无界面截图（--region X,Y,W,H 指定区域）
 lscreen gui --delay 3                    # 延时 3 秒截图（shot --delay 同支持）
-lscreen record --select --fps 10         # 框选录制 GIF（--mp4 录制 MP4/H.264，Linux）
+lscreen record --select --fps 10         # 框选录制 GIF（--mp4 录制 MP4/H.264）
                                           # 录制时鼠标点击处显示扩散圆环（配置面板可关）
-lscreen record --mp4 --audio system      # 录 MP4 并内录系统声（Linux；mic/both/off 同支持，
-                                          # 缺省读配置「录制音频」，需系统装有 ffmpeg）
+lscreen record --mp4 --audio system      # 录 MP4 并加音轨（mic/system/both/off；mac 暂无
+                                          # system/both，需麦克风用 mic；缺省读配置「录制音频」）
 lscreen scroll                           # 滚动长截图（Linux X11）
 lscreen ocr --region 0,0,800,600         # OCR 识别（-i 指定图片，--lang 选语言）
 lscreen qr -i photo.png                  # 识别图片中的二维码
@@ -72,7 +72,7 @@ cargo install --path crates/app
 
 ## 配置
 
-零配置可用，不生成文件。`lscreen config` 打开面板调整（保存目录、文件名模板、配置窗口主题（自动/浅色/夜间）、默认工具/颜色、初始选区（最前窗口 / 上次选区 / 全屏 / 无——「上次选区」在显示器布局变化后自动作废回退）、录制格式、录制音频（Linux，仅 MP4 生效）、录制点击高亮、历史条数、七个全局热键等），运行中的托盘 1 秒内自动热加载。配置文件：Linux `~/.config/lscreen/config.toml`、Windows `%APPDATA%\lscreen\config.toml`、macOS `~/Library/Application Support/lscreen/config.toml`。自动主题由 egui 跟随当前操作系统配色。
+零配置可用，不生成文件。`lscreen config` 打开面板调整（保存目录、文件名模板、配置窗口主题（自动/浅色/夜间）、默认工具/颜色、初始选区（最前窗口 / 上次选区 / 全屏 / 无——「上次选区」在显示器布局变化后自动作废回退）、录制格式、录制音频（仅 MP4 生效；mac 面板只给 关/麦克风）、录制点击高亮、历史条数、七个全局热键等），运行中的托盘 1 秒内自动热加载。配置文件：Linux `~/.config/lscreen/config.toml`、Windows `%APPDATA%\lscreen\config.toml`、macOS `~/Library/Application Support/lscreen/config.toml`。自动主题由 egui 跟随当前操作系统配色。
 
 历史副本不放配置目录，而是缓存目录（Linux `~/.cache/lscreen/history/`、Windows `%LOCALAPPDATA%\lscreen\history\`、macOS `~/Library/Caches/lscreen/history/`）：那是可随时删掉、不影响配置的派生数据，嫌占地方直接删整个目录即可。面板顶栏也能看到占用体积并一键清空。
 
@@ -88,7 +88,8 @@ command = ["/usr/local/bin/uploader", "--token", "xxx"]
 ## 运行环境
 
 - **Linux**：交互模式需 X11 桌面；Wayland 下仅整屏截图可用（区域采帧 / 录屏仍需 X11）；全局热键在 Wayland 不可用。OCR 优先系统 tesseract（中文需 `sudo apt install tesseract-ocr tesseract-ocr-chi-sim`），内置纯 Rust ocrs 兜底（仅拉丁字母，首次自动下载模型）。录屏音频（`--audio`，仅 MP4）运行时调系统工具：需 `ffmpeg` 与 `arecord` 或 `parec`（任一，PipeWire/PulseAudio 桌面通常自带 parec），缺失时录制开始前会明确报错而不是录完才发现没声
-- **Windows 10+ / macOS**：走系统 API，无外部依赖；OCR 用系统引擎（WinRT / Vision），支持中文
+- **Windows 10+**：走系统 API，无外部依赖；OCR 用系统引擎（WinRT），支持中文。录屏音频走 WASAPI 采集 + Media Foundation AAC（麦克风/系统声/混合均可），无需安装任何工具
+- **macOS**：走系统 API，无外部依赖；OCR 用 Vision，支持中文。录屏音频支持麦克风（CoreAudio + AudioToolbox AAC）；系统声内录暂不支持（待 ScreenCaptureKit，配置为 system/both 时自动降级麦克风并提示）
 
 ## 从源码构建
 
@@ -120,7 +121,8 @@ crates/
   capture/   截屏平台层（Linux: x11rb 纯 Rust；Win/mac: xcap 系统 API）
   app/       可执行文件：clap CLI + egui 覆盖层 + 托盘
   ocr/       OCR 引擎（系统引擎 + 内置 ocrs 兜底）
-  record/    录屏编码（gifski / openh264；Linux 音频=arecord/parec+ffmpeg 子进程链）
+  record/    录屏编码（gifski / openh264；音频：Linux=arecord/parec+ffmpeg 子进程链，
+             Win=WASAPI+Media Foundation，mac=CoreAudio+AudioToolbox，系统 API 直采）
   setup/     Windows 自绘安装器
 ```
 

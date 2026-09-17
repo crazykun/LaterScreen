@@ -13,3 +13,22 @@ bytes = "1"
 # 静态链接 vendored C++ 源码，保持「无动态库依赖」
 openh264 = { version = "0.9.8", default-features = false, features = ["source"] }
 rgb = "0.8.53"
+
+# 音频（M14）：WASAPI 采集 + Media Foundation AAC（系统 API，无新增动态库）
+# StructuredStorage+Variant 是 IMMDevice::Activate 的 cfg 门
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Media_Audio",
+    "Win32_Media_MediaFoundation",
+    "Win32_Media_Multimedia",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+] }
+
+# 音频（M14）：CoreAudio HAL 采集 + AudioToolbox AAC（系统框架，无新增动态库）
+# 默认特性已含 AudioHardware/AudioHardwareDeprecated/CoreAudioTypes
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-audio-toolbox = "0.3"
+objc2-core-audio = "0.3"
+objc2-core-audio-types = "0.3"

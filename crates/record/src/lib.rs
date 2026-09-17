@@ -8,7 +8,6 @@
 
 pub mod scroll;
 
-#[cfg(target_os = "linux")]
 pub(crate) mod audio;
 
 use std::fs::File;
@@ -196,7 +195,7 @@ pub fn record_gif(
 
 // ---------------------------------------------------------------- MP4（M4）
 
-/// 录屏音频源（M14 方案 A，Linux 子进程管线）
+/// 录屏音频源（M14：Linux 子进程链 / Win WASAPI+MFT / mac CoreAudio）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioSource {
     /// 麦克风（默认输入源）
@@ -207,27 +206,21 @@ pub enum AudioSource {
     Both,
 }
 
-/// 已启动的音频管线句柄。armed 阶段经 [`start_audio`] 预热 spawn（采集端
-/// 起流有秒级延迟），录制零点由 record_mp4 对齐；传给 `record_mp4` 混流。
-/// Drop 即杀掉全部子进程。
-#[cfg(target_os = "linux")]
+/// 已启动的音频管线句柄。armed 阶段经 [`start_audio`] 预热（采集端起流
+/// 有延迟），录制零点由 record_mp4 对齐；传给 `record_mp4` 混流。
+/// Drop 即停止全部采集/编码。
 pub struct AudioHandle(audio::Pipeline);
 
-#[cfg(target_os = "linux")]
 impl AudioHandle {
     /// 本管线采集的源（armed 阶段经配置面板热改音频默认后，比对是否重开）
     pub fn source(&self) -> AudioSource {
-        self.0.source
+        self.0.source()
     }
 }
 
-/// 非 Linux 占位：音频尚未实现（系统 API 方案见 PLAN M14），不可构造
-#[cfg(not(target_os = "linux"))]
-pub struct AudioHandle;
-
-/// 启动音频管线（Linux）：探测系统采集工具（arecord/parec）与 ffmpeg，
-/// 任一必需工具缺失直接报错（快速失败，不让用户录完才发现没声）。
-#[cfg(target_os = "linux")]
+/// 启动音频管线：探测系统采集/编码设施，任一必需项缺失直接报错（快速
+/// 失败，不让用户录完才发现没声）。macOS 无系统声内录公开 API，显式
+/// 请求 System/Both 在此报错（app 层的配置默认会先降级为麦克风）。
 pub fn start_audio(source: AudioSource) -> Result<AudioHandle> {
     audio::Pipeline::start(source).map(AudioHandle)
 }
@@ -344,17 +337,13 @@ pub fn record_mp4(
     let interval = Duration::from_secs_f64(1.0 / fps as f64);
     let start = Instant::now();
     // 音频管线对齐零点 = 视频 PTS 零点（此后采集端晚到的首块自动补静音）
-    #[cfg(target_os = "linux")]
     let mut audio = audio.map(|h| {
         h.0.set_origin(start);
         h.0
     });
-    #[cfg(not(target_os = "linux"))]
-    let _ = audio;
     let mut count = 0usize;
     let mut frame_size: Option<(u32, u32)> = None;
     let mut abort: Option<RecordError> = None;
-    #[cfg(target_os = "linux")]
     let mut audio_added = false;
 
     while abort.is_none() && !stop.load(Ordering::Relaxed) && start.elapsed() < max_duration {
@@ -477,7 +466,6 @@ pub fn record_mp4(
                 }
                 // 音频：非阻塞拉取已编码完成的 AAC 帧入轨。muxer 必已建立
                 // （视频步骤在同一次迭代里先跑，首帧即建轨 1）
-                #[cfg(target_os = "linux")]
                 if let Some(pipe) = audio.as_mut() {
                     let frames = pipe.pull();
                     if !frames.is_empty() {
@@ -502,7 +490,6 @@ pub fn record_mp4(
 
     // 音频收尾：停采集 → 冲刷编码器 → 残余帧入轨（必须在 write_end 之前）。
     // abort 路径同样要 finish（回收子进程/线程），帧丢弃（文件即将清理）
-    #[cfg(target_os = "linux")]
     {
         let (tail, warn) = match audio.as_mut() {
             Some(pipe) => pipe.finish(),
@@ -545,7 +532,6 @@ pub fn record_mp4(
 
 /// 把一批 AAC 帧写入音轨。首次调用按 ADTS 元信息建轨（轨道 id 恒为 2：
 /// 视频轨先建）；每帧 1024 样本，音轨 timescale = 采样率，即一帧 1024 tick。
-#[cfg(target_os = "linux")]
 fn write_audio_frames(
     muxer: &mut mp4::Mp4Writer<BufWriter<TrackedWriter>>,
     added: &mut bool,
@@ -712,8 +698,8 @@ mod tests {
 
     /// 合成帧 → MP4 全链路：验证产物可被 mp4 解析器读回、轨道为 H.264、
     /// 帧数与时长正确（openh264 无 asm 下编码 64×48 小图，测试秒级完成）。
-    /// 仅 Linux 运行：MP4 编码路径定位 Linux（Win/mac 系统编码器待实现），
-    /// 且 openh264 无 asm 在 mac CI 上太慢，wall-clock 断言会误报。
+    /// 仅 Linux 运行：openh264 无 asm 在 mac CI 上太慢，wall-clock 断言会
+    /// 误报（视频编码三平台同为 openh264，Linux 覆盖即代表路径正确）。
     #[cfg(target_os = "linux")]
     #[test]
     fn synthetic_frames_to_mp4() {

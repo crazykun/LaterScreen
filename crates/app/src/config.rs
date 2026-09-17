@@ -72,8 +72,9 @@ pub struct Config {
     pub history_close_after_copy: bool,
     /// 录制格式：gif / mp4（CLI --mp4 显式指定时优先于此配置）
     pub record_format: String,
-    /// 录屏音频源（M14，仅 Linux + MP4 生效）：mic / system / both / off；
-    /// CLI --audio 显式指定时优先于此配置。运行时依赖 arecord/parec + ffmpeg
+    /// 录屏音频源（M14，仅 MP4 生效）：mic / system / both / off（mac 仅
+    /// mic 可用，system/both 自动降级为 mic）；CLI --audio 显式指定时优先
+    /// 于此配置。Linux 运行时依赖 arecord/parec + ffmpeg，Win/mac 走系统 API
     pub record_audio: String,
     /// 录制时在鼠标按下处叠加扩散圆环（点击高亮，M14）；Wayland 等无法
     /// 查询全局指针的环境自动静默关闭
@@ -334,7 +335,11 @@ pub const SELECTION_NAMES: &[(&str, &str)] = &[
 /// 录制格式选项：(配置值, 面板文案)
 pub const RECORD_FORMAT_NAMES: &[(&str, &str)] = &[("gif", "GIF 动图"), ("mp4", "MP4 视频")];
 
-/// 录屏音频源（仅 Linux + MP4 生效）的中文名（配置面板下拉）
+/// 录屏音频源（仅 MP4 生效）的中文名（配置面板下拉）。mac 无系统声
+/// 内录（待 ScreenCaptureKit），只给可用选项，避免配置出不可用值
+#[cfg(target_os = "macos")]
+pub const RECORD_AUDIO_NAMES: &[(&str, &str)] = &[("off", "关"), ("mic", "麦克风")];
+#[cfg(not(target_os = "macos"))]
 pub const RECORD_AUDIO_NAMES: &[(&str, &str)] = &[
     ("off", "关"),
     ("mic", "麦克风"),

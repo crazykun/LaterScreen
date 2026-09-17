@@ -469,9 +469,8 @@ impl SettingsApp {
                         .on_hover_text("录屏（GIF/MP4）的默认格式；命令行 --mp4 显式指定时优先于此");
                     ui.end_row();
 
-                    // 音频录制仅 Linux 落地（方案 A 子进程链，PLAN M14）；
-                    // 其余平台不显示，避免给出不可用的选项
-                    #[cfg(target_os = "linux")]
+                    // 音频录制（M14）：三平台落地，选项表按平台收敛
+                    // （mac 无系统声内录，见 config::RECORD_AUDIO_NAMES）
                     {
                         row_label(ui, "录制音频");
                         let current = config::RECORD_AUDIO_NAMES
@@ -479,6 +478,15 @@ impl SettingsApp {
                             .find(|(id, _)| *id == self.cfg.record_audio)
                             .map(|(_, label)| *label)
                             .unwrap_or("关");
+                        #[cfg(target_os = "linux")]
+                        let hint = "仅 MP4 格式生效（GIF 不含音轨）；命令行 --audio 显式指定时优先于此。\
+                                    需要系统安装 ffmpeg 与 arecord/parec，缺失时录制会直接提示";
+                        #[cfg(windows)]
+                        let hint = "仅 MP4 格式生效（GIF 不含音轨）；命令行 --audio 显式指定时优先于此。\
+                                    走系统 WASAPI/Media Foundation 直采，无需安装任何工具";
+                        #[cfg(target_os = "macos")]
+                        let hint = "仅 MP4 格式生效（GIF 不含音轨）；命令行 --audio 显式指定时优先于此。\
+                                    当前支持麦克风（CoreAudio）；系统声内录待 ScreenCaptureKit 支持";
                         egui::ComboBox::from_id_salt("record-audio")
                             .selected_text(current)
                             .width(ui.available_width())
@@ -492,10 +500,7 @@ impl SettingsApp {
                                 }
                             })
                             .response
-                            .on_hover_text(
-                                "仅 MP4 格式生效（GIF 不含音轨）；命令行 --audio 显式指定时优先于此。\
-                                 需要系统安装 ffmpeg 与 arecord/parec，缺失时录制会直接提示",
-                            );
+                            .on_hover_text(hint);
                         ui.end_row();
                     }
 

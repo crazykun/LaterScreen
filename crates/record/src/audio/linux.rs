@@ -11,69 +11,21 @@
 //!
 //! 与 OCR 的 tesseract 同款模式：系统工具以子进程调用（无链接型依赖，
 //! 产物仍是零动态库单文件），工具缺失时启动即报错而不是录完才发现没声。
-//!
-//! A/V 对齐（关键设计）：PipeWire 下 parec 起流有秒级延迟，arecord 也非
-//! 零延迟，因此**不信任采集端的起流时刻**——采集子进程在 armed 阶段就
-//! 预热 spawn，混写线程丢弃录制零点之前的 PCM；零点之后的首块到达时若
-//! 晚了（工具还没起流），按「首块到达时刻 − 零点」补等长静音，音轨时间 0
-//! 恒对齐视频时间 0，误差 ≤ 一个读块（4KB = 21ms = 一帧 AAC）。
+//! 对齐/混写/收尾对账见 `super`（跨平台共享）。
 
-use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{channel, Receiver};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::Ordering;
+use std::sync::mpsc::channel;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::{AudioSource, RecordError};
+use super::super::{AudioSource, RecordError};
+use super::{run_mixer, AacMeta, Core, ToMixer, SAMPLES_PER_FRAME};
 
-/// 固定音频参数（整条管线写死，两端工具参数与此一致）
-pub(crate) const RATE: u32 = 48_000;
-/// AAC-LC 每帧 1024 样本（音轨 timescale = 采样率时，一帧 = 1024 tick）
-pub(crate) const SAMPLES_PER_FRAME: u32 = 1024;
-/// AAC 目标码率（kbps）
-pub(crate) const BITRATE_KBPS: u32 = 128;
 /// 采集读块大小：恰好一帧 AAC 对应的 PCM（对齐误差 ≤ 一帧）
 const READ_CHUNK: usize = SAMPLES_PER_FRAME as usize * 4;
-
-/// 首帧 ADTS 头解析出的编码参数（mp4 AacConfig 由此构造）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AacMeta {
-    /// AudioObjectType（ADTS profile + 1）
-    pub aot: u8,
-    /// 采样率索引（3 = 48000）
-    pub freq_index: u8,
-    /// 声道配置（2 = 立体声）
-    pub chan_conf: u8,
-}
-
-/// ADTS 频率索引 → Hz（13/14 保留、15 显式频率——ffmpeg 不会输出，报错处理）
-pub(crate) fn freq_hz(index: u8) -> Option<u32> {
-    Some(match index {
-        0 => 96_000,
-        1 => 88_200,
-        2 => 64_000,
-        3 => 48_000,
-        4 => 44_100,
-        5 => 32_000,
-        6 => 24_000,
-        7 => 22_050,
-        8 => 16_000,
-        9 => 12_000,
-        10 => 11_025,
-        11 => 8_000,
-        12 => 7_350,
-        _ => return None,
-    })
-}
-
-/// 混写线程消息：PCM 块（带采集端到达时刻）或某源结束
-enum ToMixer {
-    Pcm(usize, Vec<u8>, Instant),
-    Eof(usize),
-}
 
 // ---------------------------------------------------------------- ADTS 拆帧
 
@@ -127,20 +79,6 @@ impl AdtsSplitter {
             self.buf.drain(..frame_len);
             return Some((meta, frame));
         }
-    }
-}
-
-// ---------------------------------------------------------------- PCM 混合
-
-/// 双源按立体声采样（4 字节）饱和混合公共前缀，写入 out
-fn mix_pending(a: &mut VecDeque<u8>, b: &mut VecDeque<u8>, out: &mut Vec<u8>) {
-    while a.len() >= 4 && b.len() >= 4 {
-        let l = i16::from_le_bytes([a[0], a[1]]).saturating_add(i16::from_le_bytes([b[0], b[1]]));
-        let r = i16::from_le_bytes([a[2], a[3]]).saturating_add(i16::from_le_bytes([b[2], b[3]]));
-        a.drain(..4);
-        b.drain(..4);
-        out.extend_from_slice(&l.to_le_bytes());
-        out.extend_from_slice(&r.to_le_bytes());
     }
 }
 
@@ -218,33 +156,18 @@ fn spawn_alive(mut cmd: Command) -> Option<Child> {
     std::thread::sleep(Duration::from_millis(250));
     match child.try_wait() {
         Ok(None) => Some(child),
-        // 已退出（失败）：让 Drop 收尸
         _ => None,
     }
 }
 
 // ---------------------------------------------------------------- 管线
 
-/// 音频管线：N 个采集子进程 → 混写线程（对齐/混合）→ ffmpeg 编码 →
+/// Linux 音频管线：N 个采集子进程 → 混写线程（对齐/混合）→ ffmpeg 编码 →
 /// ADTS 拆帧 → AAC 帧队列（record_mp4 主循环非阻塞拉取）
 pub(crate) struct Pipeline {
-    /// 本管线的采集源（armed 阶段配置热改后比对是否需要重开）
-    pub(crate) source: AudioSource,
+    core: Core,
     captures: Vec<Child>,
     ffmpeg: Option<Child>,
-    frames_rx: Receiver<(AacMeta, Vec<u8>)>,
-    /// 录制零点（视频时间 0）；armed 预热期间为 None，混写线程丢弃 PCM
-    origin: Arc<Mutex<Option<Instant>>>,
-    /// 运行期首个错误（编码器写失败/读失败）
-    err: Arc<Mutex<Option<String>>>,
-    /// ffmpeg stderr 首段（失败诊断用）
-    ffmpeg_stderr: Arc<Mutex<String>>,
-    /// 零点后是否有 PCM 进过编码器（录得比起流延迟还短 = 零音轨，需提示）
-    flowed: Arc<AtomicBool>,
-    /// stdout 线程累计送出的 AAC 帧数（收尾时与视频时长对账）
-    frame_count: Arc<AtomicUsize>,
-    workers: Vec<std::thread::JoinHandle<()>>,
-    finished: bool,
 }
 
 impl Pipeline {
@@ -301,7 +224,7 @@ impl Pipeline {
                 "-c:a",
                 "aac",
                 "-b:a",
-                &format!("{}k", BITRATE_KBPS),
+                &format!("{}k", super::BITRATE_KBPS),
                 "-f",
                 "adts",
                 "pipe:1",
@@ -320,18 +243,13 @@ impl Pipeline {
         let ffmpeg_stdout = ffmpeg.stdout.take().expect("stdout piped");
         let ffmpeg_stderr = ffmpeg.stderr.take().expect("stderr piped");
 
-        let origin = Arc::new(Mutex::new(None));
-        let err = Arc::new(Mutex::new(None));
-        let ffmpeg_stderr_txt = Arc::new(Mutex::new(String::new()));
-        let flowed = Arc::new(AtomicBool::new(false));
-        let frame_count = Arc::new(AtomicUsize::new(0));
+        let (mut core, frame_tx) = Core::new(source);
         let (pcm_tx, pcm_rx) = channel::<ToMixer>();
-        let (frame_tx, frame_rx) = channel::<(AacMeta, Vec<u8>)>();
         let mut workers = Vec::new();
 
         // ffmpeg stderr 排空（防 64KB 管道堵死；留存首段做诊断）
         {
-            let slot = Arc::clone(&ffmpeg_stderr_txt);
+            let slot = Arc::clone(&core.ffmpeg_stderr);
             workers.push(std::thread::spawn(move || {
                 let mut buf = String::new();
                 let mut out = ffmpeg_stderr;
@@ -369,93 +287,29 @@ impl Pipeline {
 
         // 混写线程：对齐（零点前丢弃/晚起流补静音）+ 双源饱和混合 → ffmpeg
         {
-            let origin = Arc::clone(&origin);
-            let err_slot = Arc::clone(&err);
-            let flowed = Arc::clone(&flowed);
+            let origin = Arc::clone(&core.origin);
+            let err_slot = Arc::clone(&core.err);
+            let flowed = Arc::clone(&core.flowed);
             let nsrc = captures.len();
             workers.push(std::thread::spawn(move || {
                 let mut sink = ffmpeg_stdin;
-                // 每源状态：false = 尚未见到零点后的首个 PCM 块
-                let mut flowing = vec![false; nsrc];
-                let mut pending: Vec<VecDeque<u8>> = (0..nsrc).map(|_| VecDeque::new()).collect();
-                let mut alive = vec![true; nsrc];
-                let mut broken = false;
-                while let Ok(msg) = pcm_rx.recv() {
-                    match msg {
-                        ToMixer::Pcm(i, data, at) => {
-                            let origin = *origin.lock().unwrap();
-                            match origin {
-                                // 零点未定（armed 预热）：丢弃
-                                None => continue,
-                                Some(t0) if !flowing[i] => {
-                                    flowing[i] = true;
-                                    flowed.store(true, Ordering::Relaxed);
-                                    // 起流晚于零点：补等长静音，让该源内容
-                                    // 从零点起占位（钳 60s 防时钟异常撑爆内存）
-                                    let gap = at.saturating_duration_since(t0);
-                                    let secs = gap.as_secs_f64().min(60.0);
-                                    if secs > 0.02 {
-                                        let bytes = (secs * RATE as f64) as usize * 4;
-                                        pending[i].extend(std::iter::repeat_n(0u8, bytes));
-                                    }
-                                    pending[i].extend(data.iter().copied());
-                                }
-                                Some(_) => pending[i].extend(data.iter().copied()),
-                            }
-                        }
-                        ToMixer::Eof(i) => {
-                            alive[i] = false;
-                            if nsrc == 2 {
-                                // 双源模式：把残留与对方现存数据混合到帧边界，
-                                // 剩下对不齐的尾巴（< 一帧）丢弃
-                                let mut out = Vec::new();
-                                let (a, b) = pending.split_at_mut(1);
-                                mix_pending(&mut a[0], &mut b[0], &mut out);
-                                if !broken && sink.write_all(&out).is_err() {
-                                    broken = true;
-                                }
-                                pending[i].clear();
-                            }
-                        }
-                    }
-                    if broken {
-                        // 编码器已死：继续排空通道丢弃 PCM（防无界积压），
-                        // 细节错误已在 err 槽记录
-                        for p in &mut pending {
-                            p.clear();
-                        }
-                        continue;
-                    }
-                    let mut out = Vec::new();
-                    if nsrc == 1 {
-                        out.extend(pending[0].drain(..));
-                    } else {
-                        let (a, b) = pending.split_at_mut(1);
-                        mix_pending(&mut a[0], &mut b[0], &mut out);
-                        // 一方结束后另一方直通
-                        if !alive[0] {
-                            out.extend(pending[1].drain(..));
-                        }
-                        if !alive[1] {
-                            out.extend(pending[0].drain(..));
-                        }
-                    }
-                    if !out.is_empty() && sink.write_all(&out).is_err() {
-                        let mut slot = err_slot.lock().unwrap();
-                        if slot.is_none() {
-                            *slot = Some("音频编码器写入失败（ffmpeg 中途退出？）".into());
-                        }
-                        broken = true;
-                    }
-                }
-                // 全部采集端结束：drop(sink) 关闭 stdin 送 EOF，ffmpeg 冲刷收尾
+                run_mixer(
+                    pcm_rx,
+                    move |out| sink.write_all(out).is_ok(),
+                    origin,
+                    err_slot,
+                    flowed,
+                    nsrc,
+                    "音频编码器写入失败（ffmpeg 中途退出？）".into(),
+                );
+                // 线程结束 drop(sink) 关闭 stdin 送 EOF，ffmpeg 冲刷收尾
             }));
         }
 
         // ffmpeg stdout → ADTS 拆帧 → AAC 帧队列
         {
             let tx = frame_tx;
-            let counter = Arc::clone(&frame_count);
+            let counter = Arc::clone(&core.frame_count);
             workers.push(std::thread::spawn(move || {
                 let mut splitter = AdtsSplitter::default();
                 let mut buf = [0u8; 16384];
@@ -477,43 +331,33 @@ impl Pipeline {
             }));
         }
 
+        core.workers = workers;
         Ok(Self {
-            source,
+            core,
             captures,
             ffmpeg: Some(ffmpeg),
-            frames_rx: frame_rx,
-            origin,
-            err,
-            ffmpeg_stderr: ffmpeg_stderr_txt,
-            flowed,
-            frame_count,
-            workers,
-            finished: false,
         })
     }
 
-    /// 设定录制零点（视频时间 0）。此前的 PCM 丢弃；此后首块晚到补静音。
-    pub(crate) fn set_origin(&self, t0: Instant) {
-        *self.origin.lock().unwrap() = Some(t0);
+    pub(crate) fn source(&self) -> AudioSource {
+        self.core.source
     }
 
-    /// 非阻塞拉取已编码完成的 AAC 帧
+    pub(crate) fn set_origin(&self, t0: Instant) {
+        self.core.set_origin(t0);
+    }
+
     pub(crate) fn pull(&mut self) -> Vec<(AacMeta, Vec<u8>)> {
-        let mut frames = Vec::new();
-        while let Ok(f) = self.frames_rx.try_recv() {
-            frames.push(f);
-        }
-        frames
+        self.core.pull()
     }
 
     /// 停止采集 → 冲刷编码器 → 回收全部子进程与线程。
     /// 返回 (残余 AAC 帧, 运行期异常)。采集端被 SIGKILL，尾缓冲（毫秒级）
     /// 丢失可忽略。
     pub(crate) fn finish(&mut self) -> (Vec<(AacMeta, Vec<u8>)>, Option<String>) {
-        if self.finished {
+        if self.core.finished {
             return (Vec::new(), None);
         }
-        self.finished = true;
         for c in &mut self.captures {
             let _ = c.kill();
             let _ = c.wait();
@@ -541,13 +385,9 @@ impl Pipeline {
                 }
             }
         }
-        let frames = self.pull();
-        for w in self.workers.drain(..) {
-            let _ = w.join();
-        }
-        let mut warn = self.err.lock().unwrap().take();
+        let (frames, mut warn) = self.core.finalize();
         if !exit_ok && warn.is_none() {
-            let stderr = self.ffmpeg_stderr.lock().unwrap().clone();
+            let stderr = self.core.ffmpeg_stderr.lock().unwrap().clone();
             let head = stderr.lines().next().unwrap_or_default();
             warn = Some(if head.is_empty() {
                 "音频编码器异常退出".into()
@@ -555,32 +395,13 @@ impl Pipeline {
                 format!("音频编码器异常退出: {head}")
             });
         }
-        // 音轨时长对账：预期 = 零点至今，实际 = 已编码帧数。零数据
-        // （录制短于采集起流延迟）或中途断流导致的大缺口都提示用户，
-        // 视频本体不受影响。
-        if warn.is_none() {
-            if let Some(expected) = self.origin.lock().unwrap().map(|t0| t0.elapsed()) {
-                let actual = Duration::from_secs_f64(
-                    self.frame_count.load(Ordering::Relaxed) as f64 * SAMPLES_PER_FRAME as f64
-                        / RATE as f64,
-                );
-                if !self.flowed.load(Ordering::Relaxed) {
-                    warn = Some(
-                        "未采集到音频数据（录制时长短于采集设备起流时间？）已按无音轨保存".into(),
-                    );
-                } else if expected.saturating_sub(actual) > Duration::from_millis(1500) {
-                    let deficit = (expected - actual).as_secs_f32();
-                    warn = Some(format!("音频轨比视频短约 {deficit:.1}s（采集中断？）"));
-                }
-            }
-        }
         (frames, warn)
     }
 }
 
 impl Drop for Pipeline {
     fn drop(&mut self) {
-        if !self.finished {
+        if !self.core.finished {
             // panic/异常路径：杀掉全部子进程防孤儿录音；不 join 线程
             //（随子进程 EOF 自行退出，进程收尾时一并消失）
             for c in &mut self.captures {
@@ -598,6 +419,7 @@ impl Drop for Pipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     /// 构造一个 ADTS 帧（无 CRC）
     fn adts_frame(payload: &[u8], profile: u8, freq: u8, chan: u8) -> Vec<u8> {
@@ -615,21 +437,10 @@ mod tests {
     #[test]
     fn adts_splitter_basic() {
         let mut s = AdtsSplitter::default();
-        let f1 = adts_frame(&[0x11; 300], 1, 3, 2); // LC/48k/立体声
-        let f2 = adts_frame(&[0x22; 20], 1, 3, 2);
-        let mut stream = f1.clone();
-        stream.extend_from_slice(&f2);
-        // 分三次喂入（切碎边界）
-        s.push(&stream[..100]);
-        assert!(s.pop_frame().is_none(), "数据不足时等待");
-        s.push(&stream[100..250]);
-        s.push(&stream[250..]);
-        let (m1, d1) = s.pop_frame().unwrap();
-        assert_eq!((m1.aot, m1.freq_index, m1.chan_conf), (2, 3, 2));
-        assert_eq!(d1, vec![0x11; 300]);
-        let (m2, d2) = s.pop_frame().unwrap();
-        assert_eq!((m2.aot, m2.freq_index, m2.chan_conf), (2, 3, 2));
-        assert_eq!(d2, vec![0x22; 20]);
+        s.push(&adts_frame(&[0xAA; 200], 1, 3, 2));
+        let (m, f) = s.pop_frame().unwrap();
+        assert_eq!((m.aot, m.freq_index, m.chan_conf), (2, 3, 2));
+        assert_eq!(f.len(), 200);
         assert!(s.pop_frame().is_none());
     }
 
@@ -637,7 +448,7 @@ mod tests {
     fn adts_splitter_resync_and_garbage() {
         let mut s = AdtsSplitter::default();
         let f = adts_frame(&[0xAB; 100], 0, 4, 1); // Main/44.1k/单声道
-        let mut stream = vec![0x00, 0x12, 0xFF, 0x00, 0x99]; // 垃圾前缀（含假同步 0xFF 0x00）
+        let mut stream = vec![0x00, 0x12, 0xFF, 0x00, 0x99]; // 垃圾前缀（含 0xFF 但不构成同步）
         stream.extend_from_slice(&f);
         s.push(&stream);
         let (m, d) = s.pop_frame().unwrap();
@@ -647,49 +458,8 @@ mod tests {
     }
 
     #[test]
-    fn mix_saturates_and_aligns() {
-        // 饱和：MAX+MAX=MAX，MIN+MIN=MIN
-        let mk = |l: i16, r: i16| -> VecDeque<u8> {
-            let mut d = VecDeque::new();
-            for v in [l, r, l, r] {
-                d.extend(v.to_le_bytes());
-            }
-            d
-        };
-        let mut a = mk(i16::MAX, i16::MIN);
-        let mut b = mk(i16::MAX, i16::MIN);
-        let mut out = Vec::new();
-        mix_pending(&mut a, &mut b, &mut out);
-        let samples: Vec<i16> = out
-            .chunks(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        assert_eq!(samples, vec![i16::MAX, i16::MIN, i16::MAX, i16::MIN]);
-        // 非饱和：正常相加
-        let mut a = mk(100, -5);
-        let mut b = mk(50, -3);
-        let mut out = Vec::new();
-        mix_pending(&mut a, &mut b, &mut out);
-        let samples: Vec<i16> = out
-            .chunks(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        assert_eq!(samples, vec![150, -8, 150, -8]);
-        // 长度不齐：只混公共部分（4 字节帧对齐），尾巴留在长的一方
-        let mut a = mk(1, 1);
-        let mut b = mk(2, 2);
-        b.extend(9i16.to_le_bytes()); // 半帧尾巴
-        let mut out = Vec::new();
-        mix_pending(&mut a, &mut b, &mut out);
-        assert_eq!(out.len(), 8);
-        assert_eq!(a.len(), 0);
-        assert_eq!(b.len(), 2, "半帧尾巴保留");
-    }
-
-    #[test]
     fn find_in_path_requires_exec_bit() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join("lscreen-audio-path-test");
+        let dir = std::env::temp_dir().join("lscreen-audio-test-path");
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("fakecap");
         std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
