@@ -757,7 +757,15 @@ record/Cargo.toml 未按平台门控，Win/mac 同样编译 vendored 源，
       已注明需播放音频。本机交叉检查手段：假 cc/ar shim 骗过 openh264
       的 darwin C++ 编译（check 不链接；shim 以 `-arch`/
       `-mmacosx-version-min` 旗标识别 darwin 调用，宿主调用透传，见
-      AGENTS.md record 条目），CI macos 真机出最终结论
+      AGENTS.md record 条目），CI macos 真机出最终结论。
+      复核修订（2026-09-18，自审批次）：①`AudioBufferList.mBuffers` 是
+      变长结构的 `[AudioBuffer; 1]` 建模，SCK 提取与 HAL IOProc 的
+      `mBuffers[i]` 在非交错立体声布局（SCK 最常见送达格式）下越界
+      panic、`panic=abort` 直接带走进程——两处改 `from_raw_parts` 切片
+      （HAL 处为 M14 既有隐患，真机从未踩中只因麦克风恒交止单缓冲）；
+      ②win.rs System 源就绪失败标签误报「麦克风」（i==0 判断写反语义）；
+      ③Info.plist `LSMinimumSystemVersion` 10.13 → 12.3 对齐 SCK 强链接
+      下限
 - [x] **点击高亮**（✅ 2026-09-16 第一批）：录制时鼠标按下处叠加扩散
       圆环（半径 0→28px / 300ms 淡出，sqrt 缓动扩散 + 不透明度二次衰减），
       帧合成在采帧后纯 CPU 叠加（app 层改帧，编码管线无感知），GIF/MP4

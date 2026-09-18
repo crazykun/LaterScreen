@@ -277,8 +277,12 @@ unsafe fn run_capture(
     ) -> i32 {
         let shared = &*(user as *const CaptureShared);
         let list = in_input.as_ref();
-        for i in 0..list.mNumberBuffers.min(8) as usize {
-            let b = &list.mBuffers[i];
+        // mBuffers 是变长结构的 [AudioBuffer; 1] 建模，必须按 mNumberBuffers
+        // 展开成切片再访问——直接 [i] 索引在多缓冲布局下越界 panic，
+        // panic=abort 会带走整个录制进程
+        let bufs =
+            std::slice::from_raw_parts(list.mBuffers.as_ptr(), list.mNumberBuffers.min(8) as usize);
+        for b in bufs {
             if b.mDataByteSize > 0 && !b.mData.is_null() {
                 let bytes =
                     std::slice::from_raw_parts(b.mData as *const u8, b.mDataByteSize as usize);
@@ -462,9 +466,12 @@ unsafe fn sck_extract(sbuf: &CMSampleBuffer) -> Result<(Vec<f32>, usize), String
         let ch = b.mNumberChannels.max(1) as usize;
         return Ok((f32s(unsafe { ab_bytes(b) }), ch));
     }
-    // 非交错：每缓冲一声道，按最短缓冲对齐帧数后交织
-    let bufs: Vec<&[u8]> = (0..nbuf)
-        .map(|i| unsafe { ab_bytes(&list.mBuffers[i]) })
+    // 非交错：每缓冲一声道，按最短缓冲对齐帧数后交织。mBuffers 是
+    // [AudioBuffer; 1] 建模的变长结构，先按 nbuf 展开切片（直接 [i] 索引
+    // 越界 panic，见 HAL ioproc 同款注释）
+    let bufs: Vec<&[u8]> = std::slice::from_raw_parts(list.mBuffers.as_ptr(), nbuf)
+        .iter()
+        .map(|b| unsafe { ab_bytes(b) })
         .collect();
     let frames = bufs.iter().map(|b| b.len() / 4).min().unwrap_or(0);
     let mut out = Vec::with_capacity(frames * nbuf);
@@ -524,7 +531,7 @@ unsafe fn run_sck_capture(
     SCShareableContent::getShareableContentWithCompletionHandler(&ct_block);
     let content = ct_rx
         .recv_timeout(Duration::from_secs(5))
-        .map_err(|_| "枚举屏幕内容超时".to_string())??;
+        .map_err(|_| "枚举屏幕内容超时（屏幕录制权限未授予或系统忙）".to_string())??;
     // 音频与显示器无关（系统级混音），任取一块即可；空列表 = 权限被拒
     let display = content
         .displays()

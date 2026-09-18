@@ -94,12 +94,8 @@ impl Pipeline {
         drop(pcm_tx);
 
         // 等全部采集源初始化完成（设备查询秒级内；5s 兜底）
-        for (i, _) in sources.iter().enumerate() {
-            let what = if i == 0 || source == AudioSource::System {
-                "麦克风"
-            } else {
-                "系统声"
-            };
+        for (_, loopback) in sources.iter() {
+            let what = if *loopback { "系统声" } else { "麦克风" };
             match ready_rx.recv_timeout(Duration::from_secs(5)) {
                 Ok(Ready::Ok) => {}
                 Ok(Ready::Fail(e)) => {
