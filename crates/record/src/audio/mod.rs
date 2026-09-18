@@ -6,8 +6,8 @@
 //!   零链接依赖（M14 方案 A）
 //! - Windows（`win.rs`）：WASAPI 采集（麦克风 + loopback 系统声）+
 //!   Media Foundation AAC 编码，全部系统 API
-//! - macOS（`mac.rs`）：CoreAudio HAL 麦克风 + AudioToolbox AAC；
-//!   系统声内录无公开 API（需 ScreenCaptureKit，暂未支持）
+//! - macOS（`mac.rs`）：CoreAudio HAL 麦克风 + ScreenCaptureKit 系统声
+//!   （macOS 13+）+ AudioToolbox AAC，全部系统框架
 //!
 //! 共享语义（各平台必须一致）：
 //!

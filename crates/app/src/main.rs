@@ -177,7 +177,7 @@ enum Cmd {
         /// 编码质量 1-100（GIF，缺省 90）；MP4 为目标码率 kbps 200-50000（缺省 4000）
         #[arg(long)]
         quality: Option<u64>,
-        /// 录制音频（仅 MP4 生效；mac 暂不支持 system/both）：mic | system | both | off；缺省读配置
+        /// 录制音频（仅 MP4 生效；mac 系统声需 macOS 13+）：mic | system | both | off；缺省读配置
         #[arg(long, value_name = "mic|system|both|off")]
         audio: Option<String>,
         /// 输出文件路径（.gif/.mp4）；缺省输出到 ~/Pictures
@@ -1145,11 +1145,6 @@ fn resolve_audio_choice(
     cfg: &config::Config,
 ) -> Result<Option<lscreen_record::AudioSource>, String> {
     if let Some(s) = cli.as_deref() {
-        // CLI 显式请求 mac 不支持的源：直接报错（前置校验已拦，兜底）
-        #[cfg(target_os = "macos")]
-        if matches!(s, "system" | "both") {
-            return Err("macOS 暂不支持系统声内录（待 ScreenCaptureKit；可用 --audio mic）".into());
-        }
         return match s {
             "off" => Ok(None),
             "mic" => Ok(Some(lscreen_record::AudioSource::Mic)),
@@ -1160,18 +1155,7 @@ fn resolve_audio_choice(
             )),
         };
     }
-    // 配置值 mac 降级：system/both 多为 Linux 机器迁移残留，降为麦克风
-    // 并提示，不拦录制（显式 CLI 请求才硬错，见上）
-    let effective = cfg.record_audio.as_str();
-    #[cfg(target_os = "macos")]
-    let effective = match effective {
-        "system" | "both" => {
-            eprintln!("提示: macOS 暂不支持系统声内录，record_audio 已降级为麦克风");
-            "mic"
-        }
-        other => other,
-    };
-    match effective {
+    match cfg.record_audio.as_str() {
         "mic" => Ok(Some(lscreen_record::AudioSource::Mic)),
         "system" => Ok(Some(lscreen_record::AudioSource::System)),
         "both" => Ok(Some(lscreen_record::AudioSource::Both)),
@@ -1211,20 +1195,11 @@ fn run_record(
     // 配置定案（状态窗齿轮可在 armed 阶段改格式/目录，对本次录制生效）
     let cfg_pre = config::Config::load();
     let mp4_guess = mp4_out || cfg_pre.record_mp4();
-    // 音频参数早期校验（无头环境也能快速报错）；mac 暂无系统声内录，显式
-    // 请求直接拦（配置值 system/both 的降级在 resolve_audio_choice 里做）
+    // 音频参数早期校验（无头环境也能快速报错）；管线/设备可行性由
+    // start_audio 快速失败兜底（如 mac 12.x 无 ScreenCaptureKit 音频）
     if let Some(a) = &audio {
         if !matches!(a.as_str(), "mic" | "system" | "both" | "off") {
             return Err(format!("无效的 --audio {a}（应为 mic/system/both/off）"));
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        if audio
-            .as_deref()
-            .is_some_and(|a| matches!(a, "system" | "both"))
-        {
-            return Err("macOS 暂不支持系统声内录（待 ScreenCaptureKit；可用 --audio mic）".into());
         }
     }
     if let Some(q) = quality {

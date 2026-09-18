@@ -110,7 +110,7 @@ crates/
 
 | 版本 | 内容 | 状态 |
 |---|---|---|
-| v0.11 | M16 系统编码器（可选，视体积评估）；mac 系统声内录（ScreenCaptureKit，M14 遗留） | 规划中 |
+| v0.11 | mac 系统声内录（ScreenCaptureKit，M14 遗留）：已落地，盲写 + 交叉编译验证，真机点验待办；M16 评估完成——维持 openh264 不切换（见 M16 节），本版无编码器改动 | 开发中 |
 | v1.0 | M17 真机验证台账清零 + README/文档全量校对；此后进入维护期（缺陷修复为主） | 规划中 |
 
 ### M1 截图 + 标注 ✅（核心价值）
@@ -716,10 +716,10 @@ record/Cargo.toml 未按平台门控，Win/mac 同样编译 vendored 源，
       `AudioDeviceCreateIOProcID`（IOProc 实时回调只 memcpy 入队，转换
       在转储线程，遵守实时线程约束）；AudioToolbox `AudioConverter`
       AAC-LC 128kbps（拉取式 `FillComplexBuffer`）。**系统声内录 mac
-      明确不做**（无公开 loopback API，需 ScreenCaptureKit 的 SCStream
+      当时不做**（无公开 loopback API，需 ScreenCaptureKit 的 SCStream
       音频输出，盲写风险过高）：CLI 显式 `--audio system|both` 硬错，
-      配置值自动降级麦克风并提示，面板下拉只给 关/麦克风（选项表
-      `RECORD_AUDIO_NAMES` 按平台收敛）。全部门槛绿：三平台
+      配置值自动降级麦克风并提示，面板下拉只给 关/麦克风
+      （**v0.11 已推翻并落地，见下条**）。全部门槛绿：三平台
       fmt/clippy/test + win(msvc)/mac(aarch64-darwin) 交叉编译零错误；
       **真机点验**：Win ✅ 2026-09-17（Win11 25H2 / AMD / ToDesk 虚拟声卡，
       默认麦 44.1kHz 顺带验证重采样）：麦克风与 loopback e2e 全过（A/V
@@ -733,6 +733,31 @@ record/Cargo.toml 未按平台门控，Win/mac 同样编译 vendored 源，
       延迟，无 edit list 修剪）仍待真机。
       依赖 objc2-core-audio/audio-toolbox/types 0.3（默认特性），体积走
       release.yml ≤20MB 逐产物门槛兜底。
+- [x] **录屏音频·mac 系统声（✅ v0.11 补齐：ScreenCaptureKit 盲写 +
+      交叉编译验证，真机点验待办）**：`--audio system/both` 在 mac 放开
+      （CLI 硬拦/配置降级/面板只给麦克风的逻辑全部移除，三平台同表）。
+      实现：SCStream 音频输出——SCStreamConfiguration **没有「关视频」
+      开关**（视频是流的默认产物），把视频压到 2×2 让合成开销可忽略、
+      只挂音频输出（视频帧无接收方即丢弃）；固定 sampleRate=48k/
+      channelCount=2（音频格式契约由这两项决定）。回调：`define_class!`
+      声明 SCStreamOutput 协议类 + **自建串行 dispatch 队列**（不传队列
+      可能落到主队列，CLI/测试场景主线程不跑 runloop 会永远收不到回调）；
+      CMSampleBuffer → `CMSampleBufferGetAudioBufferListWithRetained
+      BlockBuffer` 提取，字节级 f32 读取（不赌 mData 对齐），交错/非交错
+      布局自适应，经共享 ToStereo48 进同一管线（Both 与麦克风饱和混合，
+      Pipeline 多源化对齐 win.rs 的 Ready 聚合语义）。版本门
+      `respondsToSelector(setSampleRate:)`（该 setter 是 macOS 13 API，
+      12.x 上调用即未识别选择子崩溃）；TCC 走「屏幕录制」权限（与截图
+      同一权限，正常用户已授予）。依赖 objc2-screen-capture-kit/core-media
+      + dispatch2/block2（0.3/0.6 系，与既有 objc2 全家同源）。
+      **代价：ScreenCaptureKit 强链接，产物最低系统要求升至 macOS 12.3**
+      （12.x：麦克风录制不受影响，系统声报「需 macOS 13.0+」）。
+      盲写风险点（真机点验重点）：2×2 视频的音频-only 流是否正常产包；
+      静默桌面可能零产包（同 Win loopback）——e2e 测试与 VERIFY.md
+      已注明需播放音频。本机交叉检查手段：假 cc/ar shim 骗过 openh264
+      的 darwin C++ 编译（check 不链接；shim 以 `-arch`/
+      `-mmacosx-version-min` 旗标识别 darwin 调用，宿主调用透传，见
+      AGENTS.md record 条目），CI macos 真机出最终结论
 - [x] **点击高亮**（✅ 2026-09-16 第一批）：录制时鼠标按下处叠加扩散
       圆环（半径 0→28px / 300ms 淡出，sqrt 缓动扩散 + 不透明度二次衰减），
       帧合成在采帧后纯 CPU 叠加（app 层改帧，编码管线无感知），GIF/MP4
@@ -795,13 +820,22 @@ record/Cargo.toml 未按平台门控，Win/mac 同样编译 vendored 源，
       覆盖层/贴图按钮的 GUI 交互**待人工点验**（桌面占用，沿用不合成
       输入惯例）；Win/mac 经 CI 编译验证
 
-### M16 Win/mac 系统视频编码器（可选优化，体积/性能驱动）
+### M16 Win/mac 系统视频编码器（可选优化，体积/性能驱动）——评估后搁置
 
 现状：openh264 vendored C++ 三平台统一编译，**功能无缺口**。切换系统
 编码器的动机只有两个——省产物体积与编译时间（当前 12.4MB 预算充足，
 非刚需）、硬件编码提速省电（VideoToolbox / MF 硬件 MFT，长录制才有感）。
 优先级最低：**没有 M17 对应真机验证手段前不动手**。
 
+- [x] **评估结论（2026-09-18，v0.11 期间）：维持 openh264，不切换。**
+      按「系统 API 优先 + 内置兜底」惯例，切换 = 系统编码器主路径 +
+      openh264 失败回落，两种编码器并存使 Win/mac 产物**体积只增不减**
+      （vendored C++ 仍要为兜底编进二进制），与「体积驱动」的初衷自相
+      矛盾；而 12.4MB 距 20MB 预算充裕，收益只剩长录制的硬件编码提速
+      （无真实反馈驱动）。**重启条件**（任一满足时重新评估，届时 mac
+      VideoToolbox 优先——笔记本用户对发热/续航敏感，MF 其次）：
+      产物体积逼近 20MB 红线；出现长录制 CPU 占用高的用户反馈；
+      openh264 出现安全漏洞且上游失修
 - [ ] Windows：Media Foundation H.264 MFT（软/硬自动协商）→ mp4 crate
       封装（AVCC + avcC，同 Linux 管线）；windows-sys 已在依赖树，
       无新增链接依赖；失败路径回落 openh264（沿用「系统 API 优先 +
@@ -842,7 +876,9 @@ M12 先例：env 门控的 ignored 测试（`LSCREEN_TEST_WIN`），能脚本化
 - [ ] **macOS**：托盘 Accessory（不占 Dock）+ 左键菜单（v0.6.1）；
       Vision OCR（M3）；CG 逻辑↔物理坐标换算 + Retina 窗口矩形
       （M9 / v0.8.0）；贴图全套（M12）；滚动截图 CGEvent 滚轮合成
-      （v0.8.0）；MP4 录屏真机出片（M4）
+      （v0.8.0）；MP4 录屏真机出片（M4）；录屏音频 e2e 麦克风/系统声
+      （M14 + v0.11 SCK 盲写路径，`audio_e2e_system` 需播放音频，见
+      VERIFY.md mac 节）
 - [ ] **Wayland（GNOME 或 KDE 任一真会话）**：portal 交互式截图进
       预览标注（M5）；GlobalShortcuts 热键绑定与触发（M5，注意 KDE
       与 GNOME 的绑定 UX 不同）；portal 整屏快照的多屏坐标映射（M5）

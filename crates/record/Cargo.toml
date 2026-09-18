@@ -26,9 +26,26 @@ windows = { version = "0.62", features = [
     "Win32_System_Variant",
 ] }
 
-# 音频（M14）：CoreAudio HAL 采集 + AudioToolbox AAC（系统框架，无新增动态库）
+# 音频（M14 + v0.11 系统声内录）：CoreAudio HAL 采集 + AudioToolbox AAC（系统框架）；
+# 系统声内录走 ScreenCaptureKit（macOS 13+，音频输出挂 SCStream）。
 # 默认特性已含 AudioHardware/AudioHardwareDeprecated/CoreAudioTypes
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2 = "0.6"
 objc2-audio-toolbox = "0.3"
 objc2-core-audio = "0.3"
 objc2-core-audio-types = "0.3"
+# ScreenCaptureKit 音频回调的 CMSampleBuffer 提取（特性 = 用到的函数门）；
+# block2/dispatch2/objc2-core-media 也是 SCK 自身 API 的参数类型来源
+objc2-core-media = { version = "0.3", features = [
+    "CMBlockBuffer",
+    "CMSampleBuffer",
+    "objc2-core-audio-types",
+] }
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSError", "NSString"] }
+objc2-screen-capture-kit = { version = "0.3", features = [
+    "block2",
+    "dispatch2",
+    "objc2-core-media",
+] }

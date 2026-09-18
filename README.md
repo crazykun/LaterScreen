@@ -89,7 +89,7 @@ command = ["/usr/local/bin/uploader", "--token", "xxx"]
 
 - **Linux**：交互模式需 X11 桌面；Wayland 下仅整屏截图可用（区域采帧 / 录屏仍需 X11）；全局热键在 Wayland 不可用。OCR 优先系统 tesseract（中文需 `sudo apt install tesseract-ocr tesseract-ocr-chi-sim`），内置纯 Rust ocrs 兜底（仅拉丁字母，首次自动下载模型）。录屏音频（`--audio`，仅 MP4）运行时调系统工具：需 `ffmpeg` 与 `arecord` 或 `parec`（任一，PipeWire/PulseAudio 桌面通常自带 parec），缺失时录制开始前会明确报错而不是录完才发现没声
 - **Windows 10+**：走系统 API，无外部依赖；OCR 用系统引擎（WinRT），支持中文。录屏音频走 WASAPI 采集 + Media Foundation AAC（麦克风/系统声/混合均可），无需安装任何工具
-- **macOS**：走系统 API，无外部依赖；OCR 用 Vision，支持中文。录屏音频支持麦克风（CoreAudio + AudioToolbox AAC）；系统声内录暂不支持（待 ScreenCaptureKit，配置为 system/both 时自动降级麦克风并提示）
+- **macOS**：走系统 API，无外部依赖；OCR 用 Vision，支持中文。录屏音频走 CoreAudio（麦克风）+ ScreenCaptureKit（系统声，需 macOS 13+ 与「屏幕录制」权限）+ AudioToolbox AAC；引入 ScreenCaptureKit 后产物最低系统要求为 macOS 12.3
 
 ## 从源码构建
 

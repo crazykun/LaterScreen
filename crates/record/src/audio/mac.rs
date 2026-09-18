@@ -1,20 +1,24 @@
-//! macOS 录屏音频：CoreAudio HAL 麦克风采集 + AudioToolbox AAC 编码。
+//! macOS 录屏音频：CoreAudio HAL 麦克风 + ScreenCaptureKit 系统声 +
+//! AudioToolbox AAC 编码。
 //!
 //! - 麦克风：默认输入设备 + IOProc 回调（原生格式恒为 f32 交错），回调内
 //!   仅做 memcpy 入队，转换（[`ToStereo48`](super::ToStereo48)）与发送在
 //!   转储线程完成，避免在实时线程上做过长的工作
+//! - 系统声：ScreenCaptureKit 的 SCStream 音频输出（**macOS 13.0+**；
+//!   sampleRate/channelCount 配置项 12.x 没有）。音频-only 流（capturesVideo
+//!   = false）+ 自建串行 dispatch 队列收 CMSampleBuffer，回调里展平成
+//!   交错 f32 入队，转储线程与麦克风同款转换路径。进程需有「屏幕录制」
+//!   TCC 权限（与截图共用同一权限，正常用户已授予）
 //! - 编码：AudioConverter（PCM s16 → AAC-LC 48k 立体声 128kbps），
 //!   `AudioConverterFillComplexBuffer` 拉取式喂入，每包 = 一帧裸 AAC
 //!   （1024 样本，与混流层假设一致）
-//! - 系统声：**不支持**——无公开 loopback API（需 ScreenCaptureKit 的
-//!   SCStream 音频输出，盲写风险过高，见 PLAN M14 的待办）。显式请求
-//!   System/Both 直接报错；app 层配置默认会先降级为麦克风
 //!
 //! AAC 编码器固有的 priming（~2112 样本 ≈ 44ms）会带来等量解码延迟，
 //! mp4 侧无 edit list 修剪，A/V 偏差远低于人眼可感，记录在案。
 //!
 //! **盲写说明**：本文件按 Apple 文档盲写，以交叉编译 + macOS CI 为验证
-//! 基线，真机行为待 macOS 实机点验（PLAN M14）。
+//! 基线，真机行为待 macOS 实机点验（PLAN M14 / M17）。ScreenCaptureKit
+//! 为强链接框架，产物最低系统要求随本功能升至 macOS 12.3（系统声 13+）。
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -23,6 +27,11 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use block2::RcBlock;
+use dispatch2::DispatchQueue;
+use objc2::rc::Retained;
+use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
+use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass};
 use objc2_audio_toolbox::{
     AudioConverterDispose, AudioConverterFillComplexBuffer, AudioConverterNew, AudioConverterRef,
     AudioConverterSetProperty,
@@ -39,6 +48,12 @@ use objc2_core_audio_types::{
     kAudioFormatLinearPCM, kAudioFormatMPEG4AAC, AudioBuffer, AudioBufferList,
     AudioStreamBasicDescription, AudioStreamPacketDescription, AudioTimeStamp,
 };
+use objc2_core_media::CMSampleBuffer;
+use objc2_foundation::{NSArray, NSError, NSInteger};
+use objc2_screen_capture_kit::{
+    SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamOutput,
+    SCStreamOutputType, SCWindow,
+};
 
 use super::super::{AudioSource, RecordError};
 use super::{run_mixer, AacMeta, Core, ToMixer, ToStereo48, FIXED_META, RATE, SAMPLES_PER_FRAME};
@@ -49,10 +64,17 @@ const PCM_CHUNK: usize = SAMPLES_PER_FRAME as usize * 4;
 /// kAudioConverterEncodeBitrate = 'brte'（objc2-audio-toolbox 未生成此常量）
 const K_AUDIO_CONVERTER_ENCODE_BITRATE: u32 = 0x6272_7465;
 
-/// 采集线程初始化结果（start() 等待就绪或失败，实现快速失败语义）
+/// 采集线程初始化结果（start() 等待全部就绪或失败，实现快速失败语义）
 enum Ready {
     Ok,
     Fail(String),
+}
+
+/// 采集源类型：麦克风 = CoreAudio HAL；系统声 = ScreenCaptureKit
+#[derive(Clone, Copy)]
+enum SourceKind {
+    Hal,
+    Sck,
 }
 
 pub(crate) struct Pipeline {
@@ -62,43 +84,49 @@ pub(crate) struct Pipeline {
 
 impl Pipeline {
     pub(crate) fn start(source: AudioSource) -> Result<Self, RecordError> {
-        if !matches!(source, AudioSource::Mic) {
-            return Err(RecordError(
-                "macOS 暂不支持系统声内录（无公开 loopback API，待 ScreenCaptureKit；麦克风可用）"
-                    .into(),
-            ));
-        }
+        let sources: Vec<(SourceKind, &'static str)> = match source {
+            AudioSource::Mic => vec![(SourceKind::Hal, "麦克风")],
+            AudioSource::System => vec![(SourceKind::Sck, "系统声")],
+            AudioSource::Both => vec![(SourceKind::Hal, "麦克风"), (SourceKind::Sck, "系统声")],
+        };
         let (mut core, frame_tx) = Core::new(source);
         let (pcm_tx, pcm_rx) = channel::<ToMixer>();
         let (ready_tx, ready_rx) = channel::<Ready>();
         let stop = Arc::new(AtomicBool::new(false));
         let mut workers = Vec::new();
 
-        // 采集线程：HAL 建立 + IOProc 挂载（起流成功即报告就绪）；停机时拆卸
-        {
+        // 采集线程 × N：HAL 建立起流 / SCK startCapture 成功即报告就绪
+        for (i, &(kind, _)) in sources.iter().enumerate() {
             let tx = pcm_tx.clone();
             let rtx = ready_tx.clone();
             let stop = Arc::clone(&stop);
             workers.push(std::thread::spawn(move || {
-                let r = capture_thread(&stop, &tx, &rtx);
-                if r.is_err() {
-                    let _ = rtx.send(Ready::Fail(r.unwrap_err()));
+                let r = match kind {
+                    SourceKind::Hal => hal_capture_thread(&stop, &tx, &rtx, i),
+                    SourceKind::Sck => sck_capture_thread(&stop, &tx, &rtx, i),
+                };
+                if let Err(e) = r {
+                    // 开录前 = 快速失败；开录后 = 运行期故障，收尾对账兜底
+                    let _ = rtx.send(Ready::Fail(e));
                 }
-                let _ = tx.send(ToMixer::Eof(0));
+                let _ = tx.send(ToMixer::Eof(i));
             }));
         }
         drop(ready_tx);
         drop(pcm_tx);
 
-        match ready_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ready::Ok) => {}
-            Ok(Ready::Fail(e)) => {
-                stop.store(true, Ordering::Relaxed);
-                return Err(RecordError(format!("启动麦克风采集失败: {e}")));
-            }
-            Err(_) => {
-                stop.store(true, Ordering::Relaxed);
-                return Err(RecordError("启动麦克风采集超时（音频设备无响应）".into()));
+        // 等全部采集源初始化完成（SCK 内容枚举百毫秒级；5s 兜底）
+        for &(_, what) in sources.iter() {
+            match ready_rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(Ready::Ok) => {}
+                Ok(Ready::Fail(e)) => {
+                    stop.store(true, Ordering::Relaxed);
+                    return Err(RecordError(format!("启动{what}采集失败: {e}")));
+                }
+                Err(_) => {
+                    stop.store(true, Ordering::Relaxed);
+                    return Err(RecordError(format!("启动{what}采集超时（音频服务无响应）")));
+                }
             }
         }
 
@@ -108,6 +136,7 @@ impl Pipeline {
             let origin = Arc::clone(&core.origin);
             let err = Arc::clone(&core.err);
             let flowed = Arc::clone(&core.flowed);
+            let nsrc = sources.len();
             workers.push(std::thread::spawn(move || {
                 run_mixer(
                     pcm_rx,
@@ -115,7 +144,7 @@ impl Pipeline {
                     origin,
                     err,
                     flowed,
-                    1,
+                    nsrc,
                     "音频编码失败（AAC 编码器退出？）".into(),
                 );
             }));
@@ -161,26 +190,28 @@ impl Drop for Pipeline {
     }
 }
 
-// ---------------------------------------------------------------- HAL 采集
+// ---------------------------------------------------------------- HAL 麦克风
 
 /// 回调/转储线程共享的采集上下文（user data 指向它）
 struct CaptureShared {
     queue: Mutex<Vec<u8>>,
 }
 
-/// 单源采集的一生（独立线程）；起流成功后经 rtx 报告就绪（快速失败）
-fn capture_thread(
+/// 麦克风源的一生（独立线程）；起流成功后经 rtx 报告就绪（快速失败）
+fn hal_capture_thread(
     stop: &AtomicBool,
     tx: &Sender<ToMixer>,
     rtx: &Sender<Ready>,
+    idx: usize,
 ) -> Result<(), String> {
-    unsafe { run_capture(stop, tx, rtx) }
+    unsafe { run_capture(stop, tx, rtx, idx) }
 }
 
 unsafe fn run_capture(
     stop: &AtomicBool,
     tx: &Sender<ToMixer>,
     rtx: &Sender<Ready>,
+    idx: usize,
 ) -> Result<(), String> {
     // 默认输入设备
     let mut devid: objc2_core_audio::AudioObjectID = 0;
@@ -294,12 +325,298 @@ unsafe fn run_capture(
             .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
             .collect();
         let pcm = conv.push(&floats);
-        if !pcm.is_empty() && tx.send(ToMixer::Pcm(0, pcm, Instant::now())).is_err() {
+        if !pcm.is_empty() && tx.send(ToMixer::Pcm(idx, pcm, Instant::now())).is_err() {
             break;
         }
     }
     let _ = AudioDeviceStop(devid, proc_id);
     let _ = AudioDeviceDestroyIOProcID(devid, proc_id);
+    Ok(())
+}
+
+// ---------------------------------------------------------------- ScreenCaptureKit 系统声
+
+/// SCK 音频回调与转储线程的共享状态
+struct SckState {
+    /// 回调展平后的交错 f32 帧（转储线程排空）
+    pcm: Mutex<Vec<f32>>,
+    /// 首帧数据的声道数（0 = 尚未见到数据，转换器按它建立）
+    ch: AtomicUsize,
+    /// 首个提取错误（运行期降级：转储线程发现后退出，收尾对账提示）
+    err: Mutex<Option<String>>,
+}
+
+define_class!(
+    // SAFETY:
+    // - The superclass NSObject does not have any subclassing requirements.
+    // - `SckOutput` does not implement `Drop`.
+    #[unsafe(super(NSObject))]
+    #[ivars = Arc<SckState>]
+    struct SckOutput;
+
+    unsafe impl NSObjectProtocol for SckOutput {}
+
+    unsafe impl SCStreamOutput for SckOutput {
+        // 音频 CMSampleBuffer 到达（挂载在自建串行队列上，非实时线程，
+        // 做提取与入队是安全的；实时约束只存在于 CoreAudio IOProc）
+        // 方法名与 SCStreamOutput 协议声明保持一致（非 snake_case）
+        #[allow(non_snake_case)]
+        #[unsafe(method(stream:didOutputSampleBuffer:ofType:))]
+        unsafe fn stream_didOutputSampleBuffer_ofType(
+            &self,
+            _stream: &SCStream,
+            sample_buffer: &CMSampleBuffer,
+            r#type: SCStreamOutputType,
+        ) {
+            if r#type != SCStreamOutputType::Audio {
+                return;
+            }
+            let state = self.ivars();
+            match unsafe { sck_extract(sample_buffer) } {
+                Ok((frames, ch)) => {
+                    if ch > 0 {
+                        state.ch.store(ch, Ordering::Relaxed);
+                    }
+                    if !frames.is_empty() {
+                        state.pcm.lock().unwrap().extend(frames);
+                    }
+                }
+                Err(e) => {
+                    let mut slot = state.err.lock().unwrap();
+                    if slot.is_none() {
+                        *slot = Some(e);
+                    }
+                }
+            }
+        }
+    }
+);
+
+impl SckOutput {
+    fn new(state: Arc<SckState>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(state);
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// AudioBuffer 的数据体（空缓冲返回空切片）
+unsafe fn ab_bytes(b: &AudioBuffer) -> &[u8] {
+    if b.mData.is_null() || b.mDataByteSize == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(b.mData as *const u8, b.mDataByteSize as usize)
+    }
+}
+
+/// 从 CMSampleBuffer 提取交错 f32 帧，返回 (样本, 声道数)。
+/// 采样率按配置恒为 48k（SCStreamConfiguration 契约：音频格式由
+/// sampleRate/channelCount 决定）；声道布局以实际 AudioBufferList 为准：
+/// 单缓冲多声道 = 交错，多缓冲单声道 = 非交错（手工交织）
+unsafe fn sck_extract(sbuf: &CMSampleBuffer) -> Result<(Vec<f32>, usize), String> {
+    // 变长结构 AudioBufferList：先探需要多少字节，再取进对齐的栈缓冲
+    let mut needed: usize = 0;
+    let st = sbuf.audio_buffer_list_with_retained_block_buffer(
+        &mut needed,
+        std::ptr::null_mut(),
+        0,
+        None,
+        None,
+        0,
+        std::ptr::null_mut(),
+    );
+    if st != 0 || needed == 0 {
+        return Err(format!("读取音频缓冲失败: {st}"));
+    }
+    // 头 8 字节 + 每缓冲 16 字节；立体声 40 字节。异常大的请求直接拒绝
+    const MAX_LIST: usize = 512;
+    if needed > MAX_LIST {
+        return Err(format!("音频声道布局异常（AudioBufferList {needed} 字节）"));
+    }
+    let mut storage = [0u64; MAX_LIST / 8];
+    let list_ptr = storage.as_mut_ptr() as *mut AudioBufferList;
+    let st = sbuf.audio_buffer_list_with_retained_block_buffer(
+        std::ptr::null_mut(),
+        list_ptr,
+        storage.len() * 8,
+        None,
+        None,
+        0,
+        std::ptr::null_mut(),
+    );
+    if st != 0 {
+        return Err(format!("提取音频缓冲失败: {st}"));
+    }
+    let f32s = |b: &[u8]| -> Vec<f32> {
+        // 字节级读取：mData 不保证 f32 对齐（16 字节对齐需显式传标志）
+        b.chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect::<Vec<f32>>()
+    };
+    let list = &*list_ptr;
+    let nbuf = list.mNumberBuffers.min(8) as usize;
+    if nbuf == 0 {
+        return Ok((Vec::new(), 0));
+    }
+    if nbuf == 1 {
+        let b = &list.mBuffers[0];
+        let ch = b.mNumberChannels.max(1) as usize;
+        return Ok((f32s(unsafe { ab_bytes(b) }), ch));
+    }
+    // 非交错：每缓冲一声道，按最短缓冲对齐帧数后交织
+    let bufs: Vec<&[u8]> = (0..nbuf)
+        .map(|i| unsafe { ab_bytes(&list.mBuffers[i]) })
+        .collect();
+    let frames = bufs.iter().map(|b| b.len() / 4).min().unwrap_or(0);
+    let mut out = Vec::with_capacity(frames * nbuf);
+    for f in 0..frames {
+        for b in &bufs {
+            out.push(f32::from_le_bytes([
+                b[f * 4],
+                b[f * 4 + 1],
+                b[f * 4 + 2],
+                b[f * 4 + 3],
+            ]));
+        }
+    }
+    Ok((out, nbuf))
+}
+
+/// 系统声源的一生（独立线程）：SCK 音频-only 流建立 → 就绪 → 转储循环 →
+/// 停机拆卸。macOS 13+（版本门在 run 内做）；需「屏幕录制」TCC 权限
+fn sck_capture_thread(
+    stop: &AtomicBool,
+    tx: &Sender<ToMixer>,
+    rtx: &Sender<Ready>,
+    idx: usize,
+) -> Result<(), String> {
+    unsafe { run_sck_capture(stop, tx, rtx, idx) }
+}
+
+unsafe fn run_sck_capture(
+    stop: &AtomicBool,
+    tx: &Sender<ToMixer>,
+    rtx: &Sender<Ready>,
+    idx: usize,
+) -> Result<(), String> {
+    // 版本门：setSampleRate:/setChannelCount: 是 macOS 13 API，12.x 上调用
+    // 是未识别选择子（直接崩溃），必须先探测
+    let probe = SCStreamConfiguration::new();
+    if !probe.respondsToSelector(sel!(setSampleRate:)) {
+        return Err("系统声内录需 macOS 13.0+（12.x 无 ScreenCaptureKit 音频输出）".into());
+    }
+    drop(probe);
+
+    // 枚举可捕获内容（异步 block → 通道等待）。无「屏幕录制」权限时这里
+    // 拿不到 display 或直接报错
+    let (ct_tx, ct_rx) = channel::<Result<Retained<SCShareableContent>, String>>();
+    let ct_block: RcBlock<dyn Fn(*mut SCShareableContent, *mut NSError)> = RcBlock::new(
+        move |content: *mut SCShareableContent, error: *mut NSError| {
+            let r = if let Some(e) = unsafe { Retained::retain(error) } {
+                Err(e.localizedDescription().to_string())
+            } else if let Some(c) = unsafe { Retained::retain(content) } {
+                Ok(c)
+            } else {
+                Err("无法获取屏幕内容（系统设置 → 隐私与安全性 → 屏幕录制 未授权？）".into())
+            };
+            let _ = ct_tx.send(r);
+        },
+    );
+    SCShareableContent::getShareableContentWithCompletionHandler(&ct_block);
+    let content = ct_rx
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| "枚举屏幕内容超时".to_string())??;
+    // 音频与显示器无关（系统级混音），任取一块即可；空列表 = 权限被拒
+    let display = content
+        .displays()
+        .firstObject()
+        .ok_or_else(|| "无可捕获的显示器（屏幕录制权限被拒？）".to_string())?;
+
+    // 系统声：SCStream 无「关视频」开关（视频是流的默认产物），把尺寸压到
+    // 2×2 让合成开销可忽略，只挂音频输出（视频帧无接收方即丢弃）；
+    // 48k/立体声与管线固定格式一致（音频格式契约由 sampleRate/channelCount 决定）
+    let excluded = NSArray::<SCWindow>::array();
+    let filter = SCContentFilter::initWithDisplay_excludingWindows(
+        SCContentFilter::alloc(),
+        &display,
+        &excluded,
+    );
+    let cfg = SCStreamConfiguration::new();
+    cfg.setWidth(2);
+    cfg.setHeight(2);
+    cfg.setCapturesAudio(true);
+    cfg.setSampleRate(RATE as NSInteger);
+    cfg.setChannelCount(2);
+    let stream =
+        SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), &filter, &cfg, None);
+
+    // 输出挂载：回调类 + 自建串行队列（不传队列可能落到主队列，CLI/测试
+    // 场景主线程不跑 runloop 会永远收不到回调）
+    let state = Arc::new(SckState {
+        pcm: Mutex::new(Vec::new()),
+        ch: AtomicUsize::new(0),
+        err: Mutex::new(None),
+    });
+    let output = SckOutput::new(Arc::clone(&state));
+    let queue = DispatchQueue::new("lscreen.record.sck", None);
+    stream
+        .addStreamOutput_type_sampleHandlerQueue_error(
+            ProtocolObject::from_ref(&*output),
+            SCStreamOutputType::Audio,
+            Some(&queue),
+        )
+        .map_err(|e| format!("挂载音频输出失败: {}", e.localizedDescription()))?;
+
+    // 开流（完成回调里的错误在此可见：权限被收回/音频服务不可用）
+    let (st_tx, st_rx) = channel::<Option<String>>();
+    let st_block: RcBlock<dyn Fn(*mut NSError)> = RcBlock::new(move |error: *mut NSError| {
+        let msg = unsafe { Retained::retain(error) }.map(|e| e.localizedDescription().to_string());
+        let _ = st_tx.send(msg);
+    });
+    stream.startCaptureWithCompletionHandler(Some(&st_block));
+    match st_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(None) => {}
+        Ok(Some(e)) => return Err(format!("系统声采集开启失败: {e}")),
+        Err(_) => return Err("等待系统声采集开启超时".into()),
+    }
+    let _ = rtx.send(Ready::Ok);
+
+    // 转储循环：回调入队的交错 f32 → ToStereo48 → PCM 通道（麦克风同款）
+    let mut conv: Option<ToStereo48> = None;
+    while !stop.load(Ordering::Relaxed) {
+        if let Some(e) = state.err.lock().unwrap().take() {
+            // 运行期故障：退出线程走对账告警，不毁视频
+            return Err(format!("系统声数据异常: {e}"));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        let chunk = std::mem::take(&mut *state.pcm.lock().unwrap());
+        if chunk.is_empty() {
+            continue;
+        }
+        if conv.is_none() {
+            let ch = state.ch.load(Ordering::Relaxed);
+            if ch == 0 {
+                continue; // 声道数未定（理论到不了这里：有数据必有 ch）
+            }
+            conv = Some(ToStereo48::new(RATE, ch));
+        }
+        let pcm = conv.as_mut().unwrap().push(&chunk);
+        if !pcm.is_empty() && tx.send(ToMixer::Pcm(idx, pcm, Instant::now())).is_err() {
+            break;
+        }
+    }
+
+    // 收尾：停流等完成 → 摘输出 → Retained 释放（RAII）。停流不干净时
+    // 2s 后也继续走 Drop（SCStream 析构会再停一次）
+    let (sp_tx, sp_rx) = channel::<()>();
+    let sp_block: RcBlock<dyn Fn(*mut NSError)> = RcBlock::new(move |_error: *mut NSError| {
+        let _ = sp_tx.send(());
+    });
+    stream.stopCaptureWithCompletionHandler(Some(&sp_block));
+    let _ = sp_rx.recv_timeout(Duration::from_secs(2));
+    let _ = stream.removeStreamOutput_type_error(
+        ProtocolObject::from_ref(&*output),
+        SCStreamOutputType::Audio,
+    );
     Ok(())
 }
 

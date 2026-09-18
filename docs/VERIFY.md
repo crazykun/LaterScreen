@@ -86,6 +86,14 @@ LSCREEN_TEST_E2E=1 \
 #    预期：A/V 偏差 <0.5s；KEEP=1 保留产物可听到录音
 LSCREEN_TEST_AUDIO=1 LSCREEN_TEST_AUDIO_KEEP=1 \
   cargo test -p lscreen-record audio_e2e_mic -- --ignored --nocapture
+
+# 4. 录屏音频·系统声（v0.11 盲写路径真机点验：ScreenCaptureKit，macOS 13+）
+#    权限走「屏幕录制」（与截图同一 TCC 权限，正常使用已授予）
+#    ⚠ 运行期间必须有声音在播放（如音乐）：静默桌面 SCK 可能整程零产包，
+#      双轨断言会失败（同 Win loopback 行为）
+#    预期：A/V 偏差 <0.5s；KEEP=1 保留产物可听到刚才播放的内容
+LSCREEN_TEST_AUDIO=1 LSCREEN_TEST_AUDIO_KEEP=1 \
+  cargo test -p lscreen-record audio_e2e_system -- --ignored --nocapture
 ```
 
 ### 人工项
@@ -98,9 +106,10 @@ LSCREEN_TEST_AUDIO=1 LSCREEN_TEST_AUDIO_KEEP=1 \
 - **滚动截图（v0.8.0，CGEvent 滚轮合成）**：同 Windows 条目；另验触控板
   惯性滚动下的拼合质量。
 - **MP4 录屏 GUI 出片（M4）**：同 Windows 条目（Retina 下清晰度正常）。
-- **系统声内录降级提示**：`config.toml` 写 `record_audio = "system"` →
-  启动录制时 stderr 有「已降级为麦克风」提示且录制不中断；CLI
-  `--audio system` 直接报错且信息明确。
+- **系统声内录 GUI 出片（v0.11，ScreenCaptureKit）**：播放音乐 →
+  `lscreen record --select --mp4 --audio system` → 录 5-8s → 产物含音乐、
+  无爆音/变速；`--audio both` 同时含麦克风与音乐（饱和混合）。macOS 12.x
+  机器上 `--audio system` 应报「需 macOS 13.0+」而非崩溃（如有旧系统）。
 
 ---
 

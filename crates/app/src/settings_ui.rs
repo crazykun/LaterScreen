@@ -469,8 +469,7 @@ impl SettingsApp {
                         .on_hover_text("录屏（GIF/MP4）的默认格式；命令行 --mp4 显式指定时优先于此");
                     ui.end_row();
 
-                    // 音频录制（M14）：三平台落地，选项表按平台收敛
-                    // （mac 无系统声内录，见 config::RECORD_AUDIO_NAMES）
+                    // 音频录制（M14/v0.11）：三平台全选项（mac 系统声 = ScreenCaptureKit）
                     {
                         row_label(ui, "录制音频");
                         let current = config::RECORD_AUDIO_NAMES
@@ -486,7 +485,8 @@ impl SettingsApp {
                                     走系统 WASAPI/Media Foundation 直采，无需安装任何工具";
                         #[cfg(target_os = "macos")]
                         let hint = "仅 MP4 格式生效（GIF 不含音轨）；命令行 --audio 显式指定时优先于此。\
-                                    当前支持麦克风（CoreAudio）；系统声内录待 ScreenCaptureKit 支持";
+                                    麦克风走 CoreAudio；系统声走 ScreenCaptureKit（macOS 13+，\
+                                    需「屏幕录制」权限——与截图同一权限）";
                         egui::ComboBox::from_id_salt("record-audio")
                             .selected_text(current)
                             .width(ui.available_width())

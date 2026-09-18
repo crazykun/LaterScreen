@@ -219,8 +219,8 @@ impl AudioHandle {
 }
 
 /// 启动音频管线：探测系统采集/编码设施，任一必需项缺失直接报错（快速
-/// 失败，不让用户录完才发现没声）。macOS 无系统声内录公开 API，显式
-/// 请求 System/Both 在此报错（app 层的配置默认会先降级为麦克风）。
+/// 失败，不让用户录完才发现没声）。mac 系统声走 ScreenCaptureKit
+/// （macOS 13+，12.x 上请求 System/Both 在此报错；需「屏幕录制」权限）。
 pub fn start_audio(source: AudioSource) -> Result<AudioHandle> {
     audio::Pipeline::start(source).map(AudioHandle)
 }
@@ -865,5 +865,16 @@ mod tests {
     #[test]
     fn audio_e2e_mic() {
         run_audio_e2e(AudioSource::Mic);
+    }
+
+    /// macOS 系统声（ScreenCaptureKit 系统声内录，M14 遗留/v0.11 盲写路径）。
+    /// 需 macOS 13+ 与「屏幕录制」TCC 权限（与截图同一权限，正常使用已授予）。
+    /// 测试窗口内务必有声音在播放（如音乐）：静默桌面 SCK 可能整程零产包
+    /// （同 Win loopback 行为），零音轨会让断言失败
+    #[cfg(target_os = "macos")]
+    #[ignore = "需要屏幕录制权限与正在播放的音频（LSCREEN_TEST_AUDIO=1 显式开启）"]
+    #[test]
+    fn audio_e2e_system() {
+        run_audio_e2e(AudioSource::System);
     }
 }

@@ -335,11 +335,8 @@ pub const SELECTION_NAMES: &[(&str, &str)] = &[
 /// 录制格式选项：(配置值, 面板文案)
 pub const RECORD_FORMAT_NAMES: &[(&str, &str)] = &[("gif", "GIF 动图"), ("mp4", "MP4 视频")];
 
-/// 录屏音频源（仅 MP4 生效）的中文名（配置面板下拉）。mac 无系统声
-/// 内录（待 ScreenCaptureKit），只给可用选项，避免配置出不可用值
-#[cfg(target_os = "macos")]
-pub const RECORD_AUDIO_NAMES: &[(&str, &str)] = &[("off", "关"), ("mic", "麦克风")];
-#[cfg(not(target_os = "macos"))]
+/// 录屏音频源（仅 MP4 生效）的中文名（配置面板下拉，三平台同表：
+/// Linux 子进程链 / Win WASAPI / mac CoreAudio 麦克风 + ScreenCaptureKit 系统声）
 pub const RECORD_AUDIO_NAMES: &[(&str, &str)] = &[
     ("off", "关"),
     ("mic", "麦克风"),
