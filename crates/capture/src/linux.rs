@@ -587,6 +587,20 @@ pub fn warp_pointer(x: i32, y: i32) -> Result<()> {
     })
 }
 
+/// Linux：滚动/录制状态窗维持现有摆放（X11 WM 自行定位，M4 起真机验证
+/// 过的行为），不做选区外摆位——返回 None 调用方即沿用默认位置。
+/// （macOS 的 winit 对未指定位置窗口一律 center()，才有摆位需求。）
+pub fn status_window_origin(
+    _x: i32,
+    _y: i32,
+    _w: i32,
+    _h: i32,
+    _win_w: f32,
+    _win_h: f32,
+) -> Option<(f32, f32)> {
+    None
+}
+
 /// 设置指定窗口的 WM_CLASS（instance=class=传入值）。
 /// 任务栏靠 WM_CLASS 匹配 .desktop 文件来决定图标；egui/winit 在 X11 下
 /// 不设置 WM_CLASS（回落为窗口标题或 argv[0]），导致图标对不上。

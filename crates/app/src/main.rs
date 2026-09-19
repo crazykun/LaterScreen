@@ -196,7 +196,8 @@ enum Cmd {
         #[arg(long, default_value_t = 1.0, allow_hyphen_values = true)]
         scale: f32,
     },
-    /// 滚动长截图：框选区域后自动滚动内容并拼接为长图（Linux X11）
+    /// 滚动长截图：框选区域后自动滚动内容并拼接为长图（v0.8.0 起三平台；
+    /// Wayland 除外）
     Scroll {
         /// 截取区域，格式 X,Y,W,H（物理像素）；缺省为交互框选
         #[arg(long, value_name = "X,Y,W,H", allow_hyphen_values = true)]
@@ -204,7 +205,7 @@ enum Cmd {
         /// 最大滚动步数（每步滚动一次滚轮）
         #[arg(long, default_value_t = 60)]
         steps: u32,
-        /// 每步滚轮格数
+        /// 每步滚轮格数上限（实际按选区高度自适应，首步恒 1 格）
         #[arg(long, default_value_t = 2)]
         clicks: u32,
         /// 每步等待内容稳定的毫秒数
@@ -1576,6 +1577,65 @@ fn poster_path(video: &std::path::Path) -> PathBuf {
         .join(format!("{stem}_poster.png"))
 }
 
+/// [`wait_stable`] 的附加观测：区分「画面全程静止」与「有滚动/动画」，
+/// 供「未检测到滚动」的归因提示与 LSCREEN_SCROLL_DEBUG 跟踪使用
+struct StableWait {
+    /// 首次比对即达标：采帧窗口内画面完全静止（页面没动）
+    static_page: bool,
+    /// 实际比对轮数
+    polls: u32,
+    /// 预算耗尽仍未静止（页面有持续动画）
+    timed_out: bool,
+}
+
+/// 滚动一步后等待画面稳定：先等基准 `pause`，然后每 80ms 比对一次抽样
+/// 差异，相等即认为平滑滚动动画收尾。`budget` 是稳定等待上限——超时返回
+/// 当前帧：页面有持续动画（视频/动图）时不能无限等，拼接器自身的
+/// Mismatch 保护会兜底。v0.8.0 的固定 pause 在 mac/Win 浏览器平滑
+/// 滚动（惯性动画 ~300-500ms）下截图是动画中间态，尾部块匹配错位 →
+/// 长图重影/断段（mac 真机点验 2026-09-19）
+fn wait_stable(
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    pause: std::time::Duration,
+    budget: std::time::Duration,
+    stop: &std::sync::atomic::AtomicBool,
+) -> lscreen_capture::Result<(lscreen_capture::Screenshot, StableWait)> {
+    use std::sync::atomic::Ordering;
+    std::thread::sleep(pause);
+    let mut prev = lscreen_capture::capture_region(x, y, w, h)?;
+    let start = std::time::Instant::now();
+    let mut sw = StableWait {
+        static_page: false,
+        polls: 0,
+        timed_out: false,
+    };
+    loop {
+        if stop.load(Ordering::Relaxed) || start.elapsed() >= budget {
+            sw.timed_out = !sw.static_page;
+            return Ok((prev, sw));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        let cur = lscreen_capture::capture_region(x, y, w, h)?;
+        // 抽样比较（每 8 像素取 1）：差异 < 0.05% 视为稳定
+        let mut diff = 0usize;
+        let n = prev.rgba.len() / 4;
+        for i in (0..n).step_by(8) {
+            if prev.rgba[i * 4..i * 4 + 3] != cur.rgba[i * 4..i * 4 + 3] {
+                diff += 1;
+            }
+        }
+        sw.polls += 1;
+        if diff * 2000 < n {
+            sw.static_page = sw.polls == 1;
+            return Ok((cur, sw));
+        }
+        prev = cur;
+    }
+}
+
 /// 滚动长截图（M4）：框选区域 → 自动滚动 → 帧间拼接 → 长图 PNG。
 /// 指针被移到区域中心驱动窗口滚动（XTest 滚轮事件落在指针下的窗口），
 /// 结束后恢复原位置。停止条件：连续两帧无变化（滚到底）/内容匹配失败
@@ -1631,16 +1691,43 @@ fn run_scroll(
 
     // 拼接线程：滚动 + 采帧 + 匹配；状态窗口显示进度
     let (th_stop, th_status, th_path) = (stop.clone(), status.clone(), path.clone());
+    let started = Arc::new(AtomicBool::new(false));
+    let th_started = started.clone();
     let pause = std::time::Duration::from_millis(pause_ms);
     let stitcher = std::thread::spawn(
         move || -> std::result::Result<lscreen_record::scroll::ScrollStitcher, String> {
+            // armed：等用户点「开始滚动」/按 Enter。用户需要时间把目标窗口
+            // 摆好、定位到内容顶部（真机反馈：框选完立即自动滚太突兀）；
+            // stop 先到（Esc/关窗/Ctrl+C）= 取消，静默退出
+            while !th_started.load(Ordering::Relaxed) && !th_stop.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if !th_started.load(Ordering::Relaxed) {
+                th_status.lock().unwrap().done = true;
+                return Err("已取消".into());
+            }
             // 指针移到区域中心驱动滚动，结束恢复原位（尽量不打扰用户）。
             // 主体收进闭包：任何错误路径都必须走到收尾（恢复指针 + 置 done
             // 让状态窗口自动关），提前 return 会让窗口挂死等用户手关
+            let dbg = std::env::var_os("LSCREEN_SCROLL_DEBUG").is_some();
             let orig_pos = lscreen_capture::cursor_position();
             let result = (|| {
-                let first =
-                    lscreen_capture::capture_region(x, y, w, h).map_err(|e| e.to_string())?;
+                // 起拍前先等画面静止：用户在 armed 期间定位内容（这正是该
+                // 阶段的用途），但手动滚动的惯性滑动可持续 ~2s——带着残余
+                // 动量采首帧时，第一步的实际位移 = 惯性剩余 + 合成滚轮位移，
+                // 轻松超过可匹配预算 → 首步 Mismatch（真机 2026-09-19：滚完
+                // 立刻点「开始滚动」必现）。页面有持续动画时等不到静止：
+                // 预算到点照常开拍（拼接器 Mismatch 保护兜底）。
+                let (first, _) = wait_stable(
+                    x,
+                    y,
+                    w,
+                    h,
+                    pause,
+                    std::time::Duration::from_millis(2500),
+                    &th_stop,
+                )
+                .map_err(|e| e.to_string())?;
                 let mut st = lscreen_record::scroll::ScrollStitcher::new(
                     &first.rgba,
                     first.width,
@@ -1655,17 +1742,42 @@ fn run_scroll(
                 let _ = lscreen_capture::warp_pointer(x + w as i32 / 2, y + h as i32 / 2);
                 // 给 WM 一点时间完成指针移动与焦点切换
                 std::thread::sleep(std::time::Duration::from_millis(150));
+                if dbg {
+                    match lscreen_capture::cursor_position() {
+                        Some((cx, cy)) => eprintln!(
+                            "lscreen scroll[debug]: region=({x},{y},{w},{h}) warp=({}, {}) cursor=({cx},{cy})",
+                            x + w as i32 / 2,
+                            y + h as i32 / 2
+                        ),
+                        None => eprintln!("lscreen scroll[debug]: region=({x},{y},{w},{h}) cursor 查询不可用"),
+                    }
+                }
 
                 let mut no_change = 0u32;
                 let mut scrolled = false;
+                // 归因观测：页面动过（wait_stable 见到变化）/ 发生过 Mismatch
+                let mut page_moved = false;
+                let mut mismatched = false;
+                // 闭环校准：浏览器对合成滚轮有加速放大（Safari 实测约 6 倍
+                // 名义位移），固定格数在矮选区下单步就把尾块整块滚出画面
+                // （首步 Mismatch，真机 2026-09-19：411px 高选区 + ~376px/步
+                // vs 可匹配上限 343px）。首步只滚 1 格实测位移，之后按
+                // 「预算一半」自适应格数；--clicks 语义变为上限。
+                let mut notches = 1i32;
+                let mut est_shift = 0f32; // 实测每格位移（物理px），EWMA
+                                          // 每步稳定等待预算：pause×4（上限 1.2s）
+                let step_budget = (pause * 4).min(std::time::Duration::from_millis(1200));
                 for step in 1..=steps {
                     if th_stop.load(Ordering::Relaxed) {
                         break;
                     }
-                    lscreen_capture::scroll_wheel(-(clicks as i32)).map_err(|e| e.to_string())?;
-                    std::thread::sleep(pause);
-                    let frame =
-                        lscreen_capture::capture_region(x, y, w, h).map_err(|e| e.to_string())?;
+                    lscreen_capture::scroll_wheel(-notches).map_err(|e| e.to_string())?;
+                    // mac/Win 浏览器平滑滚动（惯性动画 ~300-500ms）下，固定
+                    // pause 后截图拿到的是动画中间态，尾部块匹配错位 → 长图
+                    // 重影/断段。轮询等画面稳定（连续两帧几乎无差异）再交
+                    // 拼接器；超时按当前帧继续（页面有动画时不能干等）
+                    let (frame, sw) = wait_stable(x, y, w, h, pause, step_budget, &th_stop)
+                        .map_err(|e| e.to_string())?;
                     let outcome = st
                         .push(&frame.rgba, frame.width, frame.height)
                         .map_err(|e| e.to_string())?;
@@ -1674,10 +1786,33 @@ fn run_scroll(
                         s.frames = step as usize;
                         s.height = st.height();
                     }
+                    if dbg {
+                        eprintln!(
+                            "lscreen scroll[debug]: step {step} notches={notches} stable(polls={}, static={}, timeout={}) {outcome:?} height={}",
+                            sw.polls,
+                            sw.static_page,
+                            sw.timed_out,
+                            st.height()
+                        );
+                    }
+                    page_moved |= !sw.static_page;
                     match outcome {
-                        lscreen_record::scroll::ScrollOutcome::Appended(_) => {
+                        lscreen_record::scroll::ScrollOutcome::Appended(n) => {
                             no_change = 0;
                             scrolled = true;
+                            // Appended(n) ≈ 本步实际位移：校准下一步格数，
+                            // 目标位移 = 可匹配预算的一半（留平滑滚动余量）
+                            if n > 0 {
+                                let measured = n as f32 / notches as f32;
+                                est_shift = if est_shift > 0.0 {
+                                    est_shift * 0.6 + measured * 0.4
+                                } else {
+                                    measured
+                                };
+                                let target = st.max_shift() as f32 * 0.5;
+                                notches =
+                                    ((target / est_shift).round() as i32).clamp(1, clicks as i32);
+                            }
                         }
                         lscreen_record::scroll::ScrollOutcome::NoChange => {
                             no_change += 1;
@@ -1687,15 +1822,31 @@ fn run_scroll(
                             }
                         }
                         // 内容突变（悬浮表头/动画/弹窗）：保留已有结果停止
-                        lscreen_record::scroll::ScrollOutcome::Mismatch => break,
+                        lscreen_record::scroll::ScrollOutcome::Mismatch => {
+                            if !scrolled {
+                                mismatched = true;
+                            }
+                            break;
+                        }
                     }
                 }
                 if !scrolled {
-                    // 未检测到滚动（窗口不支持滚轮/已在底部/内容不滚）：不再当
-                    // 致命错误退出——那样状态窗一关什么都不剩，用户以为崩了。
-                    // st 里已有框选区域的第一帧，退化成「普通区域截图」交给预览，
-                    // 用户至少拿到刚框的那块图（可保存/复制/标注）。
-                    eprintln!("lscreen: 未检测到滚动，按普通区域截图处理");
+                    // 未拼上任何内容的常见成因表现不同，分别给可行动的归因
+                    // （都退化成「普通区域截图」交给预览）：
+                    // - 画面全程静止：滚轮没生效（指针落点下无可滚内容/已在
+                    //   底部/窗口不响应合成滚轮）
+                    // - 画面在滚但无进展：尾块（选区底部 1/6）压在固定内容上
+                    //   恒 NoChange，或首步位移超预算 Mismatch
+                    // 退化成「普通区域截图」是有意设计：不是致命错误——那样
+                    // 状态窗一关什么都不剩，用户以为崩了。st 里已有框选区域
+                    // 的第一帧，交给预览用户至少拿到刚框的那块图。
+                    if mismatched {
+                        eprintln!("lscreen: 内容匹配失败——单步滚动位移超过选区可匹配范围（选区太矮），或悬浮元素/内容突变入镜；把选区框高一些再试；按普通区域截图处理");
+                    } else if page_moved {
+                        eprintln!("lscreen: 画面在滚动但拼接无进展——选区底部压着固定/悬浮内容（输入条/工具栏/页脚），把选区底部移到会滚动的内容上再试；按普通区域截图处理");
+                    } else {
+                        eprintln!("lscreen: 未检测到滚动（画面无变化：指针落点下无可滚内容或已在底部），按普通区域截图处理");
+                    }
                 }
                 Ok(st)
             })();
@@ -1708,19 +1859,31 @@ fn run_scroll(
         },
     );
 
-    // 状态窗口：停止按钮/Esc/关窗置 stop；拼接线程 done 后自动关
-    let viewport = eframe::egui::ViewportBuilder::default()
+    // 状态窗口：停止按钮/Esc/关窗置 stop；拼接线程 done 后自动关。
+    // 位置必须显式给：winit 在 mac 对未指定位置的窗口一律 center()
+    // （winit 0.30 window_delegate.rs），置顶状态窗恰好盖住屏幕中心——
+    // 交互框选的区域中心常在同一点，拼接线程把指针 warp 到选区中心后，
+    // 合成滚轮事件按「指针下最顶层窗口」全被状态窗吃掉，内容不动 →
+    // 拼接全程 NoChange → 退化为普通截图（真机点验 2026-09-19）。
+    // 摆到选区外（平台无此需求则 None = 沿用默认位置）。
+    let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_app_id("lscreen")
         .with_inner_size([320.0, 150.0])
         .with_resizable(false)
         .with_always_on_top()
         .with_title("lscreen 滚动截图");
+    if let Some((px, py)) =
+        lscreen_capture::status_window_origin(x, y, w as i32, h as i32, 320.0, 150.0)
+    {
+        viewport = viewport.with_position(eframe::egui::pos2(px, py));
+    }
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
     };
     let app_stop = stop.clone();
     let app_status = status.clone();
+    let app_start = started.clone();
     run_eframe(
         "lscreen-scroll-status",
         options,
@@ -1728,7 +1891,7 @@ fn run_scroll(
             Ok(Box::new(record_ui::RecordApp::new(
                 cc,
                 app_stop,
-                Arc::new(AtomicBool::new(true)), // 滚动模式无 armed 阶段
+                app_start,
                 app_status,
                 steps as f32,
                 true,
@@ -1739,10 +1902,16 @@ fn run_scroll(
 
     // 事件循环退出（用户停止/窗口关闭）：收尾拼接线程
     stop.store(true, Ordering::Relaxed);
+    let cancelled = !started.load(Ordering::Relaxed);
     let result = stitcher
         .join()
         .map_err(|_| "拼接线程异常退出".to_string())?;
-    let st = result?;
+    // armed 阶段取消（Esc/关窗/Ctrl+C）：静默退出，不是错误
+    let st = match result {
+        Ok(s) => s,
+        Err(_) if cancelled => return Ok(()),
+        Err(e) => return Err(e),
+    };
     let (mut img, mut ih) = (st.image().to_vec(), st.height());
     let iw = st.width();
     // GPU 单纹理高度上限普遍 8192/16384：超限截断保预览可用（纹理被驱动
@@ -2045,5 +2214,209 @@ mod tests {
         // 两屏全被选区盖住：右下 + overlap
         let (_, overlap) = status_window_pos((-1920.0, 0.0, 3840.0, 1080.0), desk, win);
         assert!(overlap);
+    }
+
+    /// 真机两帧探针（M17 风格，ignored）：诊断滚动截图 Mismatch 的真机成因
+    /// （位移过大 / 亚像素重渲染 / 平坦内容歧义 / 事件未生效）。
+    ///   LSCREEN_TEST_E2E=1 LSCREEN_TEST_SCROLL_REGION=1023,246,970,411 \
+    ///   cargo test -p lscreen -- --ignored --nocapture scroll_two_frame_probe
+    /// 流程：warp 指针到区域中心 → 先向上滚 3 格脱离页底 → 等稳定采首帧 →
+    /// 合成 1 格向下滚轮 → 等稳定采第二帧 → 打印采样差异、行级最优匹配
+    /// （SAD/px，与拼接器同参签名）与拼接器结果，两帧存
+    /// /tmp/scroll-probe-{1,2}.png。
+    #[test]
+    #[ignore = "真机：需要桌面会话 + 屏幕录制/辅助功能权限（LSCREEN_TEST_E2E=1）"]
+    fn scroll_two_frame_probe() {
+        if std::env::var("LSCREEN_TEST_E2E").as_deref() != Ok("1") {
+            eprintln!("跳过：需 LSCREEN_TEST_E2E=1");
+            return;
+        }
+        let spec = std::env::var("LSCREEN_TEST_SCROLL_REGION")
+            .expect("需要 LSCREEN_TEST_SCROLL_REGION=x,y,w,h（物理像素）");
+        let v: Vec<i32> = spec.split(',').map(|s| s.trim().parse().unwrap()).collect();
+        assert_eq!(v.len(), 4, "region 格式 X,Y,W,H");
+        let (x, y) = (v[0], v[1]);
+        let (w, h) = (v[2] as u32, v[3] as u32);
+
+        lscreen_capture::warp_pointer(x + w as i32 / 2, y + h as i32 / 2).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        // 先向上滚 3 格脱离页底（在页底向下滚没有位移可观测）
+        lscreen_capture::scroll_wheel(3).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let f1 = lscreen_capture::capture_region(x, y, w, h).unwrap();
+        lscreen_capture::scroll_wheel(-1).unwrap();
+        // 与 run_scroll 的 wait_stable 同策略：300ms 后每 80ms 轮询至静止；
+        // 预算 1.5s——页面有持续动画（流式输出/视频）时不能死等
+        let f2 = settle_frame(x, y, w, h);
+
+        let samples = f1.rgba.len() / 4;
+        let d = sampled_diff(&f1, &f2);
+        println!(
+            "f1↔f2 采样差异 {d}（{:.3}%，样本 {samples}）",
+            d as f64 * 100.0 / samples as f64
+        );
+        for frac in [0.25, 0.5, 0.75] {
+            let row = (h as f64 * frac) as usize;
+            let (hit, sad) = best_row(&f1, &f2, row);
+            println!(
+                "f1 行{row:4} → f2 行{hit:4}（SAD/px={sad}）位移 {}px",
+                hit as i64 - row as i64
+            );
+        }
+        let (hit, sad) = best_row(&f1, &f2, f1.height as usize - 1);
+        println!(
+            "锚行（f1 末行{anchor}）→ f2 行{hit:4}（SAD/px={sad}）",
+            anchor = f1.height as usize - 1
+        );
+
+        let mut st =
+            lscreen_record::scroll::ScrollStitcher::new(&f1.rgba, f1.width, f1.height).unwrap();
+        let outcome = st.push(&f2.rgba, f2.width, f2.height).unwrap();
+        println!("stitcher: {outcome:?} height={}", st.height());
+
+        // ---- 阶段 1b：连续 3 步 1 格滚动拼接（验证匹配稳定性/累积高度）----
+        let h_step = st.height();
+        for s in 1..=3 {
+            lscreen_capture::scroll_wheel(-1).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let fr = settle_frame(x, y, w, h);
+            let o = st.push(&fr.rgba, fr.width, fr.height).unwrap();
+            println!("连续步 {s}: {o:?} height={}", st.height());
+        }
+        println!(
+            "连续 3 步净增 {}px（1 格实测位移 ~168px 时应 ≈504）",
+            st.height() - h_step
+        );
+
+        // ---- 阶段二：页底伪影（用户真机失败场景：视图在页底继续向下滚）----
+        // 连续 -9 格直到两次相邻稳定帧无位移（真正钉在页底）→ 等 1.5s 让
+        // 悬浮滚动条完全渐隐 → 采基准帧 → 页底继续向下滚 2 格（无真实位
+        // 移，只剩回弹/滚动条伪影）→ wait_stable 同款采帧 → 量化伪影幅度，
+        // 并看拼接器是否被伪影骗成 Mismatch、1s 后的帧是否恢复 NoChange。
+        let mut last = lscreen_capture::capture_region(x, y, w, h).unwrap();
+        for _ in 0..4 {
+            lscreen_capture::scroll_wheel(-9).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            let cur = lscreen_capture::capture_region(x, y, w, h).unwrap();
+            let moved = sampled_diff(&last, &cur) * 100 < (cur.rgba.len() / 4) as usize;
+            println!(
+                "页底逼近: 与上帧差异 {:.3}%",
+                sampled_diff(&last, &cur) as f64 * 100.0 / samples as f64
+            );
+            if !moved {
+                break;
+            }
+            last = cur;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let g1 = lscreen_capture::capture_region(x, y, w, h).unwrap();
+        lscreen_capture::scroll_wheel(-2).unwrap();
+        let g2 = settle_frame(x, y, w, h);
+        let mut st2 =
+            lscreen_record::scroll::ScrollStitcher::new(&g1.rgba, g1.width, g1.height).unwrap();
+        println!(
+            "页底: g1↔g2 采样差异 {}（{:.3}%）stitcher(g1→g2)={:?}",
+            sampled_diff(&g1, &g2),
+            sampled_diff(&g1, &g2) as f64 * 100.0 / samples as f64,
+            st2.push(&g2.rgba, g2.width, g2.height).unwrap()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        let g3 = lscreen_capture::capture_region(x, y, w, h).unwrap();
+        println!(
+            "页底: 1s后 g1↔g3 采样差异 {}（{:.3}%）stitcher(g1→g3)={:?}",
+            sampled_diff(&g1, &g3),
+            sampled_diff(&g1, &g3) as f64 * 100.0 / samples as f64,
+            st2.push(&g3.rgba, g3.width, g3.height).unwrap()
+        );
+        crate::export::save_png(
+            &g1.rgba,
+            g1.width,
+            g1.height,
+            std::path::Path::new("/tmp/scroll-probe-bottom-1.png"),
+        )
+        .unwrap();
+        crate::export::save_png(
+            &g2.rgba,
+            g2.width,
+            g2.height,
+            std::path::Path::new("/tmp/scroll-probe-bottom-2.png"),
+        )
+        .unwrap();
+        println!("页底两帧已存 /tmp/scroll-probe-bottom-1.png、-2.png");
+        crate::export::save_png(
+            &f1.rgba,
+            f1.width,
+            f1.height,
+            std::path::Path::new("/tmp/scroll-probe-1.png"),
+        )
+        .unwrap();
+        crate::export::save_png(
+            &f2.rgba,
+            f2.width,
+            f2.height,
+            std::path::Path::new("/tmp/scroll-probe-2.png"),
+        )
+        .unwrap();
+        println!("两帧已存 /tmp/scroll-probe-1.png、/tmp/scroll-probe-2.png");
+    }
+
+    fn sampled_diff(a: &lscreen_capture::Screenshot, b: &lscreen_capture::Screenshot) -> usize {
+        let n = a.rgba.len().min(b.rgba.len()) / 4;
+        (0..n)
+            .step_by(8)
+            .filter(|&i| a.rgba[i * 4..i * 4 + 3] != b.rgba[i * 4..i * 4 + 3])
+            .count()
+    }
+
+    /// wait_stable 同款采帧：300ms 后每 80ms 轮询至相邻帧几乎无差异。
+    /// 预算 1.5s——页面有持续动画（流式输出/视频）时到点返回当前帧，
+    /// 不死等（与产品 wait_stable 的预算语义一致）
+    fn settle_frame(x: i32, y: i32, w: u32, h: u32) -> lscreen_capture::Screenshot {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let mut prev = lscreen_capture::capture_region(x, y, w, h).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            let cur = lscreen_capture::capture_region(x, y, w, h).unwrap();
+            let settled = sampled_diff(&prev, &cur) * 2000 < (prev.rgba.len() / 4) as usize;
+            if settled || std::time::Instant::now() >= deadline {
+                return cur;
+            }
+            prev = cur;
+        }
+    }
+
+    /// 行签名（与拼接器同参：4px 列跨步亮度），在 f2 全帧找与 f1 第 row 行
+    /// SAD/px 最小的行——位移与「匹配质量」一次看清
+    fn best_row(
+        f1: &lscreen_capture::Screenshot,
+        f2: &lscreen_capture::Screenshot,
+        row: usize,
+    ) -> (usize, u32) {
+        let sig = |f: &lscreen_capture::Screenshot, r: usize| -> Vec<u8> {
+            let w = f.width as usize;
+            (0..w)
+                .step_by(4)
+                .map(|xx| {
+                    let px = &f.rgba[(r * w + xx) * 4..(r * w + xx) * 4 + 3];
+                    ((px[0] as u32 * 3 + px[1] as u32 * 6 + px[2] as u32) / 10) as u8
+                })
+                .collect()
+        };
+        let a = sig(f1, row);
+        let mut best = (0usize, u32::MAX);
+        for r in 0..f2.height as usize {
+            let b = sig(f2, r);
+            let sad: u32 = a
+                .iter()
+                .zip(&b)
+                .map(|(p, q)| (*p as i32 - *q as i32).unsigned_abs())
+                .sum();
+            let per = sad / a.len().max(1) as u32;
+            if per < best.1 {
+                best = (r, per);
+            }
+        }
+        best
     }
 }

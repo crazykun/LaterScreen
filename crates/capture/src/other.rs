@@ -78,6 +78,63 @@ mod mac {
     #[link(name = "CoreFoundation", kind = "framework")]
     extern "C" {
         pub fn CFRelease(cf: *mut core::ffi::c_void);
+        pub fn CFStringCreateWithCString(
+            alloc: *mut core::ffi::c_void,
+            c_str: *const i8,
+            encoding: u32,
+        ) -> *mut core::ffi::c_void;
+        pub fn CFPreferencesCopyAppValue(
+            key: *mut core::ffi::c_void,
+            app_id: *mut core::ffi::c_void,
+        ) -> *mut core::ffi::c_void;
+        pub fn CFGetTypeID(cf: *mut core::ffi::c_void) -> usize;
+        pub fn CFBooleanGetTypeID() -> usize;
+        pub fn CFBooleanGetValue(boolean: *mut core::ffi::c_void) -> bool;
+    }
+
+    /// kCFStringEncodingUTF8
+    const CF_UTF8: u32 = 0x0800_0100;
+
+    /// 「自然滚动」是否开启（进程内缓存）。开启时会话层注入的滚轮增量
+    /// 会被系统再翻转一次——scroll_wheel 的负增量本意为「向下」，自然
+    /// 滚动下实际向**上**滚（真机实测：页面滚向顶部 → 拼接器全程
+    /// NoChange → 滚动截图必回退普通截图）。未设置时按 macOS 默认
+    /// （自然滚动开）处理
+    pub fn natural_scrolling_on() -> bool {
+        use std::sync::OnceLock;
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| unsafe {
+            let key = CFStringCreateWithCString(
+                std::ptr::null_mut(),
+                c"com.apple.swipescrolldirection".as_ptr(),
+                CF_UTF8,
+            );
+            let domain = CFStringCreateWithCString(
+                std::ptr::null_mut(),
+                c"NSGlobalDomain".as_ptr(),
+                CF_UTF8,
+            );
+            let v = if key.is_null() || domain.is_null() {
+                std::ptr::null_mut()
+            } else {
+                CFPreferencesCopyAppValue(key, domain)
+            };
+            let on = if !v.is_null() && CFGetTypeID(v) == CFBooleanGetTypeID() {
+                CFBooleanGetValue(v)
+            } else {
+                true // 读取失败/未设置 = 默认自然滚动开
+            };
+            if !v.is_null() {
+                CFRelease(v);
+            }
+            if !key.is_null() {
+                CFRelease(key);
+            }
+            if !domain.is_null() {
+                CFRelease(domain);
+            }
+            on
+        })
     }
 
     // CoreGraphics：滚轮合成 / 指针控制 / 指针查询（系统框架直连，零新依赖）
@@ -101,8 +158,6 @@ mod mac {
 
     /// kCGEventSourceStateHIDSystemState（合成滚轮事件源的标准状态）
     pub const SOURCE_HID: u32 = 1;
-    /// kCGScrollEventUnitLine（行单位，一格滚轮 ≈ 3 行，对齐 X11 notch 语义）
-    pub const SCROLL_UNIT_LINE: u32 = 1;
     /// kCGSessionEventTap：注入会话层，方向不被「自然滚动」系统设置翻转
     pub const SESSION_TAP: u32 = 1;
 
@@ -402,22 +457,37 @@ pub fn scroll_wheel(clicks: i32) -> Result<()> {
     Ok(())
 }
 
-/// mac：CGEvent 合成滚轮。行单位（1 格 = 3 行）对齐 X11 button4/5 的 notch
-/// 语义；clicks > 0 向上、< 0 向下。经会话层注入，方向不受「自然滚动」
-/// 设置影响。指针需已在目标窗口上（滚动截图流程先 warp 到选区中心）。
+/// mac：CGEvent 合成滚轮（**像素单位**）。指针需已在目标窗口上（滚动
+/// 截图流程先 warp 到选区中心）。
+///
+/// 真机点验修正（2026-09-19）×3：
+/// 1. 曾误写成每事件带 `clicks×3` 全量行增量再发 N 次（一步实际滚
+///    N²×3 行，过度滚动）
+/// 2. 「自然滚动」开启（macOS 默认）时会话层注入的增量被系统再翻转
+///    （负增量实际向**上**滚）——按 com.apple.swipescrolldirection 偏好
+///    预翻转符号
+/// 3. line 单位不可用：浏览器对「行」的解释在 Retina 下可达 40+ 逻辑
+///    像素/行，每步（2 notch）位移 240-300 物理px，远超拼接器尾部块
+///    匹配窗口（≤96px），内容整窗滚飞 → 拼接全程 NoChange。改像素
+///    单位精确控位：每 notch 15 逻辑像素（≈30 物理），clicks=2 时每步
+///    60 物理px——对齐 X11 notch 的位移量级，尾窗留 36px 重叠可匹配
 #[cfg(target_os = "macos")]
 pub fn scroll_wheel(clicks: i32) -> Result<()> {
-    /// 一格滚轮的行数（经典滚轮 notch 约定）
-    const LINES_PER_NOTCH: i32 = 3;
+    /// 一格滚轮的位移（逻辑像素；kCGScrollEventUnitPixel 单位）
+    const PX_PER_NOTCH: i32 = 15;
     let source = unsafe { mac::CGEventSourceCreate(mac::SOURCE_HID) };
     if source.is_null() {
         return Err(CaptureError("CGEventSourceCreate 失败".into()));
     }
-    let delta = clicks * LINES_PER_NOTCH;
+    let mut sign: i32 = clicks.signum();
+    if mac::natural_scrolling_on() {
+        sign = -sign;
+    }
+    let notch = sign * PX_PER_NOTCH;
     let mut ok = true;
     for _ in 0..clicks.unsigned_abs() {
-        let ev =
-            unsafe { mac::CGEventCreateScrollWheelEvent(source, mac::SCROLL_UNIT_LINE, 1, delta) };
+        // kCGScrollEventUnitPixel = 0
+        let ev = unsafe { mac::CGEventCreateScrollWheelEvent(source, 0, 1, notch) };
         if ev.is_null() {
             ok = false;
             break;
@@ -482,6 +552,167 @@ pub fn warp_pointer(_x: i32, _y: i32) -> Result<()> {
     Err(CaptureError("当前平台暂不支持指针移动".into()))
 }
 
+// --------------------------------------------- 状态窗摆放（滚动截图）
+
+/// 状态窗不与选区重叠的纯几何摆放：在屏幕逻辑包围盒内按 右→左→下→上
+/// 依次找与选区间隔 10 逻辑px 的空位；选区≈全屏四面都放不下时钳到屏幕
+/// 右上角——滚轮 warp 目标是选区中心、拼接尾块在选区底部，重叠顶部
+/// 对两者影响都最小。返回窗口左上角（全局逻辑坐标，左上原点）。
+fn place_outside(
+    (rx, ry, rw, rh): (f64, f64, f64, f64),
+    (sx, sy, sw, sh): (f64, f64, f64, f64),
+    (win_w, win_h): (f64, f64),
+) -> (f64, f64) {
+    const GAP: f64 = 10.0;
+    let clamp_x = |px: f64| px.clamp(sx, (sx + sw - win_w).max(sx));
+    let clamp_y = |py: f64| py.clamp(sy, (sy + sh - win_h).max(sy));
+    let px = rx + rw + GAP; // 右
+    if px + win_w <= sx + sw {
+        return (px, clamp_y(ry));
+    }
+    let px = rx - GAP - win_w; // 左
+    if px >= sx {
+        return (px, clamp_y(ry));
+    }
+    let py = ry + rh + GAP; // 下
+    if py + win_h <= sy + sh {
+        return (clamp_x(rx), py);
+    }
+    let py = ry - GAP - win_h; // 上
+    if py >= sy {
+        return (clamp_x(rx), py);
+    }
+    (clamp_x(sx + sw - win_w), sy)
+}
+
+/// mac：滚动截图状态窗的建议位置。winit 在 macOS 对未指定位置的窗口
+/// 一律 `center()`（winit 0.30 window_delegate.rs），置顶状态窗恰好落
+/// 在屏幕中心——交互框选的区域中心常在同一点，拼接线程把指针 warp 到
+/// 选区中心后，合成滚轮事件按「指针下最顶层窗口」全部投进状态窗
+/// （egui 不滚动也不透传），内容不动 → 拼接全程 NoChange → 退化为
+/// 普通截图（真机点验 2026-09-19）。返回选区外的全局逻辑坐标
+/// （egui with_position 语义）；找不到选区所在屏返回 None（调用方
+/// 回退默认位置）。
+#[cfg(target_os = "macos")]
+pub fn status_window_origin(
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    win_w: f32,
+    win_h: f32,
+) -> Option<(f32, f32)> {
+    let monitors = Monitor::all().ok()?;
+    let screens = mac::screens(&monitors);
+    let s = screens.get(mac::idx_at_physical(&screens, x + w / 2, y + h / 2)?)?;
+    let k = s.scale as f64;
+    let (px, py) = place_outside(
+        (x as f64 / k, y as f64 / k, w as f64 / k, h as f64 / k),
+        (s.x, s.y, s.w, s.h),
+        (win_w as f64, win_h as f64),
+    );
+    Some((px as f32, py as f32))
+}
+
+/// Win：新窗口走系统默认层叠位置（不居中），维持已验证行为不做摆放
+#[cfg(windows)]
+pub fn status_window_origin(
+    _x: i32,
+    _y: i32,
+    _w: i32,
+    _h: i32,
+    _win_w: f32,
+    _win_h: f32,
+) -> Option<(f32, f32)> {
+    None
+}
+
+/// 其余平台（理论上仅剩非 Win/mac 的移植目标）：无此需求
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn status_window_origin(
+    _x: i32,
+    _y: i32,
+    _w: i32,
+    _h: i32,
+    _win_w: f32,
+    _win_h: f32,
+) -> Option<(f32, f32)> {
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::place_outside;
+
+    const SCREEN: (f64, f64, f64, f64) = (0.0, 0.0, 1440.0, 900.0);
+    const WIN: (f64, f64) = (320.0, 150.0);
+
+    fn overlap(
+        (ax, ay, aw, ah): (f64, f64, f64, f64),
+        (bx, by, bw, bh): (f64, f64, f64, f64),
+    ) -> bool {
+        ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah
+    }
+
+    /// 修复目标场景：选区中心=屏幕中心（原 bug 中必被居中状态窗盖住）
+    #[test]
+    fn centered_region_goes_right_clear_of_region() {
+        let region = (520.0, 250.0, 400.0, 400.0);
+        let got = place_outside(region, SCREEN, WIN);
+        assert_eq!(got, (930.0, 250.0));
+        assert!(!overlap((got.0, got.1, WIN.0, WIN.1), region));
+    }
+
+    #[test]
+    fn region_flush_right_goes_left() {
+        let region = (1100.0, 200.0, 340.0, 300.0); // 右缘恰为屏宽 1440
+        let got = place_outside(region, SCREEN, WIN);
+        assert!((got.0 - (1100.0 - 10.0 - WIN.0)).abs() < 1e-9);
+        assert!(!overlap((got.0, got.1, WIN.0, WIN.1), region));
+    }
+
+    #[test]
+    fn full_width_region_goes_below() {
+        let region = (0.0, 0.0, 1440.0, 600.0);
+        let got = place_outside(region, SCREEN, WIN);
+        assert!((got.1 - (600.0 + 10.0)).abs() < 1e-9);
+        assert!(!overlap((got.0, got.1, WIN.0, WIN.1), region));
+    }
+
+    #[test]
+    fn near_fullscreen_region_goes_above() {
+        let region = (0.0, 170.0, 1440.0, 720.0); // 上下各剩不足窗高+GAP
+        let got = place_outside(region, SCREEN, WIN);
+        assert!(!overlap((got.0, got.1, WIN.0, WIN.1), region));
+    }
+
+    /// 选区≈全屏：兜底右上角，但绝不能盖住选区中心（warp 目标）
+    #[test]
+    fn fullscreen_region_falls_back_top_right_clear_of_center() {
+        let region = (0.0, 0.0, 1440.0, 900.0);
+        let got = place_outside(region, SCREEN, WIN);
+        assert!((got.0 - (1440.0 - WIN.0)).abs() < 1e-9 && got.1 == 0.0);
+        let center = (720.0, 450.0);
+        assert!(
+            !(got.0 <= center.0
+                && center.0 <= got.0 + WIN.0
+                && got.1 <= center.1
+                && center.1 <= got.1 + WIN.1)
+        );
+    }
+
+    /// 窗口尺寸超过屏幕时也不 panic（clamp 上下界倒置会 panic）
+    #[test]
+    fn tiny_screen_does_not_panic() {
+        let got = place_outside(
+            (0.0, 0.0, 100.0, 100.0),
+            (0.0, 0.0, 200.0, 120.0),
+            (320.0, 150.0),
+        );
+        assert!(got.0.is_finite() && got.1.is_finite());
+    }
+}
+
 pub fn set_window_class(_window_id: u32, _class: &str) -> Result<()> {
     Err(CaptureError("当前平台无 X11 WM_CLASS 语义".into()))
 }
@@ -525,6 +756,11 @@ mod mac_border {
     const INITIAL: u32 = 0xE5_39_35;
     /// 边条厚度（物理像素；retina 下 1 逻辑点 = 2 物理 px，线条仍清晰）
     const T: i32 = 2;
+    /// 边条与选区之间的空隙（物理像素）。capture_region 的逻辑坐标取整会把
+    /// 采帧矩形外扩 ≤1 逻辑px（=2 物理 px）：贴着选区的边条会被采进每一帧，
+    /// 滚动拼接时长图上每隔一步就有一条红线（真机 2026-09-19）。空隙须
+    /// 大于该取整误差
+    const G: i32 = 6;
     /// NSFloatingWindowLevel / kCGFloatingWindowLevel：悬浮在普通窗口之上
     const FLOATING: NSWindowLevel = 3;
 
@@ -622,22 +858,24 @@ mod mac_border {
 
         let wi = w.min(i32::MAX as u32) as i32;
         let hi = h.min(i32::MAX as u32) as i32;
-        // 上/下/左/右四条边条的理想矩形（物理像素，选区外扩 T px）
+        // 上/下/左/右四条边条的理想矩形（物理像素）。与选区间隔 G、条厚 T：
+        // 上条 [y−G−T, y−G)，下条 [y+h+G, y+h+G+T)，左右条纵向补齐两角
+        let o = T + G;
         let strips = [
             (
-                x.saturating_sub(T),
-                y.saturating_sub(T),
-                wi.saturating_add(2 * T),
+                x.saturating_sub(o),
+                y.saturating_sub(o),
+                wi.saturating_add(2 * o),
                 T,
             ),
             (
-                x.saturating_sub(T),
-                y.saturating_add(hi),
-                wi.saturating_add(2 * T),
+                x.saturating_sub(o),
+                y.saturating_add(hi + G),
+                wi.saturating_add(2 * o),
                 T,
             ),
-            (x.saturating_sub(T), y, T, hi),
-            (x.saturating_add(wi), y, T, hi),
+            (x.saturating_sub(o), y.saturating_sub(G), T, hi + 2 * G),
+            (x.saturating_add(wi + G), y.saturating_sub(G), T, hi + 2 * G),
         ];
 
         let mut wins = Vec::new();

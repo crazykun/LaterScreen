@@ -115,8 +115,10 @@ impl eframe::App for RecordApp {
             return;
         }
 
-        // armed：待用户确认开始（仅录屏模式；滚动截图一进就滚）
-        let armed = !self.scroll_mode && !status.started;
+        // armed：待用户确认开始（录屏与滚动截图都走 armed——滚动场景用户
+        // 需要时间把目标窗口摆好/定位到内容顶部，框选完立即自动滚指针
+        // 体验突兀，真机反馈改进；Esc/关窗 = 取消）
+        let armed = !status.started;
         let t = ui.input(|i| i.time);
 
         egui::CentralPanel::default()
@@ -139,7 +141,15 @@ impl eframe::App for RecordApp {
                     1.0
                 };
                 let (dot_rgb, label, counter) = if armed {
-                    (BLUE, "待开始", format!("最长 {:.0} 秒", self.max_duration))
+                    (
+                        BLUE,
+                        "待开始",
+                        if self.scroll_mode {
+                            format!("最多 {:.0} 步", self.max_duration)
+                        } else {
+                            format!("最长 {:.0} 秒", self.max_duration)
+                        },
+                    )
                 } else if self.scroll_mode {
                     (
                         BLUE,
@@ -247,7 +257,17 @@ impl eframe::App for RecordApp {
                 let btn_resp = ui.interact(btn, egui::Id::new("rec-btn"), egui::Sense::click());
                 let p3 = ui.painter_at(btn);
                 let (base, hi, label) = if armed {
-                    (BLUE, BLUE_HOVER, "开始录制  Enter")
+                    (
+                        BLUE,
+                        BLUE_HOVER,
+                        if self.scroll_mode {
+                            "开始滚动  Enter"
+                        } else {
+                            "开始录制  Enter"
+                        },
+                    )
+                } else if self.scroll_mode {
+                    (RED, RED_HOVER, "停止  Esc")
                 } else {
                     (RED, RED_HOVER, "停止录制  Esc")
                 };
@@ -279,7 +299,12 @@ impl eframe::App for RecordApp {
                 // ---- 提示 ----
                 ui.add_space(9.0);
                 let hint = if armed {
-                    "Enter 开始 · Esc 取消 · 齿轮改目录与格式"
+                    if self.scroll_mode {
+                        // 惯性滑动中开拍会污染首帧（真机教训）：提醒停稳
+                        "先滚到目标位置、等滚动停稳再开始 · Enter 开始 · Esc 取消"
+                    } else {
+                        "Enter 开始 · Esc 取消 · 齿轮改目录与格式"
+                    }
                 } else if self.scroll_mode {
                     "Esc 结束；保存到 Pictures 目录。请保持窗口不再操作"
                 } else {

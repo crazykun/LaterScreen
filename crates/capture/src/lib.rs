@@ -124,6 +124,20 @@ pub fn warp_pointer(x: i32, y: i32) -> Result<()> {
     platform::warp_pointer(x, y)
 }
 
+/// 滚动截图状态窗的建议摆放位置（窗口左上角，全局逻辑坐标、左上原点，
+/// egui with_position 语义）：选区所在屏内、不与选区重叠。平台不参与
+/// 摆放（无此需求/保持默认）返回 None，调用方沿用默认位置。
+pub fn status_window_origin(
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    win_w: f32,
+    win_h: f32,
+) -> Option<(f32, f32)> {
+    platform::status_window_origin(x, y, w, h, win_w, win_h)
+}
+
 /// 设置 X11 窗口的 WM_CLASS（instance 与 class 均为 `class`）。
 /// 任务栏/启动器据此把窗口关联到 .desktop 文件；仅 Linux X11 有意义，
 /// 其余平台返回 Err。窗口创建后即可调用。
