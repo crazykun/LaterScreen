@@ -110,7 +110,7 @@ crates/
 
 | 版本 | 内容 | 状态 |
 |---|---|---|
-| v0.11 | mac 系统声内录（ScreenCaptureKit，M14 遗留）：已落地，盲写 + 交叉编译验证，真机点验待办；M16 评估完成——维持 openh264 不切换（见 M16 节），本版无编码器改动 | 开发中 |
+| v0.11 | mac 系统声内录（ScreenCaptureKit，M14 遗留）：已落地，✅ 2026-09-19 真机点验（修盲写缺陷 2 处，见 M14 节）；M16 评估完成——维持 openh264 不切换（见 M16 节），本版无编码器改动 | 开发中 |
 | v1.0 | M17 真机验证台账清零 + README/文档全量校对；此后进入维护期（缺陷修复为主） | 规划中 |
 
 ### M1 截图 + 标注 ✅（核心价值）
@@ -729,12 +729,20 @@ record/Cargo.toml 未按平台门控，Win/mac 同样编译 vendored 源，
       MF_E_INVALIDMEDIATYPE）③编码线程 MFStartup 前缺 CoInitializeEx；
       另修 3 处 CI（Linux）不可见的 windows-only clippy 违规。实测认知
       修正：loopback 无渲染流时**完全不产包**（非持续静音包），静默桌面
-      录制走零数据对账告警。mac 麦克风采集与 AAC priming（~44ms 解码
-      延迟，无 edit list 修剪）仍待真机。
+      录制走零数据对账告警。mac 麦克风真机点验 ✅ 2026-09-19（macOS
+      15.3.1，e2e A/V 偏差 0.063s；AAC priming ~44ms 无 edit list 修剪，
+      在 0.5s 偏差窗内无感）：点验揪出盲写缺陷 2 处——①Ready 就绪等待
+      5s 对首跑 TCC 麦克风弹窗太短（CoreAudio 调用同步阻塞到用户应答，
+      AudioDeviceStart 挂起 ~60s 后失败），就绪等待改
+      `LSCREEN_AUDIO_READY_TIMEOUT_MS` 可调（1s–300s 钳位）+ 超时文案
+      提示查看权限弹窗；②`kAudioConverterEncodeBitRate` fourCC 误写
+      'brte'（不存在的属性 ID），SetProperty 报 'prop' 编码线程启动即
+      死、音轨整条丢失——正确值 'brat'（objc2-audio-toolbox 未生成该
+      常量，本地常量保留 + 注释防再错）。
       依赖 objc2-core-audio/audio-toolbox/types 0.3（默认特性），体积走
       release.yml ≤20MB 逐产物门槛兜底。
 - [x] **录屏音频·mac 系统声（✅ v0.11 补齐：ScreenCaptureKit 盲写 +
-      交叉编译验证，真机点验待办）**：`--audio system/both` 在 mac 放开
+      交叉编译验证；✅ 2026-09-19 真机点验，见下方真机点验段）**：`--audio system/both` 在 mac 放开
       （CLI 硬拦/配置降级/面板只给麦克风的逻辑全部移除，三平台同表）。
       实现：SCStream 音频输出——SCStreamConfiguration **没有「关视频」
       开关**（视频是流的默认产物），把视频压到 2×2 让合成开销可忽略、
@@ -766,6 +774,20 @@ record/Cargo.toml 未按平台门控，Win/mac 同样编译 vendored 源，
       ②win.rs System 源就绪失败标签误报「麦克风」（i==0 判断写反语义）；
       ③Info.plist `LSMinimumSystemVersion` 10.13 → 12.3 对齐 SCK 强链接
       下限
+      真机点验 ✅ 2026-09-19（macOS 15.3.1，e2e A/V 偏差 0.241s，播放中
+      SCK 满流量 960 帧/包 × 50 包/s = 48kHz）：实测确认 2×2 视频配置的
+      音频流正常产包、**静默期间也持续产包**（与 Win loopback「无渲染流
+      不产包」行为不同，静默桌面 mac 也能录出全静音音轨）；点验揪出盲写
+      缺陷 2 处——④`CMSampleBufferGetAudioBufferListWithRetained
+      BlockBuffer` 的 `bufferListSize` 必须精确等于首查返回的 needed
+      （传更大的容量反而报 -12737 ArrayTooSmall，CoreMedia 实现只认
+      精确值，与头文件语义相悖），原先传定长 512 字节导致每个包提取
+      失败、音轨整条丢失；⑤`block_buffer_out` 必须给真指针并保留到
+      复制完成（列表里的 mData 指向返回的 CMBlockBuffer 内部，传 null
+      则数据指针生命周期无契约保证）——提取改为持有 Retained 的
+      CMBlockBuffer 直到字节复制完成再释放。TCC 前置：cargo 测试进程
+      归属 Terminal，需系统设置开启「屏幕录制」并重启 Terminal（详见
+      VERIFY.md mac 节）
 - [x] **点击高亮**（✅ 2026-09-16 第一批）：录制时鼠标按下处叠加扩散
       圆环（半径 0→28px / 300ms 淡出，sqrt 缓动扩散 + 不透明度二次衰减），
       帧合成在采帧后纯 CPU 叠加（app 层改帧，编码管线无感知），GIF/MP4
@@ -881,12 +903,22 @@ M12 先例：env 门控的 ignored 测试（`LSCREEN_TEST_WIN`），能脚本化
       旋转/像素网格（M12）；安装器 + 卸载（含运行中卸载失败提示，
       review 2026-09-14）；历史面板 125%/150% 缩放定位（v0.8.1）；
       MP4 录屏真机出片 + ffprobe 回读（M4）；滚动截图 SendInput（v0.8.0）
-- [ ] **macOS**：托盘 Accessory（不占 Dock）+ 左键菜单（v0.6.1）；
-      Vision OCR（M3）；CG 逻辑↔物理坐标换算 + Retina 窗口矩形
-      （M9 / v0.8.0）；贴图全套（M12）；滚动截图 CGEvent 滚轮合成
-      （v0.8.0）；MP4 录屏真机出片（M4）；录屏音频 e2e 麦克风/系统声
-      （M14 + v0.11 SCK 盲写路径，`audio_e2e_system` 需播放音频，见
-      VERIFY.md mac 节）
+- [ ] **macOS 脚本项（✅ 2026-09-19，MacBook Pro / macOS 15.3.1 / Retina 2880×1800
+      scale=2：窗口枚举 24 个顶层窗口 Z 序正确、最前窗口命中、Vision OCR
+      中文+英文+数字全对、录屏音频麦克风（A/V 偏差 0.063s）与系统声 SCK
+      （A/V 偏差 0.241s）双 e2e 全过。真机点验揪出并修复盲写缺陷 3 处
+      ——①AAC 码率属性 fourCC 误写 'brte'→'brat'（SetProperty 报 'prop'，
+      编码线程启动即死、音轨整条丢失）②SCK 提取 `bufferListSize` 必须
+      精确等于首查 needed（传更大反而 -12737 ArrayTooSmall）且
+      block_buffer_out 须真指针持有到复制完成（数据指针指向 CMBlockBuffer
+      内部）③首跑 TCC 权限弹窗阻塞 CoreAudio 5s 超时误报，就绪等待改
+      `LSCREEN_AUDIO_READY_TIMEOUT_MS` 可调 + 文案提示权限。前置：测试
+      进程 TCC 归属 Terminal，麦克风走弹窗授权、屏幕录制需系统设置开启
+      并重启 Terminal，见 VERIFY.md mac 节；以下人工项待验）**：
+      托盘 Accessory（不占 Dock）+ 左键菜单（v0.6.1）；CG 逻辑↔物理
+      坐标换算 + Retina 窗口矩形（M9 / v0.8.0，截屏侧已随脚本项验证，
+      覆盖层默认选区贴合度待人工）；贴图全套（M12）；滚动截图 CGEvent
+      滚轮合成（v0.8.0）；MP4 录屏真机出片（M4）
 - [ ] **Wayland（GNOME 或 KDE 任一真会话）**：portal 交互式截图进
       预览标注（M5）；GlobalShortcuts 热键绑定与触发（M5，注意 KDE
       与 GNOME 的绑定 UX 不同）；portal 整屏快照的多屏坐标映射（M5）

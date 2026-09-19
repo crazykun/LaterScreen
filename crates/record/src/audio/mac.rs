@@ -16,9 +16,12 @@
 //! AAC 编码器固有的 priming（~2112 样本 ≈ 44ms）会带来等量解码延迟，
 //! mp4 侧无 edit list 修剪，A/V 偏差远低于人眼可感，记录在案。
 //!
-//! **盲写说明**：本文件按 Apple 文档盲写，以交叉编译 + macOS CI 为验证
-//! 基线，真机行为待 macOS 实机点验（PLAN M14 / M17）。ScreenCaptureKit
-//! 为强链接框架，产物最低系统要求随本功能升至 macOS 12.3（系统声 13+）。
+//! **真机点验**：✅ 2026-09-19（macOS 15.3.1）麦克风（CoreAudio+AAC，
+//! A/V 0.063s）与系统声（SCK，A/V 0.241s）e2e 全过；点验修正的盲写
+//! 缺陷见 `K_AUDIO_CONVERTER_ENCODE_BITRATE` 与 `sck_extract` 注释。
+//! ScreenCaptureKit 为强链接框架，产物最低系统要求随本功能升至
+//! macOS 12.3（系统声 13+）；cargo 测试进程的 TCC 归属终端 App，
+//! 首跑授权步骤见 docs/VERIFY.md mac 节。
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -61,8 +64,25 @@ use super::{run_mixer, AacMeta, Core, ToMixer, ToStereo48, FIXED_META, RATE, SAM
 /// 一帧 AAC 对应的 PCM 大小（s16 立体声）
 const PCM_CHUNK: usize = SAMPLES_PER_FRAME as usize * 4;
 
-/// kAudioConverterEncodeBitrate = 'brte'（objc2-audio-toolbox 未生成此常量）
-const K_AUDIO_CONVERTER_ENCODE_BITRATE: u32 = 0x6272_7465;
+/// kAudioConverterEncodeBitRate = 'brat'（objc2-audio-toolbox 未生成此常量）。
+/// 真机点验修正：曾盲写成 'brte'——不存在的属性 ID，SetProperty 报
+/// 'prop'（PropertyNotSupported），编码线程启动即死、音轨整条丢失
+const K_AUDIO_CONVERTER_ENCODE_BITRATE: u32 = 0x6272_6174;
+
+/// 采集源就绪等待上限。默认 5s；**首次运行** macOS 会同步弹 TCC 权限框
+/// （麦克风/屏幕录制），用户应答前底层 CoreAudio/SCK 调用一直阻塞——
+/// 5s 内点不完就会以「音频服务无响应」误报。用
+/// `LSCREEN_AUDIO_READY_TIMEOUT_MS` 放宽（真机首跑/自动化场景，
+/// 1s–300s 钳位，非法值回落默认）
+fn ready_timeout() -> Duration {
+    const DEFAULT_MS: u64 = 5_000;
+    let ms = std::env::var("LSCREEN_AUDIO_READY_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MS)
+        .clamp(1_000, 300_000);
+    Duration::from_millis(ms)
+}
 
 /// 采集线程初始化结果（start() 等待全部就绪或失败，实现快速失败语义）
 enum Ready {
@@ -115,9 +135,10 @@ impl Pipeline {
         drop(ready_tx);
         drop(pcm_tx);
 
-        // 等全部采集源初始化完成（SCK 内容枚举百毫秒级；5s 兜底）
+        // 等全部采集源初始化完成（SCK 内容枚举百毫秒级；首次运行 TCC
+        // 权限框等待用户应答，可用环境变量放宽，见 ready_timeout）
         for &(_, what) in sources.iter() {
-            match ready_rx.recv_timeout(Duration::from_secs(5)) {
+            match ready_rx.recv_timeout(ready_timeout()) {
                 Ok(Ready::Ok) => {}
                 Ok(Ready::Fail(e)) => {
                     stop.store(true, Ordering::Relaxed);
@@ -125,7 +146,9 @@ impl Pipeline {
                 }
                 Err(_) => {
                     stop.store(true, Ordering::Relaxed);
-                    return Err(RecordError(format!("启动{what}采集超时（音频服务无响应）")));
+                    return Err(RecordError(format!(
+                        "启动{what}采集超时（音频服务无响应；若首次运行，请查看系统是否正在请求 麦克风/屏幕录制 权限）"
+                    )));
                 }
             }
         }
@@ -416,6 +439,12 @@ unsafe fn ab_bytes(b: &AudioBuffer) -> &[u8] {
 /// 采样率按配置恒为 48k（SCStreamConfiguration 契约：音频格式由
 /// sampleRate/channelCount 决定）；声道布局以实际 AudioBufferList 为准：
 /// 单缓冲多声道 = 交错，多缓冲单声道 = 非交错（手工交织）
+///
+/// 真机点验修正（2026-09-19）：两次实测认知——
+/// 1. `bufferListSize` 必须**精确等于**首查返回的 `needed`（实测定长 40
+///    字节的列表传 512 字节容量反而报 -12737 ArrayTooSmall，超大同样拒绝）
+/// 2. `block_buffer_out` 必须给真指针并保留到复制完成：列表里的 mData
+///    指向返回的 CMBlockBuffer 内部，不持有它数据指针随时可能失效
 unsafe fn sck_extract(sbuf: &CMSampleBuffer) -> Result<(Vec<f32>, usize), String> {
     // 变长结构 AudioBufferList：先探需要多少字节，再取进对齐的栈缓冲
     let mut needed: usize = 0;
@@ -438,25 +467,36 @@ unsafe fn sck_extract(sbuf: &CMSampleBuffer) -> Result<(Vec<f32>, usize), String
     }
     let mut storage = [0u64; MAX_LIST / 8];
     let list_ptr = storage.as_mut_ptr() as *mut AudioBufferList;
+    // 数据体生命周期挂在返回的 CMBlockBuffer 上：持有它直到复制完成
+    let mut bb: *mut objc2_core_media::CMBlockBuffer = std::ptr::null_mut();
     let st = sbuf.audio_buffer_list_with_retained_block_buffer(
         std::ptr::null_mut(),
         list_ptr,
-        storage.len() * 8,
+        needed,
         None,
         None,
         0,
-        std::ptr::null_mut(),
+        &mut bb,
     );
     if st != 0 {
         return Err(format!("提取音频缓冲失败: {st}"));
     }
+    // 持有返回的 CMBlockBuffer 直到解析完成（from_raw 接管 +1 引用，
+    // drop 时 release；null 时无持有）
+    let bb_guard = objc2::rc::Retained::from_raw(bb);
+    let r = sck_parse_list(&*list_ptr);
+    drop(bb_guard);
+    r
+}
+
+/// 解析 AudioBufferList 为交错 f32（数据已在栈上复制完成，无生命周期顾虑）
+unsafe fn sck_parse_list(list: &AudioBufferList) -> Result<(Vec<f32>, usize), String> {
     let f32s = |b: &[u8]| -> Vec<f32> {
         // 字节级读取：mData 不保证 f32 对齐（16 字节对齐需显式传标志）
         b.chunks_exact(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect::<Vec<f32>>()
     };
-    let list = &*list_ptr;
     let nbuf = list.mNumberBuffers.min(8) as usize;
     if nbuf == 0 {
         return Ok((Vec::new(), 0));
@@ -530,7 +570,7 @@ unsafe fn run_sck_capture(
     );
     SCShareableContent::getShareableContentWithCompletionHandler(&ct_block);
     let content = ct_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(ready_timeout())
         .map_err(|_| "枚举屏幕内容超时（屏幕录制权限未授予或系统忙）".to_string())??;
     // 音频与显示器无关（系统级混音），任取一块即可；空列表 = 权限被拒
     let display = content
@@ -580,7 +620,7 @@ unsafe fn run_sck_capture(
         let _ = st_tx.send(msg);
     });
     stream.startCaptureWithCompletionHandler(Some(&st_block));
-    match st_rx.recv_timeout(Duration::from_secs(5)) {
+    match st_rx.recv_timeout(ready_timeout()) {
         Ok(None) => {}
         Ok(Some(e)) => return Err(format!("系统声采集开启失败: {e}")),
         Err(_) => return Err("等待系统声采集开启超时".into()),

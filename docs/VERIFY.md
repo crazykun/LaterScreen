@@ -68,12 +68,31 @@ cargo test -p lscreen-record audio_e2e_system -- --ignored --nocapture
 
 ## macOS
 
+### 前置：TCC 权限（cargo 测试进程归属 Terminal）
+
+测试二进制无签名无 bundle，TCC 按责任进程归属 **Terminal**（或你跑
+cargo 的终端 App）：
+
+- **屏幕录制**：系统设置 → 隐私与安全性 → 屏幕录制 → 开启终端，然后
+  **重启终端**（不重启对新进程不生效）。未授权时窗口枚举只看得到
+  Menubar、SCK 系统声报「用户拒绝了…TCC」——这两项不是代码缺陷
+- **麦克风**：无需预授权。首次跑 `audio_e2e_mic` 时系统弹授权框，
+  CoreAudio 调用会**同步阻塞**到用户应答（实测 AudioDeviceStart 挂起
+  ~60s），默认 5s 就绪等待必然超时——首跑请加
+  `LSCREEN_AUDIO_READY_TIMEOUT_MS=120000`（1s–300s 钳位），点「允许」
+  后授权落在 Terminal 上，之后不用再加
+- 系统声测试期间必须有声音播放：`while true; do afplay
+  /System/Library/Sounds/Glass.aiff; sleep 0.3; done` 后台挂着即可
+  （mac 的 SCK 静默期也持续产包，与 Win loopback 不同，但保险起见
+  仍保持有声）
+
 ### 脚本项
 
 ```bash
 # 1. 窗口枚举 + 全屏截屏（含 Retina 逻辑↔物理换算，M9 / v0.8.0）
 #    预期：打印「截屏 WxH（scale=2.0 或 1.0）...」；Retina 屏 W/H 应为
-#    逻辑分辨率的两倍
+#    逻辑分辨率的两倍；窗口数应为真实桌面窗口数（仅 1 个 = 屏幕录制
+#    权限未生效，见上节前置）
 LSCREEN_TEST_E2E=1 \
   cargo test -p lscreen-capture --test windows_e2e -- --ignored --nocapture
 
@@ -82,15 +101,16 @@ LSCREEN_TEST_E2E=1 \
   cargo test -p lscreen-ocr --test system_e2e -- --ignored --nocapture
 
 # 3. 录屏音频·麦克风（M14 盲写路径真机点验：CoreAudio + AudioToolbox）
-#    首次运行系统弹麦克风权限（TCC），需允许终端/cargo
+#    首次运行系统弹麦克风权限（TCC），需允许终端/cargo（见上节前置）
 #    预期：A/V 偏差 <0.5s；KEEP=1 保留产物可听到录音
 LSCREEN_TEST_AUDIO=1 LSCREEN_TEST_AUDIO_KEEP=1 \
+  LSCREEN_AUDIO_READY_TIMEOUT_MS=120000 \
   cargo test -p lscreen-record audio_e2e_mic -- --ignored --nocapture
 
 # 4. 录屏音频·系统声（v0.11 盲写路径真机点验：ScreenCaptureKit，macOS 13+）
-#    权限走「屏幕录制」（与截图同一 TCC 权限，正常使用已授予）
-#    ⚠ 运行期间必须有声音在播放（如音乐）：静默桌面 SCK 可能整程零产包，
-#      双轨断言会失败（同 Win loopback 行为）
+#    权限走「屏幕录制」（与截图同一 TCC 权限，前置见上节）
+#    ⚠ 运行期间必须有声音在播放（如音乐）：保险起见保持有声（SCK 在
+#      mac 实测静默期也产包，但保持有声可同时验证非零数据）
 #    预期：A/V 偏差 <0.5s；KEEP=1 保留产物可听到刚才播放的内容
 LSCREEN_TEST_AUDIO=1 LSCREEN_TEST_AUDIO_KEEP=1 \
   cargo test -p lscreen-record audio_e2e_system -- --ignored --nocapture
