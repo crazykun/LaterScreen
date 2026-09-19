@@ -587,8 +587,17 @@ impl PinApp {
             acc += w;
             prefix[i] = acc;
         }
-        // id 显示条件：它及比它更高优先级的项都装得下
-        let show = |id: &str| prefix[groups.iter().position(|(x, _)| *x == id).unwrap()] <= budget;
+        // id 显示条件：它及比它更高优先级的项都装得下。
+        // 未注册的 id（如未配置上传命令时的 "upload"）恒 false——
+        // v0.10.0 曾在此对缺位 id unwrap panic（panic=abort 直接崩进程，
+        // 未配置 [upload] 的机器贴图必崩），杜绝再犯
+        let show = |id: &str| {
+            groups
+                .iter()
+                .position(|(x, _)| *x == id)
+                .map(|i| prefix[i] <= budget)
+                .unwrap_or(false)
+        };
         // 实际装入的总宽（定位居中用）
         let mut shown = 0.0;
         for p in &prefix {
