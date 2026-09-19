@@ -181,7 +181,17 @@ impl SettingsApp {
         let idx = self.recording.unwrap_or(0);
         if let Some((text, mods, key)) = captured {
             match crate::tray::parse_hotkey(&text) {
-                Ok(_) => {
+                Ok(hk) => {
+                    // mac 裸 F 键：注册能成功但系统默认吞掉媒体键事件，录入时就地提醒
+                    if cfg!(target_os = "macos") && crate::tray::is_bare_fn_key(&hk) {
+                        self.record_hint = Some((
+                            format!(
+                                "已录入「{text}」。macOS 默认将裸 F 键用作媒体键（亮度/Spotlight 等），\
+                                 若热键无效请开启「将 F1、F2 等键用作标准功能键」或改用组合键"
+                            ),
+                            ctx.input(|i| i.time) + 8.0,
+                        ));
+                    }
                     *self.hotkey_field_mut(idx) = text;
                     self.recording = None;
                 }
@@ -682,6 +692,31 @@ impl SettingsApp {
                 });
             ui.add_space(2.0);
             let mut hint = "点击右侧输入框后直接按下组合键即可录入；Backspace 清除，Esc 取消；留空 = 不注册。托盘运行中保存即生效。".to_string();
+            // mac：裸 F 键在系统默认下是媒体/系统键（亮度/Spotlight/听写等），
+            // 按键到不了应用——托盘注册处会探测 fnState 记日志，这里按当前
+            // 配置给一条常驻提醒（措辞对 fn 开关两种状态都成立）
+            if cfg!(target_os = "macos") {
+                let raws = [
+                    self.cfg.hotkey_screenshot.as_str(),
+                    self.cfg.hotkey_picker.as_str(),
+                    self.cfg.hotkey_pin.as_str(),
+                    self.cfg.hotkey_record.as_str(),
+                    self.cfg.hotkey_scroll.as_str(),
+                    self.cfg.hotkey_delay.as_str(),
+                    self.cfg.hotkey_history.as_str(),
+                ];
+                let has_bare_fn = raws.iter().any(|raw| {
+                    crate::tray::parse_hotkey(raw)
+                        .map(|hk| crate::tray::is_bare_fn_key(&hk))
+                        .unwrap_or(false)
+                });
+                if has_bare_fn {
+                    hint.push_str(
+                        "　⚠ 有裸 F 键热键：macOS 默认将 F1–F12 用作媒体键（亮度/Spotlight 等），\
+                         若热键无效请开启「将 F1、F2 等键用作标准功能键」（系统设置▸键盘）或改用组合键",
+                    );
+                }
+            }
             if let Some((msg, until)) = &self.record_hint {
                 if ui.input(|i| i.time) < *until {
                     hint = msg.clone();

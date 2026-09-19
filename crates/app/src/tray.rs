@@ -275,6 +275,63 @@ fn bare_key_allowed(key: Code) -> bool {
     )
 }
 
+/// 裸功能键（无修饰键的 F1–F12）。
+pub fn is_bare_fn_key(hk: &HotKey) -> bool {
+    hk.mods.is_empty()
+        && matches!(
+            hk.key,
+            Code::F1
+                | Code::F2
+                | Code::F3
+                | Code::F4
+                | Code::F5
+                | Code::F6
+                | Code::F7
+                | Code::F8
+                | Code::F9
+                | Code::F10
+                | Code::F11
+                | Code::F12
+        )
+}
+
+/// mac fnState（「将 F1、F2 等键用作标准功能键」开关）：Some(true)=F 键是
+/// 标准功能键；Some(false)=媒体键模式（键不存在即系统默认）；None=探测
+/// 失败——不动手猜，宁可少告警。
+#[cfg(target_os = "macos")]
+fn mac_fn_keys_standard() -> Option<bool> {
+    let out = std::process::Command::new("defaults")
+        .args(["read", "-g", "com.apple.keyboard.fnState"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return Some(false);
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim() == "1")
+}
+
+/// mac 的「注册成功却静默失效」盲区：裸 F1–F12 在系统默认下是媒体/系统键
+/// （亮度/Spotlight/听写等），按键被系统吞掉，RegisterEventHotKey 注册
+/// 成功也永远等不到触发。注册成功时探测一次 fnState 给出 remediation。
+/// `fn_state` 由调用方在每轮 apply 内缓存（探测起子进程，不必逐键重复）。
+#[cfg(target_os = "macos")]
+fn warn_bare_fnkey(raw: &str, hk: &HotKey, fn_state: &mut Option<bool>) {
+    if !is_bare_fn_key(hk) {
+        return;
+    }
+    if fn_state.is_none() {
+        *fn_state = mac_fn_keys_standard();
+    }
+    if *fn_state != Some(false) {
+        return;
+    }
+    eprintln!(
+        "lscreen tray: 热键「{raw}」已注册但可能收不到——macOS 默认将裸 F1–F12 \
+         用作媒体键（亮度/Spotlight/听写等），系统会吞掉按键。可在 系统设置▸键盘 \
+         开启「将 F1、F2 等键用作标准功能键」，或改用组合键（如 Ctrl+Alt+2）"
+    );
+}
+
 const LETTER_CODES: [Code; 26] = [
     Code::KeyA,
     Code::KeyB,
@@ -411,6 +468,8 @@ impl Hotkeys {
         for (hk, _) in self.entries.drain(..) {
             let _ = manager.unregister(hk);
         }
+        #[cfg(target_os = "macos")]
+        let mut fn_state: Option<bool> = None;
         for (field, raw, action) in [
             (
                 "hotkey_screenshot",
@@ -430,7 +489,11 @@ impl Hotkeys {
             }
             match parse_hotkey(raw) {
                 Ok(hk) => match manager.register(hk) {
-                    Ok(()) => self.entries.push((hk, action)),
+                    Ok(()) => {
+                        #[cfg(target_os = "macos")]
+                        warn_bare_fnkey(raw, &hk, &mut fn_state);
+                        self.entries.push((hk, action));
+                    }
                     Err(e) => {
                         eprintln!("lscreen tray: 热键注册失败（可能被占用）「{raw}」: {e}")
                     }
@@ -1063,5 +1126,20 @@ mod tests {
         assert!(parse_hotkey("Ctrl+Q+Q").is_err()); // 多主键
         assert!(parse_hotkey("Ctrl+HyperSpace").is_err()); // 未知键
         assert!(parse_hotkey("Ctrl+Alt").is_err());
+    }
+
+    #[test]
+    fn bare_fn_key_detect() {
+        // mac 裸 F 键盲区（媒体键吞噬）的判定：无修饰键的 F1–F12
+        for s in ["F1", "F2", "F5", "F12", "f10"] {
+            let hk = parse_hotkey(s).unwrap();
+            assert!(is_bare_fn_key(&hk), "{s} 应判为裸功能键");
+        }
+        for s in ["Ctrl+F2", "Alt+F5", "Shift+F12", "F13", "PrintScreen", "A"] {
+            let r = parse_hotkey(s);
+            if let Ok(hk) = r {
+                assert!(!is_bare_fn_key(&hk), "{s} 不应判为裸功能键");
+            }
+        }
     }
 }

@@ -120,6 +120,13 @@ LSCREEN_TEST_AUDIO=1 LSCREEN_TEST_AUDIO_KEEP=1 \
 
 - **托盘 Accessory（v0.6.1）**：裸运行 `lscreen` → 托盘图标出现、**不占
   Dock**（App 激活策略 Accessory）；左键单击出菜单、右键同；菜单项可用。
+- **全局热键·裸 F 键盲区（v0.11.0）**：macOS 默认（未开启「将 F1、F2 等
+  键用作标准功能键」，`defaults read -g com.apple.keyboard.fnState` 无值）
+  把裸 F1–F12 用作媒体键（亮度/Spotlight/听写等），按键被系统吞掉，
+  `RegisterEventHotKey` **注册成功但永远不触发**（裸 F 键热键静默全灭，
+  这不是注册失败，日志无 error）。点验：配置裸 F 键热键 → 启动托盘
+  （stderr 可见时）应出现「已注册但可能收不到」告警；开启该系统开关
+  （键值变 `1`）后重启托盘 → 热键应生效；带修饰键组合键不受影响。
 - **Retina 窗口矩形（M9 / v0.8.0）**：`lscreen gui` → 默认选区精确贴住最前
   窗口边缘（无 1-2px 错位、无半个标题栏混入）；窗口截图产物为物理像素尺寸。
 - **贴图全套（M12）**：同 Windows 条目。
