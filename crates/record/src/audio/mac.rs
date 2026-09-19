@@ -160,10 +160,24 @@ impl Pipeline {
             let err = Arc::clone(&core.err);
             let flowed = Arc::clone(&core.flowed);
             let nsrc = sources.len();
+            let dump_mix: Option<std::fs::File> = std::env::var("LSCREEN_DUMP_PCM")
+                .ok()
+                .map(|p| std::fs::File::create(format!("{p}.mix")).ok())
+                .flatten();
             workers.push(std::thread::spawn(move || {
+                let mut sink_file = dump_mix;
                 run_mixer(
                     pcm_rx,
-                    move |out| enc_tx.send(out.to_vec()).is_ok(),
+                    {
+                        let mut sink_file = &mut sink_file;
+                        move |out: &[u8]| {
+                            if let Some(f) = sink_file.as_mut() {
+                                use std::io::Write;
+                                let _ = f.write_all(out);
+                            }
+                            enc_tx.send(out.to_vec()).is_ok()
+                        }
+                    },
                     origin,
                     err,
                     flowed,
@@ -627,7 +641,18 @@ unsafe fn run_sck_capture(
     }
     let _ = rtx.send(Ready::Ok);
 
-    // 转储循环：回调入队的交错 f32 → ToStereo48 → PCM 通道（麦克风同款）
+    // 转储循环：回调入队的交错 f32 → ToStereo48 → PCM 通道（麦克风同款）。
+    // 诊断分段采样（env 门控）：LSCREEN_DUMP_PCM=<前缀> 时把 ToStereo48
+    // 前的 f32 与后的 s16 各写一份，用于真机定位噪声引入段
+    let dump_prefix = std::env::var("LSCREEN_DUMP_PCM").ok();
+    let mut dump_f32: Option<std::fs::File> = dump_prefix
+        .as_ref()
+        .map(|p| std::fs::File::create(format!("{p}.f32")).ok())
+        .flatten();
+    let mut dump_s16: Option<std::fs::File> = dump_prefix
+        .as_ref()
+        .map(|p| std::fs::File::create(format!("{p}.s16")).ok())
+        .flatten();
     let mut conv: Option<ToStereo48> = None;
     while !stop.load(Ordering::Relaxed) {
         if let Some(e) = state.err.lock().unwrap().take() {
@@ -646,7 +671,16 @@ unsafe fn run_sck_capture(
             }
             conv = Some(ToStereo48::new(RATE, ch));
         }
+        if let Some(f) = dump_f32.as_mut() {
+            let bytes: Vec<u8> = chunk.iter().flat_map(|v| v.to_le_bytes()).collect();
+            use std::io::Write;
+            let _ = f.write_all(&bytes);
+        }
         let pcm = conv.as_mut().unwrap().push(&chunk);
+        if let Some(f) = dump_s16.as_mut() {
+            use std::io::Write;
+            let _ = f.write_all(&pcm);
+        }
         if !pcm.is_empty() && tx.send(ToMixer::Pcm(idx, pcm, Instant::now())).is_err() {
             break;
         }

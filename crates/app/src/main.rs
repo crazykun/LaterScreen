@@ -165,7 +165,7 @@ enum Cmd {
         /// 先交互框选录制区域（框完立即开始录制）
         #[arg(long)]
         select: bool,
-        /// 编码为 MP4/H.264（缺省 GIF；MP4 目前 Linux 可用）
+        /// 编码为 MP4/H.264（缺省 GIF；三平台均可用，见 PLAN M4）
         #[arg(long)]
         mp4: bool,
         /// 最长录制时长（秒）

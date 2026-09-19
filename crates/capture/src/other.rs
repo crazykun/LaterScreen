@@ -94,14 +94,13 @@ mod mac {
         ) -> *mut core::ffi::c_void;
         pub fn CGEventPost(tap: u32, event: *mut core::ffi::c_void);
         pub fn CGWarpMouseCursorPosition(new_position: CGPoint) -> i32;
-        // 全局按键态查询（M14 点击高亮）：source 由 CGEventSourceCreate 建立
-        pub fn CGEventSourceButtonState(source: *mut core::ffi::c_void, button: usize) -> bool;
+        // CGEventSourceButtonState（全局硬件按键查询）刻意不声明：macOS 15.3
+        // 真机低频查询即触发 SkyLight 事件源注册表死锁，mac 的 pointer_state
+        // 已降级返回 None（详见其文档），声明留着只会引诱后人踩坑
     }
 
     /// kCGEventSourceStateHIDSystemState（合成滚轮事件源的标准状态）
     pub const SOURCE_HID: u32 = 1;
-    /// kCGMouseButtonLeft
-    pub const MOUSE_BUTTON_LEFT: usize = 0;
     /// kCGScrollEventUnitLine（行单位，一格滚轮 ≈ 3 行，对齐 X11 notch 语义）
     pub const SCROLL_UNIT_LINE: u32 = 1;
     /// kCGSessionEventTap：注入会话层，方向不被「自然滚动」系统设置翻转
@@ -200,18 +199,19 @@ pub fn cursor_position() -> Option<(i32, i32)> {
     Some(((pt.x * k).round() as i32, (pt.y * k).round() as i32))
 }
 
-/// mac：坐标同 cursor_position，按键态查 HID 事件源（kCGMouseButtonLeft = 0）。
-/// source 创建失败时按未按下处理（坐标仍可用）。
+/// mac：坐标同 cursor_position，按键态**不可用**。
+///
+/// `CGEventSourceButtonState`（64 位下唯一公开的全局硬件按键 API）在
+/// 真机（Intel / macOS 15.3）低频查询即触发 SkyLight 事件源注册表的
+/// `CGSEventSourceForID → CGSEventSourceShutdown` 内部互斥锁**死锁**——
+/// 与查询频率、源类型（HID/CombinedSession）、是否伴随截屏无关
+/// （最小隔离实验见 M14 真机点验记录），v0.10.x 的 mac 录屏因此第一帧
+/// 即整段挂死。返回 None 让点击高亮按 M14 约定静默关闭；指针**位置**
+/// 仍由 [`cursor_position`] 提供（走 CGEventCreate 路径，实测安全，
+/// 贴图拖动/滚动截图依赖它）。上游系统修复后可恢复实现。
 #[cfg(target_os = "macos")]
 pub fn pointer_state() -> Option<(i32, i32, bool)> {
-    let (x, y) = cursor_position()?;
-    let source = unsafe { mac::CGEventSourceCreate(mac::SOURCE_HID) };
-    if source.is_null() {
-        return Some((x, y, false));
-    }
-    let down = unsafe { mac::CGEventSourceButtonState(source, mac::MOUSE_BUTTON_LEFT) };
-    unsafe { mac::CFRelease(source) };
-    Some((x, y, down))
+    None
 }
 
 /// 其余平台（理论上仅剩非 Win/mac 的移植目标）：返回 None 时上层回退主显示器

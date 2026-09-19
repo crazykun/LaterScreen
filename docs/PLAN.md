@@ -797,7 +797,7 @@ record/Cargo.toml 未按平台门控，Win/mac 同样编译 vendored 源，
       三套全局监听，先不做，视需求反馈）。
       落地：capture 新增 `pointer_state()`（X11 QueryPointer 坐标 +
       Button1Mask / Win GetCursorPos + GetAsyncKeyState(VK_LBUTTON) /
-      mac CGEventSourceButtonState(HID 源)，Wayland 及查询失败返回 None
+      mac ~~CGEventSourceButtonState(HID 源)~~，Wayland 及查询失败返回 None
       → 功能静默关闭）；`core::highlight` 纯函数（ring_at 插值 + 圆环
       AA 描边就地混合，6 项单测：边界/单调/过期清理/帧外交集/多环并存/
       退化帧）；app 层 `click_hl::ClickHighlight` 每帧轮询做**按压沿**
@@ -808,8 +808,16 @@ record/Cargo.toml 未按平台门控，Win/mac 同样编译 vendored 源，
       poster→状态上报」，借此收敛为单一 `GrabCtx`。真机验证：X11 会话
       `pointer_state` 连续查询稳定、坐标/按键态正确（纯查询无干扰）；
       涟漪视觉与按压手感**待人工点验**（验证时用户桌面被占用——M12 同款
-      情形，合成点击会干扰真实操作，不自动化的惯例延续）；Win/mac 编译
-      经 CI、运行待真机
+      情形，合成点击会干扰真实操作，不自动化的惯例延续）；Win 编译
+      经 CI、运行待真机。**mac ✅ 2026-09-19 真机点验：点击高亮降级
+      关闭**——`CGEventSourceButtonState`（64 位下唯一公开的全局硬件
+      按键 API）在 macOS 15.3 真机低频查询即触发 SkyLight 事件源注册表
+      `CGSEventSourceForID→CGSEventSourceShutdown` 死锁（与频率/源类型/
+      是否伴随截屏无关，最小隔离实验矩阵见 M17 记录；此前每帧查询让
+      **v0.10.x 的 mac 录屏整体挂死在第一帧**——秒数不动、产物 0 字节），
+      `pointer_state` 在 mac 返回 None（指针**位置**查询走 CGEventCreate
+      路径实测安全，贴图拖动/滚动截图不受影响），点击高亮按既有约定
+      静默关闭；上游系统修复后可恢复
 
 ### M15 分享集成：可插拔上传 hook（零体积方案）
 
@@ -914,11 +922,15 @@ M12 先例：env 门控的 ignored 测试（`LSCREEN_TEST_WIN`），能脚本化
       内部）③首跑 TCC 权限弹窗阻塞 CoreAudio 5s 超时误报，就绪等待改
       `LSCREEN_AUDIO_READY_TIMEOUT_MS` 可调 + 文案提示权限。前置：测试
       进程 TCC 归属 Terminal，麦克风走弹窗授权、屏幕录制需系统设置开启
-      并重启 Terminal，见 VERIFY.md mac 节；以下人工项待验）**：
+      并重启 Terminal，见 VERIFY.md mac 节。人工项同日再过一项：**MP4
+      录屏 GUI 出片 ✅**（armed→开始→6s 自动停→58 帧，产物画面流畅、
+      系统声内录清晰无爆音；验出并修复挂死/爆音缺陷见「已修缺陷
+      2026-09-19 第二批」；**点击高亮涟漪在 mac 降级关闭**——系统级
+      死锁，见 M14 节）。以下人工项待验）**：
       托盘 Accessory（不占 Dock）+ 左键菜单（v0.6.1）；CG 逻辑↔物理
       坐标换算 + Retina 窗口矩形（M9 / v0.8.0，截屏侧已随脚本项验证，
       覆盖层默认选区贴合度待人工）；贴图全套（M12）；滚动截图 CGEvent
-      滚轮合成（v0.8.0）；MP4 录屏真机出片（M4）
+      滚轮合成（v0.8.0）
 - [ ] **Wayland（GNOME 或 KDE 任一真会话）**：portal 交互式截图进
       预览标注（M5）；GlobalShortcuts 热键绑定与触发（M5，注意 KDE
       与 GNOME 的绑定 UX 不同）；portal 整屏快照的多屏坐标映射（M5）
@@ -1021,6 +1033,40 @@ M12 先例：env 门控的 ignored 测试（`LSCREEN_TEST_WIN`），能脚本化
       边界钳制与退化拒绝/utc_civil 闰年边界/save_png 扩展名语义/save_path
       防覆盖）。测试注入缝：history_dir 可指向临时目录（串行锁防并行互踩），
       record_png/trim 参数化 max 后不再依赖宿主机用户配置
+
+### 已修缺陷（mac 真机点验 2026-09-19，第二批）
+
+随 M17 mac 人工项验证揪出（含两处崩溃级/整体不可用级）：
+
+- [x] **mac 录屏整体挂死（v0.10.x mac 录屏不可用）**：`pointer_state`
+      每帧查 `CGEventSourceButtonState` 触发 SkyLight 事件源注册表死锁
+      （采样栈：`SLEventSourceButtonState → CGSEventSourceForID →
+      CGSEventSourceShutdown → std::mutex` 永不返回），armed 后第一帧即
+      卡死——状态窗秒数不动、产物 0 字节、进程永不退出。最小隔离实验
+      （hangprobe）：纯 ButtonState 低频（10Hz）查询、任意源类型
+      （HID/CombinedSession）、有无截屏组合均挂；指针位置查询
+      （CGEventCreate+GetLocation）与线程隔离变体正常。修复：mac 的
+      `pointer_state` 返回 None（点击高亮降级关闭，见 M14 节）；
+      `CGEventSourceButtonState` FFI 声明删除防复用
+- [x] **录屏音频满幅噪声/爆音（三平台通病，偶发 ~75%）**：
+      `AlignMixer` 零点对齐的静音补齐字节数未按 4 字节（s16 立体声一帧）
+      取整——首块晚到 pad 长度任意（真机抓到 1164139 奇数字节的 mix
+      输出），后续整条 PCM 流字节错位，解码为满幅乱码（相邻样本
+      ±32767 跳变 >27000 次/6s）；pad 恰为 4 倍数（~25%）时正常，
+      首块 ≤20ms 不 pad 时（麦克风典型）也正常——静音回录 e2e 只断言
+      帧数/时长不验内容，Linux/Win 同缺陷潜伏至今未暴露。修复：pad
+      字节数 `& !3` 帧对齐 + 任意延迟对齐回归单测；真机 release 连跑
+      8 轮（修复前 1/3 概率噪声）全干净，GUI 产物人工复听无爆音
+- [x] **mac 录屏音频首跑体验**（同日修复）：TCC 权限弹窗同步阻塞
+      CoreAudio（实测 AudioDeviceStart 挂 ~60s 等 用户应答），5s 就绪
+      超时必失败且文案误导——就绪等待改 `LSCREEN_AUDIO_READY_TIMEOUT_MS`
+      可调 + 文案提示权限；AAC 码率属性 fourCC 'brte'→'brat' 修毕后
+      麦克风 e2e 通过（见 M14 节）
+- [x] **SCK 提取 bufferListSize 语义**（同日修复，见 M14 节 ④⑤）：
+      传大于 needed 的容量反而报 -12737 ArrayTooSmall，且 block_buffer_out
+      须真指针持有到复制完成
+- [x] 顺手：`record --help` 过期文案「MP4 目前 Linux 可用」→ 三平台
+      均可用（M4 后现状）
 
 ### 已修缺陷（review 2026-08-18）
 

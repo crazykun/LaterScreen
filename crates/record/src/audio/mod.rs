@@ -207,11 +207,16 @@ impl AlignMixer {
         let origin = origin?;
         if !self.flowing[i] {
             self.flowing[i] = true;
-            // 起流晚于零点：补等长静音让该源内容从零点起占位
+            // 起流晚于零点：补等长静音让该源内容从零点起占位。
+            // **字节数必须向 4 字节（一帧 s16 立体声）取整**：任意长度的
+            // pad 会让后续块错位 1-3 字节，整条流变成满幅噪声（真机点验
+            // 抓到过 1164139 字节的奇数 mix 输出——v0.10.x 三平台通病，
+            // 偶发条件 = pad 字节非 4 倍数（~75% 概率），静音回录 e2e 只
+            // 验帧数不验内容故未暴露）
             let gap = at.saturating_duration_since(origin);
             let secs = gap.as_secs_f64().min(60.0);
             if secs > 0.02 {
-                let bytes = (secs * self.bytes_per_sec as f64) as usize;
+                let bytes = ((secs * self.bytes_per_sec as f64) as usize) & !3;
                 self.pending[i].extend(std::iter::repeat_n(0u8, bytes));
             }
         }
@@ -440,9 +445,26 @@ mod tests {
         // 静音部分（约 48000*4*0.5 字节，Instant 精度内）+ 数据 4 字节
         assert!(out.len() > BYTES_PER_SEC / 4, "应有静音补齐: {}", out.len());
         assert!(out.len() <= BYTES_PER_SEC / 2 + 8192);
+        // pad 必须帧对齐（4 字节）：错位会让后续整条流变成满幅噪声
+        assert_eq!(out.len() % 4, 0, "静音补齐未按帧对齐: {}", out.len());
         assert_eq!(&out[out.len() - 4..], &[9, 9, 9, 9]);
         // 静音本体：除最后 4 字节外全零
         assert!(out[..out.len() - 4].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn mixer_pad_is_frame_aligned_for_any_delay() {
+        // 任意延迟下 pad 都不能破坏帧对齐（真机曾以奇数字节 pad 引发
+        // 整流错位噪声，~75% 概率触发）
+        for ms in [21, 33, 100, 555, 1234, 1900] {
+            let mut m = AlignMixer::new(1, BYTES_PER_SEC);
+            let t0 = Instant::now();
+            let out = m
+                .push_pcm(0, &[8, 8, 8, 8], t0 + Duration::from_millis(ms), Some(t0))
+                .unwrap();
+            assert_eq!(out.len() % 4, 0, "{ms}ms 延迟 pad 未对齐: {}", out.len());
+            assert_eq!(&out[out.len() - 4..], &[8, 8, 8, 8]);
+        }
     }
 
     #[test]
