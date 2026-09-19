@@ -162,14 +162,13 @@ impl Pipeline {
             let nsrc = sources.len();
             let dump_mix: Option<std::fs::File> = std::env::var("LSCREEN_DUMP_PCM")
                 .ok()
-                .map(|p| std::fs::File::create(format!("{p}.mix")).ok())
-                .flatten();
+                .and_then(|p| std::fs::File::create(format!("{p}.mix")).ok());
             workers.push(std::thread::spawn(move || {
                 let mut sink_file = dump_mix;
                 run_mixer(
                     pcm_rx,
                     {
-                        let mut sink_file = &mut sink_file;
+                        let sink_file = &mut sink_file;
                         move |out: &[u8]| {
                             if let Some(f) = sink_file.as_mut() {
                                 use std::io::Write;
@@ -362,8 +361,10 @@ unsafe fn run_capture(
             continue;
         }
         let floats: Vec<f32> = chunk
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
             .collect();
         let pcm = conv.push(&floats);
         if !pcm.is_empty() && tx.send(ToMixer::Pcm(idx, pcm, Instant::now())).is_err() {
@@ -507,8 +508,10 @@ unsafe fn sck_extract(sbuf: &CMSampleBuffer) -> Result<(Vec<f32>, usize), String
 unsafe fn sck_parse_list(list: &AudioBufferList) -> Result<(Vec<f32>, usize), String> {
     let f32s = |b: &[u8]| -> Vec<f32> {
         // 字节级读取：mData 不保证 f32 对齐（16 字节对齐需显式传标志）
-        b.chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        b.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect::<Vec<f32>>()
     };
     let nbuf = list.mNumberBuffers.min(8) as usize;
@@ -647,12 +650,10 @@ unsafe fn run_sck_capture(
     let dump_prefix = std::env::var("LSCREEN_DUMP_PCM").ok();
     let mut dump_f32: Option<std::fs::File> = dump_prefix
         .as_ref()
-        .map(|p| std::fs::File::create(format!("{p}.f32")).ok())
-        .flatten();
+        .and_then(|p| std::fs::File::create(format!("{p}.f32")).ok());
     let mut dump_s16: Option<std::fs::File> = dump_prefix
         .as_ref()
-        .map(|p| std::fs::File::create(format!("{p}.s16")).ok())
-        .flatten();
+        .and_then(|p| std::fs::File::create(format!("{p}.s16")).ok());
     let mut conv: Option<ToStereo48> = None;
     while !stop.load(Ordering::Relaxed) {
         if let Some(e) = state.err.lock().unwrap().take() {
