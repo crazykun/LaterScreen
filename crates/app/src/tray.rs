@@ -295,41 +295,26 @@ pub fn is_bare_fn_key(hk: &HotKey) -> bool {
         )
 }
 
-/// mac fnState（「将 F1、F2 等键用作标准功能键」开关）：Some(true)=F 键是
-/// 标准功能键；Some(false)=媒体键模式（键不存在即系统默认）；None=探测
-/// 失败——不动手猜，宁可少告警。
-#[cfg(target_os = "macos")]
-fn mac_fn_keys_standard() -> Option<bool> {
-    let out = std::process::Command::new("defaults")
-        .args(["read", "-g", "com.apple.keyboard.fnState"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return Some(false);
-    }
-    Some(String::from_utf8_lossy(&out.stdout).trim() == "1")
-}
-
-/// mac 的「注册成功却静默失效」盲区：裸 F1–F12 在系统默认下是媒体/系统键
-/// （亮度/Spotlight/听写等），按键被系统吞掉，RegisterEventHotKey 注册
-/// 成功也永远等不到触发。注册成功时探测一次 fnState 给出 remediation。
-/// `fn_state` 由调用方在每轮 apply 内缓存（探测起子进程，不必逐键重复）。
-#[cfg(target_os = "macos")]
-fn warn_bare_fnkey(raw: &str, hk: &HotKey, fn_state: &mut Option<bool>) {
-    if !is_bare_fn_key(hk) {
-        return;
-    }
-    if fn_state.is_none() {
-        *fn_state = mac_fn_keys_standard();
-    }
-    if *fn_state != Some(false) {
-        return;
-    }
-    eprintln!(
-        "lscreen tray: 热键「{raw}」已注册但可能收不到——macOS 默认将裸 F1–F12 \
-         用作媒体键（亮度/Spotlight/听写等），系统会吞掉按键。可在 系统设置▸键盘 \
-         开启「将 F1、F2 等键用作标准功能键」，或改用组合键（如 Ctrl+Alt+2）"
-    );
+/// F1–F12 的 mac 虚拟键码（HIToolbox Events.h，与 global-hotkey mac 实现
+/// 的映射表同源）。mac 拦截层（mac_fnkey_tap）按键码匹配；其余平台仅供
+/// 单元测试核对表值，无运行时引用
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn mac_vk_of(code: Code) -> Option<i64> {
+    Some(match code {
+        Code::F1 => 0x7A,
+        Code::F2 => 0x78,
+        Code::F3 => 0x63,
+        Code::F4 => 0x76,
+        Code::F5 => 0x60,
+        Code::F6 => 0x61,
+        Code::F7 => 0x62,
+        Code::F8 => 0x64,
+        Code::F9 => 0x65,
+        Code::F10 => 0x6D,
+        Code::F11 => 0x67,
+        Code::F12 => 0x6F,
+        _ => return None,
+    })
 }
 
 const LETTER_CODES: [Code; 26] = [
@@ -435,6 +420,11 @@ fn parse_key(lower: &str) -> Option<Code> {
 pub struct Hotkeys {
     manager: Option<GlobalHotKeyManager>,
     entries: Vec<(HotKey, Action)>,
+    /// mac 裸 F 键拦截兜底层：媒体键模式下 Carbon 收不到裸 F1–F12，由
+    /// CGEventTap 在 HID 层接管（Snipaste 同机制，需辅助功能权限）。
+    /// apply/tick 重同步时按需装卸。其余平台无此字段
+    #[cfg(target_os = "macos")]
+    fnkey_tap: Option<crate::mac_fnkey_tap::FnKeyTap>,
 }
 
 impl Hotkeys {
@@ -443,12 +433,16 @@ impl Hotkeys {
             Ok(m) => Self {
                 manager: Some(m),
                 entries: Vec::new(),
+                #[cfg(target_os = "macos")]
+                fnkey_tap: None,
             },
             Err(e) => {
                 eprintln!("lscreen tray: 全局热键不可用（Wayland 会话无 X11？菜单仍可用）: {e}");
                 Self {
                     manager: None,
                     entries: Vec::new(),
+                    #[cfg(target_os = "macos")]
+                    fnkey_tap: None,
                 }
             }
         }
@@ -468,8 +462,6 @@ impl Hotkeys {
         for (hk, _) in self.entries.drain(..) {
             let _ = manager.unregister(hk);
         }
-        #[cfg(target_os = "macos")]
-        let mut fn_state: Option<bool> = None;
         for (field, raw, action) in [
             (
                 "hotkey_screenshot",
@@ -489,11 +481,7 @@ impl Hotkeys {
             }
             match parse_hotkey(raw) {
                 Ok(hk) => match manager.register(hk) {
-                    Ok(()) => {
-                        #[cfg(target_os = "macos")]
-                        warn_bare_fnkey(raw, &hk, &mut fn_state);
-                        self.entries.push((hk, action));
-                    }
+                    Ok(()) => self.entries.push((hk, action)),
                     Err(e) => {
                         eprintln!("lscreen tray: 热键注册失败（可能被占用）「{raw}」: {e}")
                     }
@@ -501,6 +489,44 @@ impl Hotkeys {
                 Err(e) => eprintln!("lscreen tray: 忽略无效热键「{raw}」: {e}"),
             }
         }
+        #[cfg(target_os = "macos")]
+        self.sync_fnkey_tap(true);
+    }
+
+    /// 当前注册集合里的裸 F 键 → (mac 虚拟键码, 热键 id)
+    #[cfg(target_os = "macos")]
+    fn bare_fn_entries(&self) -> Vec<(i64, u32)> {
+        self.entries
+            .iter()
+            .filter(|(hk, _)| hk.mods.is_empty())
+            .filter_map(|(hk, _)| mac_vk_of(hk.key).map(|vk| (vk, hk.id())))
+            .collect()
+    }
+
+    /// mac 裸 F 键兜底层装卸/更新。媒体键模式下 Carbon 收不到裸 F1–F12：
+    /// 有辅助功能权限 → CGEventTap 接管（Snipaste 同体验）；无权限 → 降级
+    /// 为旧行为并弹一次授权引导。fnState/授权是系统侧状态、apply 之后
+    /// 也会变，`warn` 区分「配置变更要提示」与「tick 周期重同步静默空转」
+    /// （探测 3s 缓存，空转成本可忽略）
+    #[cfg(target_os = "macos")]
+    fn sync_fnkey_tap(&mut self, warn: bool) {
+        let bare = self.bare_fn_entries();
+        let no_trust = matches!(
+            crate::mac_fnkey_tap::sync(&mut self.fnkey_tap, &bare),
+            crate::mac_fnkey_tap::TapStatus::NoTrust
+        );
+        if no_trust && warn {
+            eprintln!(
+                "lscreen tray: 裸 F 键热键在媒体键模式下需辅助功能权限才能生效（已弹授权\
+                 引导，也可到 系统设置▸隐私与安全性▸辅助功能 手动添加 lscreen）。授权后\
+                 数秒内自动生效；在此之前可用 fn+该键 或 组合键"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn resync_fnkey_tap(&mut self) {
+        self.sync_fnkey_tap(false);
     }
 }
 
@@ -946,6 +972,10 @@ mod native_impl {
         }
 
         fn tick(&mut self) {
+            // mac：fnState/辅助功能授权是系统侧状态，apply 之后也可能变
+            // （用户在系统设置里授权/切换键盘模式），周期重同步让装卸跟随
+            #[cfg(target_os = "macos")]
+            self.hotkeys.resync_fnkey_tap();
             // 配置热加载
             let mtime = config_mtime();
             let changed = self.mtime_initialized && mtime != self.last_mtime;
@@ -1036,6 +1066,16 @@ mod native_impl {
         // 三个事件源都经 EventLoopProxy 转发进事件循环（tray-icon README
         // 推荐做法），事件到达即唤醒循环，无事件时完全休眠
         let proxy = event_loop.create_proxy();
+        // mac 裸 F 键拦截回调的送回通道：与 GlobalHotKeyEvent 同一
+        // UserEvent 分发路径（必须在首次 apply 之前注入，setup 在
+        // resumed 里晚于此）
+        #[cfg(target_os = "macos")]
+        {
+            let p = proxy.clone();
+            crate::mac_fnkey_tap::set_sink(std::sync::Arc::new(move |id| {
+                let _ = p.send_event(UserEvent::Hotkey(id));
+            }));
+        }
         {
             let p = proxy.clone();
             MenuEvent::set_event_handler(Some(move |ev: MenuEvent| {
@@ -1086,6 +1126,31 @@ mod native_impl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mac_vk_table_matches_global_hotkey() {
+        // 与 global-hotkey 0.8 mac 实现的键码表逐一核对（该表只在 mac 编译，
+        // 这里用字面值锁住，防升级/手改漂移）；非 F 键不映射
+        let expect = [
+            (Code::F1, 0x7A),
+            (Code::F2, 0x78),
+            (Code::F3, 0x63),
+            (Code::F4, 0x76),
+            (Code::F5, 0x60),
+            (Code::F6, 0x61),
+            (Code::F7, 0x62),
+            (Code::F8, 0x64),
+            (Code::F9, 0x65),
+            (Code::F10, 0x6D),
+            (Code::F11, 0x67),
+            (Code::F12, 0x6F),
+        ];
+        for (code, vk) in expect {
+            assert_eq!(mac_vk_of(code), Some(vk), "{code:?} 键码漂移");
+        }
+        assert_eq!(mac_vk_of(Code::KeyA), None);
+        assert_eq!(mac_vk_of(Code::PrintScreen), None);
+    }
 
     #[test]
     fn pin_actions_live_only_in_submenu() {

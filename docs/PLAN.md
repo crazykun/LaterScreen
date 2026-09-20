@@ -120,6 +120,17 @@ crates/
 - [x] capture：多显示器截屏
 - [x] app：全屏覆盖层、区域框选（可调整边缘）、工具栏、绘制交互、
       Shift 约束（正圆/正方形/水平垂直直线）、悬停选中/拖拽移动/删除
+- [x] mac 覆盖层弃用原生 fullscreen（2026-09-20）：`with_fullscreen` 在 mac
+      = 独占一个新 Space，入场/退出必播横移切换动画（用户报告「截图时屏幕
+      往右切了一屏才弹出窗口」）；且 fullscreen 下 with_position/inner_size
+      被忽略，Retina 逻辑坐标从未真正生效过。改为无边界窗口 + 逻辑坐标
+      pos/size 直接贴屏（capture 已给 scale 换算），建窗后
+      `NativeWindow::set_overlay_behavior`（capture mac 侧新增，objc2-app-kit
+      零新增依赖）：`CanJoinAllSpaces | FullScreenAuxiliary` + 层级
+      NSPopUpMenuWindowLevel(101) 盖过菜单栏/Dock（Snipaste/Shottr 同类
+      覆盖层标准做法）。Linux/Windows 建窗路径零改动（fullscreen 是 X11
+      WM 精确贴屏 + EWMH 跨屏的前提）。真机点验见 docs/VERIFY.md mac 人工项
+      （重点：原地出现无动画、压住菜单栏、首帧无白闪）
 - [x] 快捷键：Ctrl+Z 撤销、Ctrl+Y 重做、Ctrl+S 存文件、Ctrl+C/双击 进剪贴板、Esc 退出
 - [x] 导出：tiny-skia 合成 → PNG 文件 / 剪贴板
 
@@ -333,6 +344,21 @@ Snipaste 的招牌能力：截完把图钉在屏幕上置顶悬浮，方便对�
       （Snipaste 惯例——实测 Ctrl+Alt+A 与 Deepin 系统截图键冲突）；注册失败/
       Wayland 无 X11 时仅告警降级，托盘与菜单不受影响；裸键仅允许
       PrintScreen/F1-F12（裸字母会全局抢占打字）
+- [x] mac 裸 F 键拦截兜底层（2026-09-20，mac_fnkey_tap.rs）：macOS 默认把裸
+      F1–F12 翻译成媒体键，翻译发生在 Carbon `RegisterEventHotKey` 匹配之前，
+      裸 F 键热键「注册成功但永不触发」（v0.11.0 只做了告警提示，对齐 Snipaste
+      体验需要真拦截）。持有辅助功能权限后在 kCGHIDEventTap 装**主动**
+      CGEventTap：只消费「已注册且无修饰键」的 F 键 keyDown（自动重复消费但不
+      重复派发），经注入 sink 送回 winit 事件循环与既有 UserEvent::Hotkey 同路
+      分发；亮度等媒体动作不再发生。fnState（标准功能键模式）每次按键实时探测
+      （CFPreferences 进程内取代 v0.11.0 的 defaults 子进程），该模式下让位
+      Carbon 防双触发；未授权时降级为旧行为（fn+F1 可用）并弹一次系统授权
+      引导（AXIsProcessTrustedWithOptions），授权后托盘 tick 重同步自动装上
+      无需重启。手写 FFI（CoreGraphics/CoreFoundation/ApplicationServices，
+      常量与 global-hotkey/core-graphics vendored 源码逐一核对）；键码表单测
+      跨平台可跑；darwin 交叉检查含错误注入验证覆盖。真机点验清单见
+      docs/VERIFY.md mac 人工项（重点：授权后裸 F1 触发且亮度不变——HID 层
+      假设若被推翻，备用方案 Session tap + NX_SYSDEFINED 解码）
 - [x] 配置持久化：`~/.config/lscreen/config.toml`（Win `%APPDATA%`、
       mac `~/Library/Application Support`）；`toml` + serde，未知字段忽略、
       缺失字段取默认

@@ -14,6 +14,9 @@ mod countdown;
 mod export;
 mod font;
 mod history;
+// mac 裸 F1–F12 热键拦截兜底层（CGEventTap + 辅助功能权限），仅 mac 编译
+#[cfg(target_os = "macos")]
+mod mac_fnkey_tap;
 mod pin;
 mod record_ui;
 mod selcache;

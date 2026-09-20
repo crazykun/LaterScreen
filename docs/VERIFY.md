@@ -81,6 +81,10 @@ cargo 的终端 App）：
   ~60s），默认 5s 就绪等待必然超时——首跑请加
   `LSCREEN_AUDIO_READY_TIMEOUT_MS=120000`（1s–300s 钳位），点「允许」
   后授权落在 Terminal 上，之后不用再加
+- **辅助功能（裸 F 键拦截用）**：CGEventTap 兜底层要的 TCC 权限，归属
+  与上面同理——`cargo run` 开发态落在 **Terminal**，安装包态落在
+  **lscreen 本体**。按下面人工项的步骤授权即可，未授权只是裸 F 键降级，
+  其余功能不受影响
 - 系统声测试期间必须有声音播放：`while true; do afplay
   /System/Library/Sounds/Glass.aiff; sleep 0.3; done` 后台挂着即可
   （mac 的 SCK 静默期也持续产包，与 Win loopback 不同，但保险起见
@@ -120,13 +124,38 @@ LSCREEN_TEST_AUDIO=1 LSCREEN_TEST_AUDIO_KEEP=1 \
 
 - **托盘 Accessory（v0.6.1）**：裸运行 `lscreen` → 托盘图标出现、**不占
   Dock**（App 激活策略 Accessory）；左键单击出菜单、右键同；菜单项可用。
-- **全局热键·裸 F 键盲区（v0.11.0）**：macOS 默认（未开启「将 F1、F2 等
-  键用作标准功能键」，`defaults read -g com.apple.keyboard.fnState` 无值）
-  把裸 F1–F12 用作媒体键（亮度/Spotlight/听写等），按键被系统吞掉，
-  `RegisterEventHotKey` **注册成功但永远不触发**（裸 F 键热键静默全灭，
-  这不是注册失败，日志无 error）。点验：配置裸 F 键热键 → 启动托盘
-  （stderr 可见时）应出现「已注册但可能收不到」告警；开启该系统开关
-  （键值变 `1`）后重启托盘 → 热键应生效；带修饰键组合键不受影响。
+- **全局热键·裸 F 键拦截（CGEventTap 兜底层）**：macOS 默认（未开启
+  「将 F1、F2 等键用作标准功能键」）把裸 F1–F12 翻译成媒体键，Carbon
+  `RegisterEventHotKey` 收不到——兜底层在 kCGHIDEventTap 装**主动** tap
+  消费按键并触发动作（Snipaste 同机制），需辅助功能权限。点验顺序：
+  1. **未授权降级**：媒体键模式 + 无辅助功能 → 启动托盘（stderr 可见）
+     出 remediation 告警、系统弹一次授权引导（隐私与安全性▸辅助功能）；
+     此时 `fn+F1` 应立即可用
+  2. **授权生效**：辅助功能列表添加/勾选承载进程（cargo 态=Terminal，
+     安装包=lscreen）→ **不重启**，数秒内（tick 重同步 + 探测 3s 缓存）
+     裸 F1 触发截图，且**屏幕亮度不变**（tap 把 keyDown 消费在媒体翻译
+     之前）——亮度也跟着变 = 没拦住，见第 6 条
+  3. **只拦已注册键**：未绑定的其他 F 键亮度/媒体功能照常；带修饰键
+     （Ctrl/Alt/Shift/Cmd+F1）不受影响仍走 Carbon；按住 F1 自动重复只
+     触发一次动作
+  4. **标准功能键模式防双触发**：开启「将 F1、F2 等键用作标准功能键」
+     （`defaults read -g com.apple.keyboard.fnState` = 1）→ 裸 F1 仍触发
+     且**只触发一次**（tap 探测到该模式让位 Carbon）
+  5. **运行中切换**：托盘常驻时切换上述系统开关 → ≤4s 内行为跟随
+     （3s 探测缓存 + 1s tick）
+  6. **HID 层假设（若 2 失败）**：裸 F1 无反应或亮度也变，说明该
+     macOS 版本把媒体翻译放在 HID tap 之前——备用方案改
+     `kCGSessionEventTap` + NX_SYSDEFINED 解码（mac_fnkey_tap.rs 头注
+     释留了切换点），需按真机行为重写事件判别
+- **覆盖层原地出现（弃用原生 fullscreen）**：mac 的 `with_fullscreen`
+  会独占一个新 Space，覆盖层入场/退出必播横移切换动画（曾表现为「截图
+  时屏幕往右切了一屏才弹出窗口」）。现改为无边界贴屏窗 + CanJoinAllSpaces
+  + 菜单栏之上层级。点验（截图/录屏/取色三入口都要）：按热键 → 覆盖层
+  **原地直接出现**（无任何 Space 动画），压住菜单栏与 Dock（顶部条带
+  变暗）；Esc 原地退出回到原样。Retina 下冻结帧清晰度应与之前一致
+  （逻辑坐标贴屏首次真正生效，若有模糊/半屏错位即换算问题）；多显示器
+  时光标所在屏出现、另一屏不受影响；首帧应直接是冻结帧（若出现白闪，
+  需补建窗 alpha 0→首帧后置 1 的处理）
 - **Retina 窗口矩形（M9 / v0.8.0）**：`lscreen gui` → 默认选区精确贴住最前
   窗口边缘（无 1-2px 错位、无半个标题栏混入）；窗口截图产物为物理像素尺寸。
 - **贴图全套（M12）**：同 Windows 条目。

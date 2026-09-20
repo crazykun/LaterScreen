@@ -182,12 +182,14 @@ impl SettingsApp {
         if let Some((text, mods, key)) = captured {
             match crate::tray::parse_hotkey(&text) {
                 Ok(hk) => {
-                    // mac 裸 F 键：注册能成功但系统默认吞掉媒体键事件，录入时就地提醒
+                    // mac 裸 F 键：Carbon 注册收不到媒体键模式事件，但托盘的
+                    // CGEventTap 兜底层持有辅助功能权限时可直接生效，录入时就地提醒
                     if cfg!(target_os = "macos") && crate::tray::is_bare_fn_key(&hk) {
                         self.record_hint = Some((
                             format!(
-                                "已录入「{text}」。macOS 默认将裸 F 键用作媒体键（亮度/Spotlight 等），\
-                                 若热键无效请开启「将 F1、F2 等键用作标准功能键」或改用组合键"
+                                "已录入「{text}」。macOS 默认将裸 F 键用作媒体键；授权辅助功能\
+                                 （隐私与安全性▸辅助功能 添加 lscreen）后直接生效，未授权时\
+                                 可用 fn+此键 或开启「将 F1、F2 等键用作标准功能键」"
                             ),
                             ctx.input(|i| i.time) + 8.0,
                         ));
@@ -712,8 +714,9 @@ impl SettingsApp {
                 });
                 if has_bare_fn {
                     hint.push_str(
-                        "　⚠ 有裸 F 键热键：macOS 默认将 F1–F12 用作媒体键（亮度/Spotlight 等），\
-                         若热键无效请开启「将 F1、F2 等键用作标准功能键」（系统设置▸键盘）或改用组合键",
+                        "　⚠ 有裸 F 键热键：macOS 默认将 F1–F12 用作媒体键。授权辅助功能\
+                         （隐私与安全性▸辅助功能 添加 lscreen）后直接生效；未授权时可用\
+                         fn+该键 或开启「将 F1、F2 等键用作标准功能键」（系统设置▸键盘）",
                     );
                 }
             }
