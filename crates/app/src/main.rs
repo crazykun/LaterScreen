@@ -92,6 +92,24 @@ pub(crate) fn apply_fullscreen_span(window_id: u32) {
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn apply_fullscreen_span(_window_id: u32) {}
 
+/// mac 覆盖层语义（建窗侧已去掉 with_fullscreen）：把已建好的无边界窗口
+/// 设为「加入所有 Space + 全屏辅助 + 菜单栏之上」。CreationContext 阶段
+/// 窗口已存在（与 Linux span 的时机一致）。原生 fullscreen 在 mac 会
+/// 独占一个新 Space——入场必播横移切换动画（用户看到的「屏幕往右切了
+/// 一屏」），覆盖层工具（Snipaste/Shottr 同类）都不走原生全屏
+#[cfg(target_os = "macos")]
+pub(crate) fn apply_overlay_behavior(cc: &eframe::CreationContext<'_>) {
+    use raw_window_handle::HasWindowHandle;
+    if let Ok(handle) = cc.window_handle() {
+        if let Some(win) = lscreen_capture::NativeWindow::from_raw(handle.as_raw()) {
+            let _ = win.set_overlay_behavior();
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn apply_overlay_behavior(_cc: &eframe::CreationContext<'_>) {}
+
 #[derive(Parser)]
 #[command(
     name = "lscreen",
@@ -630,9 +648,14 @@ fn pick_region_interactive() -> Result<Option<String>, String> {
         .with_app_id("lscreen")
         .with_position(pos)
         .with_inner_size(size)
-        .with_fullscreen(true)
         .with_decorations(false)
         .with_always_on_top();
+    // fullscreen 让 WM 精确贴屏；跨屏时叠加 _NET_WM_FULLSCREEN_MONITORS
+    // 把这个 fullscreen 窗口从单屏扩展到全部显示器（span=true 时在建窗后设置）。
+    // mac 例外：原生 fullscreen 独占新 Space（入场横移动画），改无边界贴屏 +
+    // apply_overlay_behavior 的覆盖层语义
+    #[cfg(not(target_os = "macos"))]
+    let viewport = viewport.with_fullscreen(true);
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
@@ -643,6 +666,7 @@ fn pick_region_interactive() -> Result<Option<String>, String> {
         "lscreen-record",
         options,
         Box::new(move |cc| {
+            apply_overlay_behavior(cc);
             Ok(Box::new(ui::SnipApp::new(
                 cc,
                 ui::OverlayInit {
@@ -780,14 +804,17 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
     let (windows, initial) = overlay_window_list(&shot, mode, &config);
 
     // fullscreen 让 WM 精确贴屏；跨屏时叠加 _NET_WM_FULLSCREEN_MONITORS
-    // 把这个 fullscreen 窗口从单屏扩展到全部显示器（span=true 时在建窗后设置）
+    // 把这个 fullscreen 窗口从单屏扩展到全部显示器（span=true 时在建窗后设置）。
+    // mac 例外：原生 fullscreen 独占新 Space（入场横移动画），改无边界贴屏 +
+    // apply_overlay_behavior 的覆盖层语义
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_app_id("lscreen")
         .with_position(pos)
         .with_inner_size(size)
-        .with_fullscreen(true)
         .with_decorations(false)
         .with_always_on_top();
+    #[cfg(not(target_os = "macos"))]
+    let viewport = viewport.with_fullscreen(true);
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
@@ -796,6 +823,7 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
         "lscreen",
         options,
         Box::new(move |cc| {
+            apply_overlay_behavior(cc);
             Ok(Box::new(ui::SnipApp::new(
                 cc,
                 ui::OverlayInit {

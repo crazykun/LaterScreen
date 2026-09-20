@@ -1362,6 +1362,24 @@ mod mac_native {
             self.0.setIgnoresMouseEvents(through);
             Ok(())
         }
+
+        /// 截图/录屏覆盖层语义，替代原生 fullscreen 建窗：加入所有 Space
+        /// （原生 fullscreen 会独占一个新 Space，入场必播横移切换动画）
+        /// + 全屏辅助位（可与他窗共屏、不参与原生全屏切换），并把层级提到
+        /// 菜单栏/Dock 之上，覆盖层才能压住整屏（含菜单栏区域）。
+        /// 配合建窗侧：无边界 + 逻辑坐标 pos/size 直接贴屏（不走 fullscreen）
+        pub fn set_overlay_behavior(&self) -> Result<()> {
+            use objc2_app_kit::{NSWindowCollectionBehavior, NSWindowLevel};
+            self.0.setCollectionBehavior(
+                NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::FullScreenAuxiliary,
+            );
+            // NSPopUpMenuWindowLevel = 101：盖过菜单栏(24)/Dock(20)，低于
+            // 屏保级(1000)——截图覆盖层的常规层级区间
+            const OVERLAY_LEVEL: NSWindowLevel = 101;
+            self.0.setLevel(OVERLAY_LEVEL);
+            Ok(())
+        }
     }
 }
 
