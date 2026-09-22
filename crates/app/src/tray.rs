@@ -438,13 +438,24 @@ impl Hotkeys {
             },
             Err(e) => {
                 eprintln!("lscreen tray: 全局热键不可用（Wayland 会话无 X11？菜单仍可用）: {e}");
-                Self {
-                    manager: None,
-                    entries: Vec::new(),
-                    #[cfg(target_os = "macos")]
-                    fnkey_tap: None,
-                }
+                Self::empty()
             }
+        }
+    }
+
+    /// 未初始化的空壳：NativeApp 构造期占位用。**不要**在构造期调
+    /// `new()`——mac 上 Carbon 的 `InstallEventHandler` 对同一目标重复
+    /// 安装同一处理器返回 handlerAlreadyInstalled：构造期装好后，setup()
+    /// 再 `new()` 时旧 manager 尚未 Drop、handler 仍挂着，第二次必失败，
+    /// manager 被替换成 None——托盘热键自 M8 起在 mac 上全程失效的根因
+    /// （真机定位 2026-09-22；上游 global-hotkey 把真实 OSStatus 吞成了
+    /// 残留 errno 22，报错文案误导到 Wayland 分支）
+    fn empty() -> Self {
+        Self {
+            manager: None,
+            entries: Vec::new(),
+            #[cfg(target_os = "macos")]
+            fnkey_tap: None,
         }
     }
 
@@ -1110,7 +1121,7 @@ mod native_impl {
             cfg,
             tray: None,
             menu_items: HashMap::new(),
-            hotkeys: Hotkeys::new(),
+            hotkeys: Hotkeys::empty(),
             last_mtime: None,
             mtime_initialized: false,
             setup_done: false,
