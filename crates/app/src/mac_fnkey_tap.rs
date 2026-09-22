@@ -191,7 +191,7 @@ fn fn_state_key() -> CFStringRef {
     *KEY.get_or_init(|| unsafe {
         CFStringCreateWithCString(
             std::ptr::null(),
-            b"com.apple.keyboard.fnState\0".as_ptr() as *const std::os::raw::c_char,
+            c"com.apple.keyboard.fnState".as_ptr(),
             UTF8,
         ) as usize
     }) as CFStringRef
@@ -212,7 +212,7 @@ fn ax_prompt_once() {
     unsafe {
         let key = CFStringCreateWithCString(
             std::ptr::null(),
-            b"AXTrustedCheckOptionPrompt\0".as_ptr() as *const std::os::raw::c_char,
+            c"AXTrustedCheckOptionPrompt".as_ptr(),
             UTF8,
         );
         if key.is_null() {

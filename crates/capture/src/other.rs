@@ -1364,10 +1364,10 @@ mod mac_native {
         }
 
         /// 截图/录屏覆盖层语义，替代原生 fullscreen 建窗：加入所有 Space
-        /// （原生 fullscreen 会独占一个新 Space，入场必播横移切换动画）
-        /// + 全屏辅助位（可与他窗共屏、不参与原生全屏切换），并把层级提到
-        /// 菜单栏/Dock 之上，覆盖层才能压住整屏（含菜单栏区域）。
-        /// 配合建窗侧：无边界 + 逻辑坐标 pos/size 直接贴屏（不走 fullscreen）
+        /// （原生 fullscreen 会独占一个新 Space，入场必播横移切换动画），
+        /// 叠加全屏辅助位（可与他窗共屏、不参与原生全屏切换），并把层级
+        /// 提到菜单栏/Dock 之上——覆盖层才能压住整屏（含菜单栏区域）。
+        /// 配合建窗侧：无边界、逻辑坐标 pos/size 直接贴屏（不走 fullscreen）
         pub fn set_overlay_behavior(&self) -> Result<()> {
             use objc2_app_kit::{NSWindowCollectionBehavior, NSWindowLevel};
             self.0.setCollectionBehavior(
