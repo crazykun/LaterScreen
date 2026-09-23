@@ -147,6 +147,21 @@ LSCREEN_TEST_AUDIO=1 LSCREEN_TEST_AUDIO_KEEP=1 \
      macOS 版本把媒体翻译放在 HID tap 之前——备用方案改
      `kCGSessionEventTap` + NX_SYSDEFINED 解码（mac_fnkey_tap.rs 头注
      释留了切换点），需按真机行为重写事件判别
+  （2026-09-22 已自动化部分：`LSCREEN_TEST_E2E=1 cargo test -p lscreen
+  -- --ignored --nocapture fnkey` 直调 tap 回调验证四分支语义 + 报告
+  本机 fnState/AX 状态，真机 ✅；真托盘日志确认 `TapStatus::Installed`。
+  **合成按键无法端到端**：CGEventPost 注入的事件不流经 HID 主动 tap、
+  也不触发 Carbon 全局热键匹配——最后一英里（真键盘 → 拦截 → 动作）
+  只能人工按第 2/3 条点验）
+- **托盘热键 manager（mac 回归护栏）**：v0.11.1 前的 mac 托盘热键
+  **自 M8 起全程失效**——构造期与 setup() 双重 `Hotkeys::new()`，第二次
+  InstallEventHandler 因旧 handler 未卸返回 handlerAlreadyInstalled，
+  manager 被替换为 None（上游 global-hotkey 把 OSStatus 吞成残留 errno
+  22，报错文案误导向 Wayland 分支，长期未察觉）。修复：构造期改
+  `Hotkeys::empty()`，setup() 为唯一创建点。点验：启动托盘 stderr
+  **不再出现**「全局热键不可用（Wayland 会话无 X11？…）」；组合键热键
+  （如 Ctrl+Alt+P）可触发动作（✅ 2026-09-22：报错消失、manager 创建
+  成功、tap Installed；动作触发待真键盘点验）
 - **覆盖层原地出现（弃用原生 fullscreen）**：mac 的 `with_fullscreen`
   会独占一个新 Space，覆盖层入场/退出必播横移切换动画（曾表现为「截图
   时屏幕往右切了一屏才弹出窗口」）。现改为无边界贴屏窗 + CanJoinAllSpaces

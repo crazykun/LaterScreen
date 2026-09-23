@@ -191,7 +191,7 @@ fn fn_state_key() -> CFStringRef {
     *KEY.get_or_init(|| unsafe {
         CFStringCreateWithCString(
             std::ptr::null(),
-            b"com.apple.keyboard.fnState\0".as_ptr() as *const std::os::raw::c_char,
+            c"com.apple.keyboard.fnState".as_ptr(),
             UTF8,
         ) as usize
     }) as CFStringRef
@@ -212,7 +212,7 @@ fn ax_prompt_once() {
     unsafe {
         let key = CFStringCreateWithCString(
             std::ptr::null(),
-            b"AXTrustedCheckOptionPrompt\0".as_ptr() as *const std::os::raw::c_char,
+            c"AXTrustedCheckOptionPrompt".as_ptr(),
             UTF8,
         );
         if key.is_null() {
@@ -392,5 +392,91 @@ impl Drop for FnKeyTap {
             CFRelease(self.port as CFTypeRef);
             drop(Arc::from_raw(self.ctx_raw));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 测试专用 FFI：构造合成 CGEvent 直调 tap 回调（这些声明只在测试编译）
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventCreateKeyboardEvent(
+            source: *const c_void,
+            virtual_key: i64,
+            key_down: bool,
+        ) -> CGEventRef;
+        fn CGEventSetIntegerValueField(event: CGEventRef, field: u32, value: i64);
+        fn CGEventSetFlags(event: CGEventRef, flags: u64);
+    }
+
+    /// 真机语义测试（M17 风格，ignored）：直接以合成 CGEvent 调 tap 回调，
+    /// 覆盖四个分支——命中消费/透传、自动重复、修饰组合、未注册键。
+    /// 同时报告本机 fnState 模式与测试二进制的辅助功能授权状态（真
+    /// 托盘路径能否装上 tap 的判定依据）。
+    ///   LSCREEN_TEST_E2E=1 cargo test -p lscreen -- --ignored --nocapture fnkey
+    #[test]
+    #[ignore = "真机：读系统偏好（fnState/AX），需 LSCREEN_TEST_E2E=1"]
+    fn fnkey_tap_semantics() {
+        if std::env::var("LSCREEN_TEST_E2E").as_deref() != Ok("1") {
+            eprintln!("跳过：需 LSCREEN_TEST_E2E=1");
+            return;
+        }
+        let standard = fn_keys_standard();
+        let trusted = ax_trusted();
+        println!("本机 fnState: {standard:?}（Some(false)=媒体键模式）、AX 授权（测试二进制）: {trusted}");
+
+        let fired = Arc::new(Mutex::new(Vec::<u32>::new()));
+        let f = fired.clone();
+        let ctx = TapCtx {
+            sink: Arc::new(move |id| f.lock().unwrap().push(id)),
+            map: Mutex::new(HashMap::from([(0x7A, 7u32)])), // F1 → id 7
+        };
+        let info = &ctx as *const TapCtx as *mut c_void;
+        let mk = |vk: i64| unsafe { CGEventCreateKeyboardEvent(std::ptr::null(), vk, true) };
+        let fired_ids = || fired.lock().unwrap().clone();
+
+        // 1) 已注册裸 F1：媒体键模式 → 消费 + 派发；标准功能键模式 → 透传
+        //    （让位 Carbon 防双触发），都不派发
+        let ev = mk(0x7A);
+        let ret = unsafe { tap_callback(std::ptr::null(), EVENT_KEY_DOWN, ev, info) };
+        match standard {
+            Some(false) => {
+                assert!(ret.is_null(), "媒体键模式应消费事件");
+                assert_eq!(fired_ids(), vec![7], "媒体键模式应派发热键");
+            }
+            _ => {
+                assert!(!ret.is_null(), "标准功能键模式应透传");
+                assert!(fired_ids().is_empty(), "标准功能键模式不应派发");
+            }
+        }
+        unsafe { CFRelease(ev) };
+
+        // 2) 按住自动重复：消费（亮度不再触发）但不重复派发——两种模式同判
+        fired.lock().unwrap().clear();
+        let ev = mk(0x7A);
+        unsafe { CGEventSetIntegerValueField(ev, FIELD_AUTOREPEAT, 1) };
+        let ret = unsafe { tap_callback(std::ptr::null(), EVENT_KEY_DOWN, ev, info) };
+        assert!(ret.is_null(), "自动重复应消费");
+        assert!(fired_ids().is_empty(), "自动重复不应派发");
+        unsafe { CFRelease(ev) };
+
+        // 3) 带修饰键（Cmd+F1）：Carbon 本就收得到，透传且不派发
+        let ev = mk(0x7A);
+        unsafe { CGEventSetFlags(ev, MASK_CMD) };
+        let ret = unsafe { tap_callback(std::ptr::null(), EVENT_KEY_DOWN, ev, info) };
+        assert!(!ret.is_null(), "修饰组合应透传");
+        assert!(fired_ids().is_empty(), "修饰组合不应派发");
+        unsafe { CFRelease(ev) };
+
+        // 4) 未注册的 F5：透传且不派发
+        let ev = mk(0x60);
+        let ret = unsafe { tap_callback(std::ptr::null(), EVENT_KEY_DOWN, ev, info) };
+        assert!(!ret.is_null(), "未注册键应透传");
+        assert!(fired_ids().is_empty(), "未注册键不应派发");
+        unsafe { CFRelease(ev) };
+
+        println!("四分支语义全部符合预期");
     }
 }
