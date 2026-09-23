@@ -1287,11 +1287,25 @@ mod win_native {
             Ok(())
         }
 
+        /// 本平台点击穿透不支持区域保留：WS_EX_TRANSPARENT 是整窗命中
+        /// 测试语义，无逐区原语（见 set_click_through）。
+        pub fn input_region_supported() -> bool {
+            false
+        }
+
         /// 点击穿透：WS_EX_TRANSPARENT 让命中测试穿透本窗口（需配合
         /// WS_EX_LAYERED）。EXSTYLE 变更后要 SetWindowPos(SWP_FRAMECHANGED)
         /// 重算框架才对输入生效；关闭穿透只摘 WS_EX_TRANSPARENT，
         /// 保留 LAYERED（不透明度功能仍在用）。
-        pub fn set_click_through(&self, through: bool) -> Result<()> {
+        ///
+        /// 整窗语义：`keep`（穿透时保留可交互的区域）在本平台无原语
+        /// 支持，忽略——与 X11 区域穿透不同，开启后本窗口按钮也不可点。
+        pub fn set_click_through(
+            &self,
+            through: bool,
+            keep: Option<(i32, i32, u32, u32)>,
+        ) -> Result<()> {
+            let _ = keep;
             use windows_sys::Win32::UI::WindowsAndMessaging::{
                 GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
                 SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_LAYERED,
@@ -1357,8 +1371,20 @@ mod mac_native {
             Ok(())
         }
 
+        /// 本平台点击穿透不支持区域保留：setIgnoresMouseEvents 是整窗
+        /// 语义（区域方案需叠加透明子窗口，成本不成比例，不做）。
+        pub fn input_region_supported() -> bool {
+            false
+        }
+
         /// 点击穿透：让窗口忽略全部鼠标事件（键盘焦点不受影响）。
-        pub fn set_click_through(&self, through: bool) -> Result<()> {
+        /// 整窗语义：`keep` 忽略（无逐区原语，见 input_region_supported）。
+        pub fn set_click_through(
+            &self,
+            through: bool,
+            keep: Option<(i32, i32, u32, u32)>,
+        ) -> Result<()> {
+            let _ = keep;
             self.0.setIgnoresMouseEvents(through);
             Ok(())
         }

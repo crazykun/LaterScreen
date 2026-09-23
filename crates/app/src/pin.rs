@@ -7,9 +7,10 @@
 //! （光标下的图像点锚定不动）、**Shift+滚轮调不透明度**（20%–100%）、
 //! **R/H/V 旋转 90°/水平/垂直翻转**（纯像素置换，复制/保存的就是变换后
 //! 的画面）、高倍放大（实际显示 ≥8x）叠加像素网格、工具条**点击穿透**
-//! （点击穿到下层窗口，经托盘菜单「贴图 → 关闭穿透」恢复——穿透后本窗口
-//! 收不到任何事件，Esc 只在仍持键盘焦点时有效）、双击复制、Esc/Delete
-//! 关闭。
+//! （图像区点击穿到下层窗口，工具条条带仍可交互——再点穿透按钮即恢复；
+//! Esc 与托盘菜单「贴图 → 关闭穿透」是备用出口。区域保留仅 X11 的
+//! XShape 输入区支持，Win/mac 整窗穿透后恢复只剩 Esc/托盘）、双击复制、
+//! Esc/Delete 关闭。
 
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Stroke, Vec2, ViewportCommand};
@@ -114,6 +115,24 @@ pub fn window_size(w: u32, h: u32, scale: f32) -> Vec2 {
     Vec2::new(w as f32 / scale, h as f32 / scale + BAR_H)
 }
 
+/// 窗口逻辑尺寸 → 底部条带的物理像素矩形（x, y, w, h），XShape 输入区
+/// 保留区用（穿透时条带仍可交互）。窗口比条带还矮（极端小图深缩小）时
+/// 条带钳到窗口顶，保证穿透按钮始终可点。
+fn bar_strip_physical(inner: Vec2, ppp: f32) -> (i32, i32, u32, u32) {
+    let (w_px, h_px) = (
+        (inner.x.max(0.0) * ppp).round() as i32,
+        (inner.y.max(0.0) * ppp).round() as i32,
+    );
+    let bar_px = (BAR_H * ppp).round() as i32;
+    let y = (h_px - bar_px).max(0);
+    (
+        0,
+        y,
+        w_px.max(0) as u32,
+        bar_px.clamp(1, h_px.max(1)) as u32,
+    )
+}
+
 pub struct PinApp {
     rgba: Vec<u8>,
     w: u32,
@@ -151,13 +170,22 @@ pub struct PinApp {
     /// 当前整窗不透明度（1.0 = 不透明）。仅 UI 状态，实际生效与否取决于
     /// set_opacity 返回值（失败会回滚本值）
     opacity: f32,
-    /// 点击穿透中：窗口不收任何指针事件，交互只剩键盘（若仍持焦点）与
-    /// 托盘广播。开启期间靠 300ms 心跳轮询 pins.ctl
+    /// 点击穿透中：图像区不收指针事件（点击落到下层窗口）。支持区域
+    /// 穿透的平台（X11）工具条条带保留交互，可再点穿透按钮恢复；整窗
+    /// 平台恢复只剩键盘（若仍持焦点）与托盘广播。开启期间靠 300ms
+    /// 心跳轮询 pins.ctl
     through: bool,
+    /// 穿透期间已下发的输入区保留矩形（底部条带的物理像素 x/y/w/h）。
+    /// 窗口尺寸变化（缩放/旋转）后条带位置随之变化，逐帧比对指纹决定
+    /// 是否重下发 XShape 输入区；None = 未下发（未穿透或整窗穿透平台）
+    through_shape: Option<(i32, i32, u32, u32)>,
     /// 已应用的 pins.ctl nonce：新 nonce = 新命令。启动时初始化为当前
     /// 文件里的 nonce（吞掉历史命令，新贴图不响应「上一轮」广播）
     ctl_seen: u64,
     last_ctl_check: f64,
+    /// 建窗期置顶补发剩余次数与下次发送时刻（见 ping_window_level）
+    topmost_pings: u8,
+    next_topmost_ping: f64,
     /// 上传命令（M15）：启动时从配置读一次；None = 未配置，工具条不显示按钮
     upload_cmd: Option<Vec<String>>,
     /// 后台上传任务：Some = 上传中（按钮转禁用态防连点）
@@ -230,8 +258,11 @@ impl PinApp {
             native,
             opacity: 1.0,
             through: false,
+            through_shape: None,
             ctl_seen,
             last_ctl_check: 0.0,
+            topmost_pings: 3,
+            next_topmost_ping: 0.0,
             upload_cmd,
             upload_job: None,
             upload_filename: None,
@@ -321,22 +352,38 @@ impl PinApp {
         ctx.send_viewport_cmd(ViewportCommand::Close);
     }
 
-    /// 切换点击穿透。开启后本窗口不收任何指针事件——恢复路径：Esc
-    /// （仅当仍持键盘焦点）或托盘菜单「贴图 → 关闭穿透」（广播 pins.ctl，
-    /// 本进程 300ms 心跳轮询）。
+    /// 切换点击穿透。开启后**图像区**不收指针事件（点击落到下层窗口）；
+    /// 支持区域穿透的平台（X11）工具条条带保留交互——再点穿透按钮即恢复，
+    /// Esc（若仍持焦点）与托盘菜单「贴图 → 关闭穿透」（广播 pins.ctl，
+    /// 本进程 300ms 心跳轮询）仍是备用出口。整窗穿透平台（Win/mac）
+    /// 条带一并穿透，恢复只剩 Esc/托盘。
     fn set_through(&mut self, ctx: &egui::Context, through: bool) {
         if self.through == through {
             return;
         }
-        let Some(n) = &self.native else {
+        let Some(n) = self.native.clone() else {
             self.toast(ctx, "当前环境不支持点击穿透");
             return;
         };
-        if let Err(e) = n.set_click_through(through) {
+        if through && lscreen_capture::NativeWindow::input_region_supported() {
+            // 先置状态再刷新：refresh_input_shape 按指纹下发，失败回滚
+            self.through = true;
+            if !self.refresh_input_shape(ctx) {
+                self.through = false;
+                return;
+            }
+            self.toast(
+                ctx,
+                "穿透已开：图片区点击穿到下层，工具条仍可操作，再点本按钮恢复",
+            );
+            return;
+        }
+        if let Err(e) = n.set_click_through(through, None) {
             self.toast(ctx, format!("点击穿透设置失败: {e}"));
             return;
         }
         self.through = through;
+        self.through_shape = None;
         self.toast(
             ctx,
             if through {
@@ -345,6 +392,36 @@ impl PinApp {
                 "已恢复交互"
             },
         );
+    }
+
+    /// 穿透期间的输入区维护（仅区域穿透平台）：把 XShape 输入区重设为
+    /// 当前底部条带的物理像素矩形，图像区点击穿到下层、条带（含穿透
+    /// 按钮与缩放/关闭等）保持可交互。窗口尺寸变化（缩放/旋转，条带
+    /// 按钮在穿透中仍可点）后条带位置随之变化——请求的 InnerSize 下一
+    /// 帧才反映到 viewport 实际值，靠逐帧/心跳帧的指纹比对追平。返回
+    /// 是否成功（失败已 toast，调用方回滚穿透状态）。
+    fn refresh_input_shape(&mut self, ctx: &egui::Context) -> bool {
+        let Some(inner) = ctx.input(|i| i.viewport().inner_rect) else {
+            return true; // 建窗初期取不到：维持现状，下一帧再试
+        };
+        let ppp = ctx.pixels_per_point();
+        let strip = bar_strip_physical(inner.size(), ppp);
+        if self.through_shape == Some(strip) {
+            return true;
+        }
+        let Some(n) = &self.native else {
+            return false;
+        };
+        match n.set_click_through(true, Some(strip)) {
+            Ok(()) => {
+                self.through_shape = Some(strip);
+                true
+            }
+            Err(e) => {
+                self.toast(ctx, format!("点击穿透设置失败: {e}"));
+                false
+            }
+        }
     }
 
     /// 穿透期间的托盘广播轮询。窗口无输入事件后 eframe 不会再重绘，
@@ -482,6 +559,30 @@ impl PinApp {
                 "已取消置顶"
             },
         );
+    }
+
+    /// 建窗期置顶补发：`with_always_on_top` 建窗选项在部分 WM（Deepin
+    /// kwin 实测）不落地——贴图从未真正持有 `_NET_WM_STATE_ABOVE`，只靠
+    /// 「最新激活的普通窗口」假性置顶；一旦穿透后点击落到下层窗口（激活
+    /// +raise），立刻被盖住（v0.11.2 用户反馈「点穿透就后台了」）。
+    /// `ViewportCommand::WindowLevel` 在已 map 窗口上实测有效（egui-winit
+    /// 与 winit X11 均无去重、每次真发 EWMH 消息，幂等），故建窗后分 3
+    /// 次（0/0.3/0.9s）重发覆盖 WM 时序。补发期间主动 request_repaint：
+    /// 贴图无输入事件时 eframe 不重绘，定时发送不会触发。
+    fn ping_window_level(&mut self, ctx: &egui::Context) {
+        if self.topmost_pings == 0 {
+            return;
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(300));
+        let now = ctx.input(|i| i.time);
+        if now < self.next_topmost_ping {
+            return;
+        }
+        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(
+            egui::viewport::WindowLevel::AlwaysOnTop,
+        ));
+        self.topmost_pings -= 1;
+        self.next_topmost_ping = now + 0.3;
     }
 
     fn toast(&mut self, ctx: &egui::Context, msg: impl Into<String>) {
@@ -626,16 +727,17 @@ impl PinApp {
                     {
                         action = Some(4);
                     }
-                    if show("through")
-                        && icon_button(
-                            ui,
-                            through,
-                            "点击穿透：点击穿到下层窗口（Esc/托盘菜单恢复）",
-                            draw_through,
-                        )
-                        .clicked()
-                    {
-                        action = Some(5);
+                    if show("through") {
+                        // 区域穿透平台（X11）：条带保留交互，再点本按钮恢复；
+                        // 整窗平台按钮随窗口一并穿透，恢复只剩 Esc/托盘
+                        let tip = if lscreen_capture::NativeWindow::input_region_supported() {
+                            "点击穿透：图片区点击穿到下层窗口，工具条仍可操作（再点一次恢复，或 Esc/托盘菜单）"
+                        } else {
+                            "点击穿透：点击穿到下层窗口（Esc/托盘菜单恢复）"
+                        };
+                        if icon_button(ui, through, tip, draw_through).clicked() {
+                            action = Some(5);
+                        }
                     }
                     if show("rotate") && action_button(ui, true, "旋转 90° (R)", draw_rotate) {
                         action = Some(6);
@@ -742,6 +844,8 @@ impl PinApp {
 impl eframe::App for PinApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // 建窗期置顶补发（with_always_on_top 在部分 WM 不落地，见方法注释）
+        self.ping_window_level(&ctx);
         let full = ui.max_rect();
         // 窗口纵向切成两段：上方图像区 + 下方工具条条带
         let split_y = (full.max.y - BAR_H).max(full.min.y);
@@ -782,8 +886,9 @@ impl eframe::App for PinApp {
             key_hit(Key::Minus),
             key_hit(Key::Num0),
         );
-        // 穿透中 Esc/Delete 先退出穿透（窗口若仍持键盘焦点；失焦后只能靠
-        // 托盘广播），不直接关窗——用户按 Esc 的意图大概率是「拿回交互」
+        // 穿透中 Esc/Delete 先退出穿透（窗口若仍持键盘焦点；区域穿透下
+        // 点条带即拿回焦点，整窗穿透失焦后只能靠托盘广播），不直接关窗
+        // ——用户按 Esc 的意图大概率是「拿回交互」
         if esc || del {
             if self.through {
                 self.set_through(&ctx, false);
@@ -793,9 +898,13 @@ impl eframe::App for PinApp {
             return;
         }
 
-        // 穿透期间无输入事件，主动心跳轮询托盘广播（含 close 退出）
+        // 穿透期间图像区无输入事件，主动心跳轮询托盘广播（含 close 退出）；
+        // 同时按指纹维护条带输入区（窗口尺寸可能已变）
         if self.through {
             self.poll_ctl(&ctx);
+            if lscreen_capture::NativeWindow::input_region_supported() {
+                self.refresh_input_shape(&ctx);
+            }
         }
         // 上传结果轮询（线程完成时 request_repaint 唤醒本循环）
         self.poll_upload(&ctx);
@@ -945,32 +1054,28 @@ fn draw_topmost(p: &egui::Painter, r: Rect, c: Color32) {
     p.line_segment([tip, Pos2::new(cx + w * 0.28, r.min.y + w * 0.52)], s);
 }
 
-/// 穿透图标：窗口轮廓（左右留过口）+ 水平箭头穿堂而过——点击落到下层。
-/// 激活态由 icon_button 高亮。
+/// 穿透图标：圆盾 + 一支斜射的箭穿盾而过（射中即穿透——点击落到
+/// 下层）。箭是视觉主角（大箭头 + 尾羽开叉），与单纯斜杠的「禁止」符
+/// 号拉开距离；盾心坐在箭杆上偏尾侧。激活态由 icon_button 高亮。
 fn draw_through(p: &egui::Painter, r: Rect, c: Color32) {
     let s = Stroke::new(ICON_W, c);
     let w = r.width();
-    let m = w * 0.15;
-    let gap = w * 0.24; // 左右边中段的箭头过口
-    let (top, bot) = (r.min.y + m, r.max.y - m);
-    let (left, right) = (r.min.x + m, r.max.x - m);
-    let cy = (top + bot) / 2.0;
-    // 上下整边
-    p.line_segment([Pos2::new(left, top), Pos2::new(right, top)], s);
-    p.line_segment([Pos2::new(left, bot), Pos2::new(right, bot)], s);
-    // 左右各两段，中段留过口
-    for x in [left, right] {
-        p.line_segment([Pos2::new(x, top), Pos2::new(x, cy - gap / 2.0)], s);
-        p.line_segment([Pos2::new(x, cy + gap / 2.0), Pos2::new(x, bot)], s);
+    let at = |fx: f32, fy: f32| Pos2::new(r.min.x + w * fx, r.min.y + w * fy);
+    // 箭杆：左下 → 右上，约 40°（避开 45°——那是禁止符号的角度）
+    let (tail, tip) = (at(0.05, 0.85), at(0.95, 0.10));
+    p.line_segment([tail, tip], s);
+    let v = tip - tail;
+    let (dir, nrm) = (v.normalized(), Vec2::new(-v.y, v.x).normalized());
+    // 箭头：从尖端沿杆后折、向两侧张开（尺寸要压得住盾）
+    for sgn in [1.0, -1.0] {
+        p.line_segment([tip, tip + (dir * -0.22 + nrm * 0.10 * sgn) * w], s);
     }
-    // 水平箭头：从左侧外穿到右侧外
-    let (from, to) = (
-        Pos2::new(left - w * 0.05, cy),
-        Pos2::new(right + w * 0.05, cy),
-    );
-    p.line_segment([from, to], s);
-    p.line_segment([to, Pos2::new(to.x - w * 0.22, cy - w * 0.14)], s);
-    p.line_segment([to, Pos2::new(to.x - w * 0.22, cy + w * 0.14)], s);
+    // 尾羽开叉：尾部两根短线沿杆向前、向两侧张开
+    for sgn in [1.0, -1.0] {
+        p.line_segment([tail, tail + (dir * 0.16 + nrm * 0.10 * sgn) * w], s);
+    }
+    // 圆盾：盾心在杆上偏尾侧，半径留足箭头/尾羽与盾缘的间隙
+    p.circle_stroke(tail + v * 0.46, w * 0.23, s);
 }
 
 /// 旋转图标：小方块画面 + 一道掠过右上角的贝塞尔弧，末端箭头指向
@@ -1106,6 +1211,24 @@ mod tests {
         let (d, w, h) = rotate_cw_rgba(&c, w, h);
         assert_eq!((w, h), (3, 2));
         assert_eq!(d, src);
+    }
+
+    #[test]
+    fn bar_strip_physical_matches_window_geometry() {
+        // ppp=1：条带贴窗口底，宽同窗口
+        assert_eq!(
+            bar_strip_physical(Vec2::new(300.0, 234.0), 1.0),
+            (0, 200, 300, 34)
+        );
+        // ppp=2：物理坐标全量翻倍
+        assert_eq!(
+            bar_strip_physical(Vec2::new(300.0, 234.0), 2.0),
+            (0, 400, 600, 68)
+        );
+        // 窗口比条带矮（极端小图深缩小）：条带钳到窗口顶且不超高
+        assert_eq!(bar_strip_physical(Vec2::new(10.0, 5.0), 1.0), (0, 0, 10, 5));
+        // 取整：窗口高 33.4 → 33px，条带钳到 33px（不超出窗口）
+        assert_eq!(bar_strip_physical(Vec2::new(0.4, 33.4), 1.0), (0, 0, 0, 33));
     }
 
     #[test]
