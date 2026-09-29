@@ -256,8 +256,8 @@ impl SettingsApp {
             return;
         }
 
-        let response = egui::Modal::new(egui::Id::new("settings-discard-confirmation"))
-            .show(ctx, |ui| {
+        let response =
+            egui::Modal::new(egui::Id::new("settings-discard-confirmation")).show(ctx, |ui| {
                 ui.set_min_width(320.0);
                 ui.strong("放弃未保存的修改？");
                 ui.add_space(8.0);
@@ -537,13 +537,11 @@ impl eframe::App for SettingsApp {
                     .fill(theme::ACCENT_FILL)
                     .corner_radius(8)
                     .min_size(egui::vec2(96.0, 34.0));
-                    let save_response = ui
-                        .add_enabled(dirty, save_btn)
-                        .on_hover_text(if dirty {
-                            "保存修改（Ctrl/Cmd+S）"
-                        } else {
-                            "当前没有需要保存的修改"
-                        });
+                    let save_response = ui.add_enabled(dirty, save_btn).on_hover_text(if dirty {
+                        "保存修改（Ctrl/Cmd+S）"
+                    } else {
+                        "当前没有需要保存的修改"
+                    });
                     if save_response.clicked() {
                         self.save(&ctx);
                     }

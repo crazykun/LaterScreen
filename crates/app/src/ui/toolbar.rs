@@ -118,12 +118,7 @@ pub fn show(app: &mut SnipApp, ctx: &egui::Context) {
 
 /// 按宽度计划排列编辑控件与交付动作。
 /// 宽屏使用单行；中窄窗口把低频动作收进“更多”，并允许编辑控件换行。
-fn bar_contents(
-    app: &mut SnipApp,
-    ui: &mut egui::Ui,
-    ctx: &egui::Context,
-    plan: ToolbarPlan,
-) {
+fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context, plan: ToolbarPlan) {
     ui.spacing_mut().item_spacing.x = 2.0;
     if plan.low_frequency_inline {
         ui.horizontal(|ui| {
@@ -212,12 +207,7 @@ fn editing_controls(app: &mut SnipApp, ui: &mut egui::Ui) {
 
 /// 绘制交付与退出动作，并按宽度计划决定低频动作是否内联。
 /// 保存、上传、贴图和识别会触发各自业务流程；复制与关闭始终留在主栏。
-fn delivery_actions(
-    app: &mut SnipApp,
-    ui: &mut egui::Ui,
-    ctx: &egui::Context,
-    plan: ToolbarPlan,
-) {
+fn delivery_actions(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context, plan: ToolbarPlan) {
     if plan.close_inline && close_button(ui) {
         // 关闭只发出窗口退出请求，不保存、不复制，避免与右侧主操作混淆。
         app.request_close(ctx);
@@ -335,8 +325,8 @@ fn qr_generate_menu(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.label("二维码内容");
         let edit = egui::TextEdit::singleline(&mut buffer).desired_width(f32::INFINITY);
         let response = ui.add(edit);
-        let mut insert = response.lost_focus()
-            && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        let mut insert =
+            response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
         app.qr_input = Some(buffer);
         ui.horizontal(|ui| {
             if ui.button("插入").clicked() {
@@ -909,9 +899,18 @@ mod tests {
     fn available_width_never_hides_copy_close_or_more() {
         for available_width in [1200.0, 620.0, 260.0] {
             let plan = toolbar_plan(available_width);
-            assert!(plan.copy_inline, "{available_width}px 时复制必须留在主工具栏");
-            assert!(plan.close_inline, "{available_width}px 时关闭必须留在主工具栏");
-            assert!(plan.more_inline, "{available_width}px 时更多必须留在主工具栏");
+            assert!(
+                plan.copy_inline,
+                "{available_width}px 时复制必须留在主工具栏"
+            );
+            assert!(
+                plan.close_inline,
+                "{available_width}px 时关闭必须留在主工具栏"
+            );
+            assert!(
+                plan.more_inline,
+                "{available_width}px 时更多必须留在主工具栏"
+            );
         }
     }
 

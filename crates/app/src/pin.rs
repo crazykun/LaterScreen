@@ -245,15 +245,10 @@ fn toolbar_layout(available_width: f32, has_upload: bool) -> ToolbarLayout {
     let overflow = visual_order
         .iter()
         .copied()
-        .filter(|item| {
-            (*item != ToolbarItem::Upload || has_upload) && !selected.contains(item)
-        })
+        .filter(|item| (*item != ToolbarItem::Upload || has_upload) && !selected.contains(item))
         .collect();
 
-    ToolbarLayout {
-        direct,
-        overflow,
-    }
+    ToolbarLayout { direct, overflow }
 }
 
 pub struct PinApp {
@@ -849,7 +844,13 @@ impl PinApp {
         let shown = layout
             .direct
             .iter()
-            .map(|item| if *item == ToolbarItem::Zoom { 92.0 } else { 26.0 })
+            .map(|item| {
+                if *item == ToolbarItem::Zoom {
+                    92.0
+                } else {
+                    26.0
+                }
+            })
             .sum::<f32>();
         let pos = Pos2::new(bar.center().x - shown / 2.0 + 4.0, bar.center().y - 12.0);
         let mut action = None;
@@ -1462,10 +1463,7 @@ mod tests {
     fn narrow_toolbar_keeps_close_and_more_as_recovery_entries() {
         let layout = toolbar_layout(0.0, true);
 
-        assert_eq!(
-            layout.direct,
-            vec![ToolbarItem::Close, ToolbarItem::More]
-        );
+        assert_eq!(layout.direct, vec![ToolbarItem::Close, ToolbarItem::More]);
     }
 
     #[test]
