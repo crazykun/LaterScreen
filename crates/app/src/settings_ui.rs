@@ -29,6 +29,16 @@ fn field(ui: &egui::Ui) -> egui::Color32 {
 fn line(ui: &egui::Ui) -> egui::Color32 {
     ui.visuals().widgets.noninteractive.bg_stroke.color
 }
+/// 品牌红作**文字**用（录屏提示/热键文案等）：走主题化前景色，别直接用
+/// `theme::ACCENT`——品牌红当文字在浅色下只有 3.6:1，见 theme::accent_ink
+fn accent_text(ui: &egui::Ui) -> egui::Color32 {
+    theme::accent_ink(ui.visuals())
+}
+/// 品牌红作**描边**用（聚焦/录入态边框）：比 ink 再推一档，见
+/// `theme::accent_line`
+fn accent_border(ui: &egui::Ui) -> egui::Color32 {
+    theme::accent_line(ui.visuals())
+}
 
 // ---------------------------------------------------------------- 卡片容器
 
@@ -70,6 +80,8 @@ pub struct SettingsApp {
     recording: Option<usize>,
     /// 捕获提示（裸键被拒等瞬时反馈）
     record_hint: Option<(String, f64)>,
+    /// 热键下标越界时的写入兜底槽（正常路径用不到，见 `hotkey_field_mut`）
+    hotkey_spill: String,
 }
 
 impl SettingsApp {
@@ -90,6 +102,7 @@ impl SettingsApp {
             toast: None,
             recording: None,
             record_hint: None,
+            hotkey_spill: String::new(),
         }
     }
 
@@ -104,23 +117,26 @@ impl SettingsApp {
             return;
         }
         // 先取副本再校验：避免循环持有 &self.cfg 的同时调 self.toast 可变借用
-        let hotkeys = [
-            ("截图热键", self.cfg.hotkey_screenshot.clone()),
-            ("取色热键", self.cfg.hotkey_picker.clone()),
-            ("贴图热键", self.cfg.hotkey_pin.clone()),
-            ("录屏热键", self.cfg.hotkey_record.clone()),
-            ("滚动截图热键", self.cfg.hotkey_scroll.clone()),
-            ("延时截图热键", self.cfg.hotkey_delay.clone()),
-            ("历史热键", self.cfg.hotkey_history.clone()),
-        ];
-        for (name, raw) in hotkeys {
+        for (field, label) in crate::tray::HOTKEY_FIELDS.iter().map(|(f, l, _)| (*f, *l)) {
+            let raw = crate::tray::hotkey_field(&self.cfg, field);
             if raw.trim().is_empty() {
                 continue;
             }
-            if let Err(e) = crate::tray::parse_hotkey(&raw) {
-                self.toast(ctx, format!("{name}「{raw}」无效: {e}"));
+            if let Err(e) = crate::tray::parse_hotkey(raw) {
+                self.toast(ctx, format!("{label}热键「{raw}」无效: {e}"));
                 return;
             }
+        }
+        // 重复组合：同组合绑两个动作时后者静默失效（HotKey 的 id 由
+        // 修饰键+主键直接算出，事件只会命中先注册的那个），必须在落盘前拦下
+        if let Some((first, second)) = crate::tray::duplicate_hotkey(&self.cfg) {
+            self.toast(
+                ctx,
+                format!(
+                    "「{first}」与「{second}」绑了同一个热键：同时只有一个会生效，请改掉其中一个"
+                ),
+            );
+            return;
         }
         if config::parse_hex_color(&self.cfg.default_color).is_none() {
             self.toast(
@@ -182,6 +198,20 @@ impl SettingsApp {
         if let Some((text, mods, key)) = captured {
             match crate::tray::parse_hotkey(&text) {
                 Ok(hk) => {
+                    // 重复组合就地拦下：同组合绑两个动作时后者静默失效（全局
+                    // 热键事件按 HotKey id 命中先注册者）。这里**不**先把值写进
+                    // cfg 再判——冲突时留在录制态并提示，用户看到的是「按了没
+                    // 进去」，比事后才发现某个热键不工作好用
+                    if let Some(other) = crate::tray::hotkey_conflict_with(&self.cfg, &hk, idx) {
+                        self.record_hint = Some((
+                            format!(
+                                "「{text}」已被「{other}」占用：同一个组合绑两个动作时只有一个\
+                                 会生效，请按其它组合或 Esc 取消"
+                            ),
+                            ctx.input(|i| i.time) + 4.0,
+                        ));
+                        return;
+                    }
                     // mac 裸 F 键：Carbon 注册收不到媒体键模式事件，但托盘的
                     // CGEventTap 兜底层持有辅助功能权限时可直接生效，录入时就地提醒
                     if cfg!(target_os = "macos") && crate::tray::is_bare_fn_key(&hk) {
@@ -211,15 +241,24 @@ impl SettingsApp {
         }
     }
 
+    /// 按下标取热键字段的可变引用。下标语义 = [`crate::tray::HOTKEY_FIELDS`]
+    /// 的行序（UI 行、录制态索引、托盘注册顺序共用），改那边要同步这里。
     fn hotkey_field_mut(&mut self, idx: usize) -> &mut String {
-        match idx {
-            0 => &mut self.cfg.hotkey_screenshot,
-            1 => &mut self.cfg.hotkey_picker,
-            2 => &mut self.cfg.hotkey_pin,
-            3 => &mut self.cfg.hotkey_record,
-            4 => &mut self.cfg.hotkey_scroll,
-            5 => &mut self.cfg.hotkey_delay,
-            _ => &mut self.cfg.hotkey_history,
+        let Some((field, _, _)) = crate::tray::HOTKEY_FIELDS.get(idx) else {
+            // 越界不应发生（下标由遍历产生）；真发生了就把写入丢到一个临时
+            // 槽里而不是 panic——配置面板崩掉会连未保存的编辑一起丢
+            return &mut self.hotkey_spill;
+        };
+        let field = *field;
+        match field {
+            "hotkey_screenshot" => &mut self.cfg.hotkey_screenshot,
+            "hotkey_picker" => &mut self.cfg.hotkey_picker,
+            "hotkey_pin" => &mut self.cfg.hotkey_pin,
+            "hotkey_record" => &mut self.cfg.hotkey_record,
+            "hotkey_scroll" => &mut self.cfg.hotkey_scroll,
+            "hotkey_delay" => &mut self.cfg.hotkey_delay,
+            "hotkey_history" => &mut self.cfg.hotkey_history,
+            _ => &mut self.hotkey_spill,
         }
     }
 
@@ -229,9 +268,9 @@ impl SettingsApp {
         let (label, stroke) = if active {
             (
                 egui::RichText::new("按下组合键…  (Esc 取消 / Backspace 清除)")
-                    .color(theme::ACCENT)
+                    .color(accent_text(ui))
                     .monospace(),
-                egui::Stroke::new(1.5, theme::ACCENT),
+                egui::Stroke::new(1.5, accent_border(ui)),
             )
         } else if value.is_empty() {
             (
@@ -336,10 +375,12 @@ impl eframe::App for SettingsApp {
                     // 主按钮：品牌红底白字（两主题通用）
                     let save_btn = egui::Button::new(
                         egui::RichText::new("保存")
-                            .color(egui::Color32::WHITE)
+                            .color(theme::ACCENT_ON_TEXT)
                             .strong(),
                     )
-                    .fill(theme::ACCENT)
+                    // 承载白字的实心底：用深一档的品牌红（品牌红本尊配白字
+                    // 4.23:1，差一点到 AA），见 theme::ACCENT_FILL
+                    .fill(theme::ACCENT_FILL)
                     .corner_radius(8)
                     .min_size(egui::vec2(96.0, 34.0));
                     if ui.add(save_btn).clicked() {
@@ -377,12 +418,21 @@ impl eframe::App for SettingsApp {
                 egui::Area::new(egui::Id::new("settings-toast"))
                     .anchor(egui::Align2::CENTER_BOTTOM, egui::Vec2::new(0.0, -72.0))
                     .show(&ctx, |ui| {
+                        // Toast 跟随主题：底色比面板抬起一层、文字用主文字令牌、
+                        // 描边用主题化的品牌红（此前两主题都是黑底红框，浅色下
+                        // 是在白面板上糊一块黑，用户反馈太丑）
                         egui::Frame::NONE
-                            .fill(egui::Color32::from_black_alpha(230))
-                            .stroke(egui::Stroke::new(1.0, theme::ACCENT))
+                            .fill(theme::toast_fill(ui.visuals()))
+                            .stroke(egui::Stroke::new(1.0, accent_border(ui)))
                             .corner_radius(8)
                             .inner_margin(egui::Margin::symmetric(14, 8))
-                            .show(ui, |ui| ui.colored_label(egui::Color32::WHITE, msg));
+                            .shadow(egui::epaint::Shadow {
+                                offset: [0, 3],
+                                blur: 12,
+                                spread: 0,
+                                color: egui::Color32::from_black_alpha(38),
+                            })
+                            .show(ui, |ui| ui.colored_label(text(ui), msg));
                     });
                 ctx.request_repaint();
             }
@@ -546,7 +596,7 @@ impl SettingsApp {
                 ui.add_space(8.0);
                 // 必须用 link：Label（ui.small）默认 Sense::hover，clicked() 永远不触发
                 if ui
-                    .link(egui::RichText::new("打开目录").color(theme::ACCENT))
+                    .link(egui::RichText::new("打开目录").color(accent_text(ui)))
                     .on_hover_text("调用系统文件管理器打开当前保存目录")
                     .clicked()
                 {
@@ -670,27 +720,18 @@ impl SettingsApp {
                 .num_columns(2)
                 .spacing([12.0, 10.0])
                 .show(ui, |ui| {
-                    row_label(ui, "截图");
-                    self.hotkey_capture(ui, 0, &self.cfg.hotkey_screenshot.clone());
-                    ui.end_row();
-                    row_label(ui, "取色");
-                    self.hotkey_capture(ui, 1, &self.cfg.hotkey_picker.clone());
-                    ui.end_row();
-                    row_label(ui, "贴图");
-                    self.hotkey_capture(ui, 2, &self.cfg.hotkey_pin.clone());
-                    ui.end_row();
-                    row_label(ui, "录屏");
-                    self.hotkey_capture(ui, 3, &self.cfg.hotkey_record.clone());
-                    ui.end_row();
-                    row_label(ui, "滚动截图");
-                    self.hotkey_capture(ui, 4, &self.cfg.hotkey_scroll.clone());
-                    ui.end_row();
-                    row_label(ui, "延时截图");
-                    self.hotkey_capture(ui, 5, &self.cfg.hotkey_delay.clone());
-                    ui.end_row();
-                    row_label(ui, "历史");
-                    self.hotkey_capture(ui, 6, &self.cfg.hotkey_history.clone());
-                    ui.end_row();
+                    // 行序与值都取自 tray::HOTKEY_FIELDS（下标即字段索引，
+                    // 见 hotkey_field_mut），新增可绑动作时这里不用改
+                    for (i, (field, label)) in crate::tray::HOTKEY_FIELDS
+                        .iter()
+                        .map(|(f, l, _)| (*f, *l))
+                        .enumerate()
+                    {
+                        row_label(ui, label);
+                        let value = crate::tray::hotkey_field(&self.cfg, field).to_string();
+                        self.hotkey_capture(ui, i, &value);
+                        ui.end_row();
+                    }
                 });
             ui.add_space(2.0);
             let mut hint = "点击右侧输入框后直接按下组合键即可录入；Backspace 清除，Esc 取消；留空 = 不注册。托盘运行中保存即生效。".to_string();

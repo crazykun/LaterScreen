@@ -958,12 +958,20 @@ impl HistoryApp {
             .pivot(egui::Align2::CENTER_BOTTOM)
             .fixed_pos(Pos2::new(panel_rect.center().x, panel_rect.max.y - 8.0))
             .show(ctx, |ui| {
+                // 与配置面板同一套 Toast 观感：底色跟随主题（历史面板通常压在
+                // 截图内容之上，半透明黑在浅色下同样突兀），文字用主文字令牌
                 egui::Frame::popup(ui.style())
-                    .fill(egui::Color32::from_black_alpha(210))
+                    .fill(crate::theme::toast_fill(ui.visuals()))
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        crate::theme::accent_line(ui.visuals()),
+                    ))
                     .show(ui, |ui| {
                         ui.add(
-                            egui::Label::new(egui::RichText::new(msg).color(egui::Color32::WHITE))
-                                .wrap_mode(egui::TextWrapMode::Extend),
+                            egui::Label::new(
+                                egui::RichText::new(msg).color(ui.visuals().text_color()),
+                            )
+                            .wrap_mode(egui::TextWrapMode::Extend),
                         );
                     });
             });
@@ -1063,7 +1071,8 @@ impl eframe::App for HistoryApp {
                     self.confirm_clear = false;
                 }
                 let (label, fg, bg) = if self.confirm_clear {
-                    // 待确认态：红底白字（两主题通用）
+                    // 待确认态：红底白字（两主题通用）——底色取品牌红深档，
+                    // 白字 5.4:1，见 theme::ACCENT_FILL 的同源约定
                     (
                         "确认?",
                         egui::Color32::WHITE,
@@ -1246,13 +1255,12 @@ impl eframe::App for HistoryApp {
                                     7.0,
                                     egui::Color32::from_rgba_unmultiplied(0xe5, 0x39, 0x35, 18),
                                 );
+                                // 描边走主题化的品牌红：品牌红本尊在浅色面板上
+                                // 只有 3.85:1，细边框看不清（见 theme::accent_line）
                                 ui.painter().rect_stroke(
                                     row_rect.expand(2.0),
                                     7.0,
-                                    egui::Stroke::new(
-                                        1.5,
-                                        egui::Color32::from_rgb(0xe5, 0x39, 0x35),
-                                    ),
+                                    egui::Stroke::new(1.5, crate::theme::accent_line(ui.visuals())),
                                     egui::StrokeKind::Outside,
                                 );
                             }
