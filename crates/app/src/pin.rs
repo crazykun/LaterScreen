@@ -133,6 +133,129 @@ fn bar_strip_physical(inner: Vec2, ppp: f32) -> (i32, i32, u32, u32) {
     )
 }
 
+/// 贴图工具条中的功能组。布局阶段只决定入口放在条带还是“更多”菜单，
+/// 实际点击后的保存、穿透等副作用仍由 `PinApp` 统一执行。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolbarItem {
+    CopyAndClose,
+    Close,
+    Zoom,
+    Topmost,
+    Through,
+    Rotate,
+    Flip,
+    Save,
+    Upload,
+    More,
+}
+
+/// 工具条布局结果：`direct` 是条带上的固定入口，`overflow` 是“更多”菜单入口。
+#[derive(Debug, PartialEq, Eq)]
+struct ToolbarLayout {
+    direct: Vec<ToolbarItem>,
+    overflow: Vec<ToolbarItem>,
+}
+
+/// 工具条和“更多”菜单共用的用户动作，避免两套入口各自维护魔法数字。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolbarAction {
+    Save,
+    Close,
+    CopyAndClose,
+    ToggleTopmost,
+    ToggleThrough,
+    Rotate,
+    FlipHorizontal,
+    FlipVertical,
+    ZoomOut,
+    ZoomReset,
+    ZoomIn,
+    Upload,
+}
+
+/// 用户点击穿透入口后的下一步。区域穿透可直接应用；整窗穿透在本贴图窗口
+/// 第一次开启前必须先展示恢复方式并等待确认。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThroughRequest {
+    Apply(bool),
+    AskForFullWindowConfirmation,
+}
+
+/// 根据当前穿透状态、平台能力和用户是否已确认，决定立即切换还是先提示。
+/// `region_supported` 来自原生窗口能力探测，返回结果由贴图 UI 执行。
+fn through_request(
+    currently_through: bool,
+    region_supported: bool,
+    full_window_confirmed: bool,
+) -> ThroughRequest {
+    if currently_through {
+        ThroughRequest::Apply(false)
+    } else if region_supported || full_window_confirmed {
+        ThroughRequest::Apply(true)
+    } else {
+        ThroughRequest::AskForFullWindowConfirmation
+    }
+}
+
+/// 根据条带可用宽度生成布局。无论窗口多窄，都为用户保留关闭和“更多”两个恢复入口；
+/// `has_upload` 来自启动时读取的上传配置，未配置时上传不应出现在条带或菜单中。
+fn toolbar_layout(available_width: f32, has_upload: bool) -> ToolbarLayout {
+    // 单图标 24pt、相邻间距 2pt；缩放组包含两个图标和 40pt 百分比按钮。
+    // 先预留“关闭 + 更多”的 52pt，再按使用频率把可选功能贪心放进条带。
+    let mut remaining = (available_width - 52.0).max(0.0);
+    let mut selected = Vec::new();
+    let priorities = [
+        (ToolbarItem::CopyAndClose, 26.0),
+        (ToolbarItem::Zoom, 92.0),
+        (ToolbarItem::Topmost, 26.0),
+        (ToolbarItem::Through, 26.0),
+        (ToolbarItem::Rotate, 26.0),
+        (ToolbarItem::Flip, 26.0),
+        (ToolbarItem::Save, 26.0),
+        (ToolbarItem::Upload, 26.0),
+    ];
+    for (item, width) in priorities {
+        if item == ToolbarItem::Upload && !has_upload {
+            continue;
+        }
+        if remaining >= width {
+            selected.push(item);
+            remaining -= width;
+        }
+    }
+
+    // 条带沿用既有视觉顺序；菜单也按这个顺序收纳所有放不下的入口，避免功能静默消失。
+    let visual_order = [
+        ToolbarItem::Topmost,
+        ToolbarItem::Through,
+        ToolbarItem::Rotate,
+        ToolbarItem::Flip,
+        ToolbarItem::Zoom,
+        ToolbarItem::Save,
+        ToolbarItem::Upload,
+        ToolbarItem::CopyAndClose,
+    ];
+    let mut direct = visual_order
+        .iter()
+        .copied()
+        .filter(|item| selected.contains(item))
+        .collect::<Vec<_>>();
+    direct.push(ToolbarItem::Close);
+    direct.push(ToolbarItem::More);
+    let overflow = visual_order
+        .iter()
+        .copied()
+        .filter(|item| {
+            (*item != ToolbarItem::Upload || has_upload) && !selected.contains(item)
+        })
+        .collect();
+
+    ToolbarLayout {
+        direct,
+        overflow,
+    }
+}
+
 pub struct PinApp {
     rgba: Vec<u8>,
     w: u32,
@@ -175,6 +298,10 @@ pub struct PinApp {
     /// 平台恢复只剩键盘（若仍持焦点）与托盘广播。开启期间靠 300ms
     /// 心跳轮询 pins.ctl
     through: bool,
+    /// 整窗穿透确认窗是否正在显示；确认前绝不调用原生整窗穿透接口。
+    pending_full_through_confirmation: bool,
+    /// 本贴图窗口是否已明确确认过整窗穿透的恢复方式，避免每次切换重复打断。
+    full_through_confirmed: bool,
     /// 穿透期间已下发的输入区保留矩形（底部条带的物理像素 x/y/w/h）。
     /// 窗口尺寸变化（缩放/旋转）后条带位置随之变化，逐帧比对指纹决定
     /// 是否重下发 XShape 输入区；None = 未下发（未穿透或整窗穿透平台）
@@ -258,6 +385,8 @@ impl PinApp {
             native,
             opacity: 1.0,
             through: false,
+            pending_full_through_confirmation: false,
+            full_through_confirmed: false,
             through_shape: None,
             ctl_seen,
             last_ctl_check: 0.0,
@@ -350,6 +479,57 @@ impl PinApp {
 
     fn do_close(&mut self, ctx: &egui::Context) {
         ctx.send_viewport_cmd(ViewportCommand::Close);
+    }
+
+    /// 处理工具条或“更多”菜单发出的穿透切换请求。输入来自当前窗口状态和
+    /// 平台能力：区域穿透直接切换；整窗穿透首次只打开确认窗，不产生原生副作用。
+    fn request_through_toggle(&mut self, ctx: &egui::Context) {
+        match through_request(
+            self.through,
+            lscreen_capture::NativeWindow::input_region_supported(),
+            self.full_through_confirmed,
+        ) {
+            ThroughRequest::Apply(through) => self.set_through(ctx, through),
+            ThroughRequest::AskForFullWindowConfirmation => {
+                self.pending_full_through_confirmation = true;
+            }
+        }
+    }
+
+    /// 显示整窗穿透确认窗。确认文案明确说明工具条也会失去点击，以及 Esc/托盘
+    /// 两条恢复路径；只有用户点击确认后才调用 `set_through` 写入原生窗口状态。
+    fn show_through_confirmation(&mut self, ctx: &egui::Context) {
+        if !self.pending_full_through_confirmation {
+            return;
+        }
+
+        let response = egui::Modal::new(egui::Id::new("pin-through-confirm")).show(ctx, |ui| {
+            ui.set_max_width(360.0);
+            ui.heading("开启整窗点击穿透？");
+            ui.label("开启后，整张贴图（包括底部工具条）都不再接收鼠标点击。");
+            ui.add_space(4.0);
+            ui.label("恢复方式：按 Esc（窗口仍有焦点时），或从托盘选择“贴图 → 关闭穿透”。");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let cancel = ui.button("取消").clicked();
+                let confirm = ui.button("我已了解，开启").clicked();
+                (confirm, cancel)
+            })
+            .inner
+        });
+        let (confirm, mut cancel) = response.inner;
+        if response.should_close() {
+            cancel = true;
+        }
+
+        if confirm {
+            // 用户已经看到并确认恢复路径，后续在同一贴图窗口内可直接再次开启。
+            self.pending_full_through_confirmation = false;
+            self.full_through_confirmed = true;
+            self.set_through(ctx, true);
+        } else if cancel {
+            self.pending_full_through_confirmation = false;
+        }
     }
 
     /// 切换点击穿透。开启后**图像区**不收指针事件（点击落到下层窗口）；
@@ -657,57 +837,22 @@ impl PinApp {
     /// 底部条带工具条：按钮在图像外侧的专属条带里（与截图覆盖层
     /// 「工具栏在选区下方」同布局），不遮挡贴图内容。
     ///
-    /// 条带宽度放不下全部按钮时**按优先级贪心装入**（前缀和 ≤ 预算），
-    /// 优先级：复制并关闭 > 关闭 > 缩放组(−/%/+) > 置顶 > 穿透 > 旋转 >
-    /// 翻转 > 保存 > 上传（仅配置了上传命令时参与）；视觉顺序固定：
-    /// 置顶 | 穿透 | 旋转 | 翻转 | [− % +] | 保存 | 上传 | 关闭 | 复制并关闭。
+    /// 条带宽度放不下全部按钮时，始终保留“关闭 + 更多”；其他入口按使用频率
+    /// 放入条带，放不下的全部进入“更多”菜单，避免窄图片让功能静默消失。
     fn show_toolbar(&mut self, ctx: &egui::Context, bar: Rect) {
         use crate::ui::toolbar::{
             action_button, draw_check, draw_close, draw_save, draw_upload, icon_button,
         };
-        // 单图标 24pt + 间距 2pt = 26pt；缩放组 = 24 + 40 + 24 + 双间距 = 92pt。
-        // 上传按钮（M15）仅在配置了上传命令时参与排布，优先级最低。
-        let mut groups: Vec<(&str, f32)> = vec![
-            ("copy", 26.0),
-            ("close", 26.0),
-            ("zoomgrp", 92.0),
-            ("top", 26.0),
-            ("through", 26.0),
-            ("rotate", 26.0),
-            ("flip", 26.0),
-            ("save", 26.0),
-        ];
         let has_upload = self.upload_cmd.is_some();
-        if has_upload {
-            groups.push(("upload", 26.0));
-        }
         let budget = bar.width() - 8.0;
-        let mut prefix = vec![0.0f32; groups.len()];
-        let mut acc = 0.0;
-        for (i, (_, w)) in groups.iter().enumerate() {
-            acc += w;
-            prefix[i] = acc;
-        }
-        // id 显示条件：它及比它更高优先级的项都装得下。
-        // 未注册的 id（如未配置上传命令时的 "upload"）恒 false——
-        // v0.10.0 曾在此对缺位 id unwrap panic（panic=abort 直接崩进程，
-        // 未配置 [upload] 的机器贴图必崩），杜绝再犯
-        let show = |id: &str| {
-            groups
-                .iter()
-                .position(|(x, _)| *x == id)
-                .map(|i| prefix[i] <= budget)
-                .unwrap_or(false)
-        };
-        // 实际装入的总宽（定位居中用）
-        let mut shown = 0.0;
-        for p in &prefix {
-            if *p <= budget {
-                shown = *p;
-            }
-        }
+        let layout = toolbar_layout(budget, has_upload);
+        let shown = layout
+            .direct
+            .iter()
+            .map(|item| if *item == ToolbarItem::Zoom { 92.0 } else { 26.0 })
+            .sum::<f32>();
         let pos = Pos2::new(bar.center().x - shown / 2.0 + 4.0, bar.center().y - 12.0);
-        let mut action: Option<u8> = None;
+        let mut action = None;
         let (topmost, through, zoom, upload_busy) = (
             self.topmost,
             self.through,
@@ -721,35 +866,37 @@ impl PinApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = Vec2::splat(2.0);
-                    if show("top")
+                    if layout.direct.contains(&ToolbarItem::Topmost)
                         && icon_button(ui, topmost, "置顶：保持在最上层（点击切换）", draw_topmost)
                             .clicked()
                     {
-                        action = Some(4);
+                        action = Some(ToolbarAction::ToggleTopmost);
                     }
-                    if show("through") {
+                    if layout.direct.contains(&ToolbarItem::Through) {
                         // 区域穿透平台（X11）：条带保留交互，再点本按钮恢复；
-                        // 整窗平台按钮随窗口一并穿透，恢复只剩 Esc/托盘
+                        // 整窗平台首次开启前会明确提示只能用 Esc/托盘恢复。
                         let tip = if lscreen_capture::NativeWindow::input_region_supported() {
                             "点击穿透：图片区点击穿到下层窗口，工具条仍可操作（再点一次恢复，或 Esc/托盘菜单）"
                         } else {
-                            "点击穿透：点击穿到下层窗口（Esc/托盘菜单恢复）"
+                            "点击穿透：整窗将不再接收点击，开启前会提示恢复方式"
                         };
                         if icon_button(ui, through, tip, draw_through).clicked() {
-                            action = Some(5);
+                            action = Some(ToolbarAction::ToggleThrough);
                         }
                     }
-                    if show("rotate") && action_button(ui, true, "旋转 90° (R)", draw_rotate) {
-                        action = Some(6);
+                    if layout.direct.contains(&ToolbarItem::Rotate)
+                        && action_button(ui, true, "旋转 90° (R)", draw_rotate)
+                    {
+                        action = Some(ToolbarAction::Rotate);
                     }
-                    if show("flip")
+                    if layout.direct.contains(&ToolbarItem::Flip)
                         && action_button(ui, true, "水平翻转 (H)，垂直翻转 (V)", draw_flip)
                     {
-                        action = Some(7);
+                        action = Some(ToolbarAction::FlipHorizontal);
                     }
-                    if show("zoomgrp") {
+                    if layout.direct.contains(&ToolbarItem::Zoom) {
                         if action_button(ui, true, "缩小（键盘 -）", draw_minus) {
-                            action = Some(8);
+                            action = Some(ToolbarAction::ZoomOut);
                         }
                         // 百分比 = 缩放预览，点击重置 100%
                         let pct = (zoom * 100.0).round() as i32;
@@ -762,55 +909,132 @@ impl PinApp {
                             .on_hover_text("缩放预览，点击重置为 100%（键盘 0）")
                             .clicked()
                         {
-                            action = Some(9);
+                            action = Some(ToolbarAction::ZoomReset);
                         }
                         if action_button(ui, true, "放大（键盘 +）", draw_plus) {
-                            action = Some(10);
+                            action = Some(ToolbarAction::ZoomIn);
                         }
                     }
-                    if show("save") && action_button(ui, true, "保存为 PNG (Ctrl+S)", draw_save)
+                    if layout.direct.contains(&ToolbarItem::Save)
+                        && action_button(ui, true, "保存为 PNG (Ctrl+S)", draw_save)
                     {
-                        action = Some(1);
+                        action = Some(ToolbarAction::Save);
                     }
-                    if show("upload") {
+                    if layout.direct.contains(&ToolbarItem::Upload) {
                         let tip = if upload_busy {
                             "上传中…"
                         } else {
                             "上传：保存并交给外部命令，链接自动复制"
                         };
                         if action_button(ui, !upload_busy, tip, draw_upload) {
-                            action = Some(11);
+                            action = Some(ToolbarAction::Upload);
                         }
                     }
-                    if show("close")
-                        && action_button(ui, true, "关闭贴图 (Esc / Delete)", draw_close)
+                    if action_button(ui, true, "关闭贴图 (Esc / Delete)", draw_close)
                     {
-                        action = Some(2);
+                        action = Some(ToolbarAction::Close);
                     }
-                    // 与覆盖层一致：最常用动作放最右，绿色对号
-                    if show("copy")
+                    if layout.direct.contains(&ToolbarItem::CopyAndClose)
                         && action_button(ui, true, "复制并关闭 (双击/Ctrl+C 仅复制)", draw_check)
                     {
-                        action = Some(3);
+                        action = Some(ToolbarAction::CopyAndClose);
                     }
+
+                    // “更多”永远保留；宽屏没有溢出项时仍提供垂直翻转，避免空菜单。
+                    let more = ui
+                        .add(
+                            egui::Button::new(egui::RichText::new("⋯").strong().size(16.0))
+                                .min_size(Vec2::splat(24.0)),
+                        )
+                        .on_hover_text("更多贴图操作");
+                    egui::Popup::menu(&more)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show(|ui| {
+                            if layout.overflow.contains(&ToolbarItem::Topmost)
+                                && ui.button(if topmost { "取消置顶" } else { "置顶" }).clicked()
+                            {
+                                action = Some(ToolbarAction::ToggleTopmost);
+                                ui.close();
+                            }
+                            if layout.overflow.contains(&ToolbarItem::Through)
+                                && ui
+                                    .button(if through { "关闭点击穿透" } else { "开启点击穿透" })
+                                    .clicked()
+                            {
+                                action = Some(ToolbarAction::ToggleThrough);
+                                ui.close();
+                            }
+                            if layout.overflow.contains(&ToolbarItem::Rotate)
+                                && ui.button("顺时针旋转 90°").clicked()
+                            {
+                                action = Some(ToolbarAction::Rotate);
+                                ui.close();
+                            }
+                            if layout.overflow.contains(&ToolbarItem::Flip)
+                                && ui.button("水平翻转").clicked()
+                            {
+                                action = Some(ToolbarAction::FlipHorizontal);
+                                ui.close();
+                            }
+                            if ui.button("垂直翻转").clicked() {
+                                action = Some(ToolbarAction::FlipVertical);
+                                ui.close();
+                            }
+                            if layout.overflow.contains(&ToolbarItem::Zoom) {
+                                ui.separator();
+                                if ui.button("放大").clicked() {
+                                    action = Some(ToolbarAction::ZoomIn);
+                                    ui.close();
+                                }
+                                if ui.button("缩小").clicked() {
+                                    action = Some(ToolbarAction::ZoomOut);
+                                    ui.close();
+                                }
+                                if ui.button("重置为 100%").clicked() {
+                                    action = Some(ToolbarAction::ZoomReset);
+                                    ui.close();
+                                }
+                            }
+                            if layout.overflow.contains(&ToolbarItem::Save)
+                                && ui.button("保存为 PNG").clicked()
+                            {
+                                action = Some(ToolbarAction::Save);
+                                ui.close();
+                            }
+                            if layout.overflow.contains(&ToolbarItem::Upload)
+                                && ui
+                                    .add_enabled(!upload_busy, egui::Button::new("上传"))
+                                    .clicked()
+                            {
+                                action = Some(ToolbarAction::Upload);
+                                ui.close();
+                            }
+                            if layout.overflow.contains(&ToolbarItem::CopyAndClose)
+                                && ui.button("复制并关闭").clicked()
+                            {
+                                action = Some(ToolbarAction::CopyAndClose);
+                                ui.close();
+                            }
+                        });
                 });
             });
         match action {
-            Some(1) => self.do_save(ctx),
-            Some(2) => self.do_close(ctx),
-            Some(3) => {
+            Some(ToolbarAction::Save) => self.do_save(ctx),
+            Some(ToolbarAction::Close) => self.do_close(ctx),
+            Some(ToolbarAction::CopyAndClose) => {
                 // 对号 = 拿到图并结束：复制后直接关闭（仅复制走双击/Ctrl+C）
                 self.do_copy(ctx);
                 self.do_close(ctx);
             }
-            Some(4) => self.toggle_topmost(ctx),
-            Some(5) => self.set_through(ctx, !through),
-            Some(6) => self.rotate_cw(ctx),
-            Some(7) => self.flip(ctx, true),
-            Some(8) => self.step_zoom(ctx, false),
-            Some(9) => self.set_zoom(ctx, 1.0),
-            Some(10) => self.step_zoom(ctx, true),
-            Some(11) => self.do_upload(ctx),
+            Some(ToolbarAction::ToggleTopmost) => self.toggle_topmost(ctx),
+            Some(ToolbarAction::ToggleThrough) => self.request_through_toggle(ctx),
+            Some(ToolbarAction::Rotate) => self.rotate_cw(ctx),
+            Some(ToolbarAction::FlipHorizontal) => self.flip(ctx, true),
+            Some(ToolbarAction::FlipVertical) => self.flip(ctx, false),
+            Some(ToolbarAction::ZoomOut) => self.step_zoom(ctx, false),
+            Some(ToolbarAction::ZoomReset) => self.set_zoom(ctx, 1.0),
+            Some(ToolbarAction::ZoomIn) => self.step_zoom(ctx, true),
+            Some(ToolbarAction::Upload) => self.do_upload(ctx),
             _ => {}
         }
     }
@@ -886,11 +1110,13 @@ impl eframe::App for PinApp {
             key_hit(Key::Minus),
             key_hit(Key::Num0),
         );
-        // 穿透中 Esc/Delete 先退出穿透（窗口若仍持键盘焦点；区域穿透下
-        // 点条带即拿回焦点，整窗穿透失焦后只能靠托盘广播），不直接关窗
-        // ——用户按 Esc 的意图大概率是「拿回交互」
+        // 确认窗显示时 Esc/Delete 只取消本次开启；穿透中则先退出穿透
+        // （窗口若仍持键盘焦点；区域穿透下点条带即拿回焦点，整窗穿透
+        // 失焦后只能靠托盘广播），两种情况都不直接关窗。
         if esc || del {
-            if self.through {
+            if self.pending_full_through_confirmation {
+                self.pending_full_through_confirmation = false;
+            } else if self.through {
                 self.set_through(&ctx, false);
             } else {
                 self.do_close(&ctx);
@@ -1010,6 +1236,7 @@ impl eframe::App for PinApp {
         }
 
         self.show_toolbar(&ctx, bar_rect);
+        self.show_through_confirmation(&ctx);
         self.show_toast(&ctx);
 
         if copy_k {
@@ -1229,6 +1456,55 @@ mod tests {
         assert_eq!(bar_strip_physical(Vec2::new(10.0, 5.0), 1.0), (0, 0, 10, 5));
         // 取整：窗口高 33.4 → 33px，条带钳到 33px（不超出窗口）
         assert_eq!(bar_strip_physical(Vec2::new(0.4, 33.4), 1.0), (0, 0, 0, 33));
+    }
+
+    #[test]
+    fn narrow_toolbar_keeps_close_and_more_as_recovery_entries() {
+        let layout = toolbar_layout(0.0, true);
+
+        assert_eq!(
+            layout.direct,
+            vec![ToolbarItem::Close, ToolbarItem::More]
+        );
+    }
+
+    #[test]
+    fn narrow_toolbar_moves_every_optional_action_into_more_menu() {
+        let layout = toolbar_layout(0.0, true);
+
+        assert_eq!(
+            layout.overflow,
+            vec![
+                ToolbarItem::Topmost,
+                ToolbarItem::Through,
+                ToolbarItem::Rotate,
+                ToolbarItem::Flip,
+                ToolbarItem::Zoom,
+                ToolbarItem::Save,
+                ToolbarItem::Upload,
+                ToolbarItem::CopyAndClose,
+            ]
+        );
+    }
+
+    #[test]
+    fn full_window_through_requires_confirmation_but_region_through_does_not() {
+        assert_eq!(
+            through_request(false, false, false),
+            ThroughRequest::AskForFullWindowConfirmation
+        );
+        assert_eq!(
+            through_request(false, true, false),
+            ThroughRequest::Apply(true)
+        );
+        assert_eq!(
+            through_request(false, false, true),
+            ThroughRequest::Apply(true)
+        );
+        assert_eq!(
+            through_request(true, false, false),
+            ThroughRequest::Apply(false)
+        );
     }
 
     #[test]

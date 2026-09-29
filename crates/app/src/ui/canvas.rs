@@ -897,36 +897,68 @@ fn on_release(app: &mut SnipApp) {
     }
 }
 
+/// 双击在画布上的最终业务动作。
+/// 只有选择工具、没有已选图元、点击空白且位于选区内时才允许复制退出。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoubleClickAction {
+    None,
+    Copy,
+}
+
+/// 根据双击上下文决定是否复制退出。
+/// 输入来自当前工具、选中态、指针命中结果和选区边界，返回值供画布事件处理使用。
+fn double_click_action(
+    tool: Tool,
+    has_selected: bool,
+    hit_element: bool,
+    inside_region: bool,
+) -> DoubleClickAction {
+    if tool == Tool::Select && !has_selected && !hit_element && inside_region {
+        DoubleClickAction::Copy
+    } else {
+        DoubleClickAction::None
+    }
+}
+
+/// 处理画布双击：优先进入文本编辑，其次仅在选择工具双击空白时复制退出。
+/// 指针坐标来自当前画布响应；方法可能开启文档快照或触发复制并关闭窗口。
 fn on_double_click(app: &mut SnipApp, ctx: &egui::Context, pointer_px: Option<P2>) {
     let Some(p) = pointer_px else { return };
     if app.text_edit.is_some() {
         return;
     }
-    // 点击型工具的双击是连续放置（标号 1、2、3…），不触发复制退出
-    if is_click_tool(app.tool) {
+    // 非选择工具的双击保留给连续绘制或放置，不能意外完成截图。
+    if app.tool != Tool::Select {
         return;
     }
-    // Select 工具双击文本 → 进入编辑
-    if app.tool == Tool::Select {
-        if let Some(id) = app.hover.or(app.selected) {
-            if let Some(Element {
-                kind: ElementKind::Text { content, .. },
-                ..
-            }) = app.doc.get(id)
-            {
-                let buffer = content.clone();
-                app.doc.begin_change();
-                app.text_edit = Some(TextEditState {
-                    id,
-                    buffer,
-                    is_new: false,
-                });
-                return;
-            }
+
+    // 直接按双击坐标重新命中，避免使用上一帧 hover 导致“点图元却复制退出”。
+    let hit = app.doc.hit_top(p, HIT_TOL_PT * app.last_view.scale);
+    if let Some(id) = hit {
+        // 选择工具双击文本仍进入编辑；双击其他图元只保留选中态，不执行复制。
+        if let Some(Element {
+            kind: ElementKind::Text { content, .. },
+            ..
+        }) = app.doc.get(id)
+        {
+            let buffer = content.clone();
+            app.doc.begin_change();
+            app.text_edit = Some(TextEditState {
+                id,
+                buffer,
+                is_new: false,
+            });
         }
+        return;
     }
-    // 其余情况：双击选区内 = 复制并退出
-    if app.region.contains(p) {
+
+    if double_click_action(
+        app.tool,
+        app.selected.is_some(),
+        hit.is_some(),
+        app.region.contains(p),
+    ) == DoubleClickAction::Copy
+    {
         app.copy_and_exit(ctx);
     }
 }
@@ -1277,5 +1309,36 @@ pub fn show_text_editor(app: &mut SnipApp, ctx: &egui::Context) {
     } else if cancel {
         app.text_edit = None;
         app.doc.cancel_change();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{double_click_action, DoubleClickAction};
+    use lscreen_core::Tool;
+
+    /// 只有选择工具在无选中、未命中图元的选区空白处双击才会复制退出。
+    #[test]
+    fn double_click_copy_requires_select_tool_no_selection_and_blank_hit() {
+        assert_eq!(
+            double_click_action(Tool::Select, false, false, true),
+            DoubleClickAction::Copy
+        );
+        assert_eq!(
+            double_click_action(Tool::Rect, false, false, true),
+            DoubleClickAction::None
+        );
+        assert_eq!(
+            double_click_action(Tool::Select, true, false, true),
+            DoubleClickAction::None
+        );
+        assert_eq!(
+            double_click_action(Tool::Select, false, true, true),
+            DoubleClickAction::None
+        );
+        assert_eq!(
+            double_click_action(Tool::Select, false, false, false),
+            DoubleClickAction::None
+        );
     }
 }
