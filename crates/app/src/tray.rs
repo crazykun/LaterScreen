@@ -873,7 +873,7 @@ mod native_impl {
 
     use std::collections::HashMap;
     use tray_icon::menu::{Menu, MenuEvent, MenuItem};
-    use tray_icon::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
+    use tray_icon::{TrayIcon, TrayIconBuilder};
     use winit::application::ApplicationHandler;
     use winit::event::WindowEvent;
     use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -881,7 +881,6 @@ mod native_impl {
 
     enum UserEvent {
         Menu(String),
-        TrayClick,
         Hotkey(u32),
     }
 
@@ -931,12 +930,10 @@ mod native_impl {
             if let Some(icon) = icon {
                 builder = builder.with_icon(icon);
             }
-            // Windows：右键才弹菜单，左键保留为快速截图入口（tray-icon 的
-            // menu_on_left_click 默认开——左键会同时弹菜单并触发快速动作）。
-            // macOS 保持默认：左键弹菜单符合系统惯例，见 handle() 的 TrayClick。
-            if cfg!(windows) {
-                builder = builder.with_menu_on_left_click(false);
-            }
+            // 三平台统一：**左键与右键单击都只弹菜单**，不再把左键派发成
+            // 快速截图（v0.11.1 及之前 Windows 独有的设计，用户主诉「点一
+            // 下托盘图标就开始截图了」）。快速入口改为菜单项/全局热键。
+            // tray-icon 的 `menu_on_left_click` 默认即为 true，此处不再覆写。
             match builder.build() {
                 Ok(tray) => self.tray = Some(tray),
                 // 创建失败（托盘服务不可用等）降级为「仅热键」常驻：事件循环
@@ -966,13 +963,6 @@ mod native_impl {
                     "quit" => Some(Action::Quit),
                     _ => None,
                 },
-                // 左键/双击托盘 = 快速截图（完整菜单在右键）。macOS 例外：
-                // 左键弹菜单是系统惯例（menu_on_left_click 默认开启），若再派发
-                // 截图会「弹菜单的同时又开了截图覆盖层」
-                #[cfg(not(target_os = "macos"))]
-                UserEvent::TrayClick => Some(Action::Screenshot),
-                #[cfg(target_os = "macos")]
-                UserEvent::TrayClick => None,
                 UserEvent::Hotkey(id) => self.hotkeys.action_for_id(id),
             };
             if let Some(a) = action {
@@ -1093,21 +1083,9 @@ mod native_impl {
                 let _ = p.send_event(UserEvent::Menu(ev.id.0.clone()));
             }));
         }
-        {
-            let p = proxy.clone();
-            TrayIconEvent::set_event_handler(Some(move |ev: TrayIconEvent| {
-                let left = matches!(
-                    &ev,
-                    TrayIconEvent::Click { button, .. } if *button == MouseButton::Left
-                ) || matches!(
-                    &ev,
-                    TrayIconEvent::DoubleClick { button, .. } if *button == MouseButton::Left
-                );
-                if left {
-                    let _ = p.send_event(UserEvent::TrayClick);
-                }
-            }));
-        }
+        // 托盘点击不再注册处理器：tray-icon 自身会在左右键单击时弹菜单
+        // （`menu_on_left_click`/`menu_on_right_click` 均默认为 true）。
+        // 此前这里监听左键并派发快速截图，就是用户主诉的「点图标就开始截图」。
         {
             let p = proxy;
             GlobalHotKeyEvent::set_event_handler(Some(move |ev: GlobalHotKeyEvent| {
