@@ -73,8 +73,75 @@ fn card<R>(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui) -> R
 
 // ---------------------------------------------------------------- App
 
+/// 用户尝试关闭配置面板时，未保存保护层给 UI 的处理结论。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseDecision {
+    /// 当前配置没有改动，可以立即关闭窗口。
+    CloseNow,
+    /// 当前配置有未保存改动，需要先让用户确认是否放弃。
+    ConfirmDiscard,
+}
+
+/// 配置编辑会话的未保存保护状态。
+///
+/// `saved` 来自窗口打开时加载的配置，或最近一次成功落盘的配置；UI 每帧把
+/// 当前编辑值传入，从而统一判断保存按钮、Esc、关闭按钮和系统关闭事件。
+struct UnsavedChanges {
+    saved: Config,
+    confirming_discard: bool,
+}
+
+impl UnsavedChanges {
+    /// 以已落盘配置创建保护状态；输入来自配置窗口初始化，后续用于判断是否有改动。
+    fn new(saved: &Config) -> Self {
+        Self {
+            saved: saved.clone(),
+            confirming_discard: false,
+        }
+    }
+
+    /// 比较当前编辑值和最近一次成功保存值；返回结果供保存按钮和关闭流程共用。
+    fn is_dirty(&self, current: &Config) -> bool {
+        current != &self.saved
+    }
+
+    /// 处理一次关闭请求；有改动时转入确认态，无改动时允许窗口直接关闭。
+    fn request_close(&mut self, current: &Config) -> CloseDecision {
+        if self.is_dirty(current) {
+            self.confirming_discard = true;
+            CloseDecision::ConfirmDiscard
+        } else {
+            CloseDecision::CloseNow
+        }
+    }
+
+    /// 用户选择继续编辑后退出确认态；当前配置保持不变，仍然标记为未保存。
+    fn continue_editing(&mut self) {
+        self.confirming_discard = false;
+    }
+
+    /// 返回是否正在等待用户确认放弃修改，供确认弹窗决定是否展示。
+    fn confirming_discard(&self) -> bool {
+        self.confirming_discard
+    }
+
+    /// 在配置成功落盘后更新基线；输入是刚写入磁盘的配置，返回后的编辑态为干净。
+    fn mark_saved(&mut self, current: &Config) {
+        self.saved = current.clone();
+        self.confirming_discard = false;
+    }
+
+    /// 放弃编辑并把当前配置恢复为最近保存值；调用方随后重新应用主题并关闭窗口。
+    fn discard_into(&mut self, current: &mut Config) {
+        *current = self.saved.clone();
+        self.confirming_discard = false;
+    }
+}
+
 pub struct SettingsApp {
     cfg: Config,
+    /// 最近一次成功落盘的配置与关闭确认状态，用于统一保护所有未保存编辑。
+    unsaved: UnsavedChanges,
     toast: Option<(String, f64)>,
     /// 正在捕获哪个热键字段（0=截图 1=取色 2=贴图）
     recording: Option<usize>,
@@ -87,8 +154,10 @@ pub struct SettingsApp {
 }
 
 impl SettingsApp {
+    /// 创建配置窗口；配置从磁盘加载，副本作为本次编辑会话的未保存判断基线。
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let cfg = Config::load();
+        let unsaved = UnsavedChanges::new(&cfg);
         crate::apply_window_class(cc);
         theme::apply(&cc.egui_ctx, cfg.theme);
         // 独立窗口必须自己挂中文字体；先用 core Renderer 验证可解析
@@ -101,6 +170,7 @@ impl SettingsApp {
         }
         Self {
             cfg,
+            unsaved,
             toast: None,
             recording: None,
             record_hint: None,
@@ -157,8 +227,69 @@ impl SettingsApp {
             return;
         }
         match self.cfg.save() {
-            Ok(()) => self.toast(ctx, "已保存（托盘进程自动生效）"),
+            Ok(()) => {
+                // 只有真实落盘成功才推进基线；保存失败时必须继续保持未保存状态，
+                // 否则用户关闭窗口会丢掉尚未写入磁盘的配置。
+                self.unsaved.mark_saved(&self.cfg);
+                self.toast(ctx, "已保存（托盘进程自动生效）");
+            }
             Err(e) => self.toast(ctx, format!("保存失败: {e}")),
+        }
+    }
+
+    /// 响应关闭按钮、Esc 或系统标题栏关闭；无改动直接关窗，有改动则打开确认框。
+    fn request_close(&mut self, ctx: &egui::Context) {
+        match self.unsaved.request_close(&self.cfg) {
+            CloseDecision::CloseNow => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            CloseDecision::ConfirmDiscard => {
+                // 关闭确认优先于热键录入，避免录入态继续吞掉确认框的 Esc。
+                self.recording = None;
+            }
+        }
+    }
+
+    /// 绘制未保存确认框；放弃时恢复最近保存值和主题，继续编辑则只关闭确认框。
+    fn discard_confirmation(&mut self, ctx: &egui::Context) {
+        if !self.unsaved.confirming_discard() {
+            return;
+        }
+
+        let response =
+            egui::Modal::new(egui::Id::new("settings-discard-confirmation")).show(ctx, |ui| {
+                ui.set_min_width(320.0);
+                ui.strong("放弃未保存的修改？");
+                ui.add_space(8.0);
+                ui.label("当前修改尚未保存，关闭后将无法恢复。");
+                ui.add_space(12.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let discard = ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("放弃修改")
+                                    .color(theme::ACCENT_ON_TEXT)
+                                    .strong(),
+                            )
+                            .fill(theme::ACCENT_FILL)
+                            .corner_radius(6),
+                        )
+                        .clicked();
+                    let continue_editing = ui.button("继续编辑").clicked();
+                    (discard, continue_editing)
+                })
+                .inner
+            });
+        let (discard, continue_editing) = response.inner;
+
+        if discard {
+            // 主题选择会即时预览，因此放弃编辑时必须在关窗前恢复已保存主题，
+            // 避免窗口关闭动画或其它共享视图短暂保留未保存外观。
+            self.unsaved.discard_into(&mut self.cfg);
+            theme::apply(ctx, self.cfg.theme);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if continue_editing || response.should_close() {
+            self.unsaved.continue_editing();
         }
     }
 
@@ -353,15 +484,35 @@ impl eframe::App for SettingsApp {
         visuals.panel_fill.to_normalized_gamma_f32()
     }
 
+    /// 绘制配置面板并统一处理保存快捷键和三种关闭入口的未保存保护。
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         // 热键捕获必须最先处理：吃掉所有按键事件（含 Esc，防止录制中关窗）
         self.capture_hotkey(&ctx);
+        // 系统标题栏关闭会在本帧标记 close_requested；有修改时必须立即取消，
+        // 等用户在确认框作出选择；无修改时不发 CancelClose，让 eframe 正常退出。
+        if ctx.input(|i| i.viewport().close_requested()) && self.unsaved.is_dirty(&self.cfg) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.request_close(&ctx);
+        }
+
+        let save_shortcut =
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S));
+        if save_shortcut && self.unsaved.is_dirty(&self.cfg) {
+            // 快捷键和保存按钮共用完整校验与落盘流程；失败只提示，不推进保存基线。
+            self.save(&ctx);
+        }
+
         let esc = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         if esc {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            return;
+            if self.unsaved.confirming_discard() {
+                self.unsaved.continue_editing();
+            } else {
+                self.request_close(&ctx);
+            }
         }
+
+        let dirty = self.unsaved.is_dirty(&self.cfg);
 
         // 底部按钮条（固定高度，勿动：见上一版 Panel 高度自增 bug 的复盘注释）
         egui::Panel::bottom(egui::Id::new("settings-bottom"))
@@ -386,7 +537,12 @@ impl eframe::App for SettingsApp {
                     .fill(theme::ACCENT_FILL)
                     .corner_radius(8)
                     .min_size(egui::vec2(96.0, 34.0));
-                    if ui.add(save_btn).clicked() {
+                    let save_response = ui.add_enabled(dirty, save_btn).on_hover_text(if dirty {
+                        "保存修改（Ctrl/Cmd+S）"
+                    } else {
+                        "当前没有需要保存的修改"
+                    });
+                    if save_response.clicked() {
                         self.save(&ctx);
                     }
                     ui.add_space(8.0);
@@ -396,7 +552,15 @@ impl eframe::App for SettingsApp {
                         .min_size(egui::vec2(80.0, 34.0))
                         .stroke(egui::Stroke::new(1.0, line(ui)));
                     if ui.add(close_btn).clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        self.request_close(&ctx);
+                    }
+                    if dirty {
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new("有未保存修改")
+                                .color(muted(ui))
+                                .size(12.0),
+                        );
                     }
                 });
             });
@@ -440,6 +604,8 @@ impl eframe::App for SettingsApp {
                 ctx.request_repaint();
             }
         }
+
+        self.discard_confirmation(&ctx);
     }
 }
 
@@ -914,4 +1080,54 @@ fn input_field(ui: &mut egui::Ui, builder: egui::TextEdit<'_>) -> egui::Response
 
 fn egui_to_rgba(c: egui::Color32) -> lscreen_core::Rgba {
     lscreen_core::Rgba([c.r(), c.g(), c.b(), 0xff])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn changed_config_requires_confirmation_and_can_continue_editing() {
+        let original = Config::default();
+        let mut edited = original.clone();
+        edited.save_dir = "D:/截图".to_string();
+        let mut guard = UnsavedChanges::new(&original);
+
+        assert_eq!(guard.request_close(&edited), CloseDecision::ConfirmDiscard);
+        assert!(guard.confirming_discard());
+
+        guard.continue_editing();
+        assert!(!guard.confirming_discard());
+        assert!(guard.is_dirty(&edited));
+    }
+
+    #[test]
+    fn successful_save_clears_dirty_state_and_allows_close() {
+        let original = Config::default();
+        let mut edited = original.clone();
+        edited.default_width = 8.0;
+        let mut guard = UnsavedChanges::new(&original);
+        assert!(guard.is_dirty(&edited));
+
+        guard.mark_saved(&edited);
+
+        assert!(!guard.is_dirty(&edited));
+        assert_eq!(guard.request_close(&edited), CloseDecision::CloseNow);
+    }
+
+    #[test]
+    fn discard_restores_saved_config_including_previewed_theme() {
+        let mut original = Config::default();
+        original.theme = config::ThemeMode::Light;
+        let mut edited = original.clone();
+        edited.theme = config::ThemeMode::Dark;
+        let mut guard = UnsavedChanges::new(&original);
+        assert_eq!(guard.request_close(&edited), CloseDecision::ConfirmDiscard);
+
+        guard.discard_into(&mut edited);
+
+        assert_eq!(edited.theme, config::ThemeMode::Light);
+        assert!(!guard.is_dirty(&edited));
+        assert!(!guard.confirming_discard());
+    }
 }
