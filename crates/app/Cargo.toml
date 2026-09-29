@@ -11,10 +11,10 @@ ctrlc = "3"
 eframe = { version = "0.35", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
 global-hotkey = "0.8"
 image = { version = "0.25", default-features = false, features = ["png"] }
-lscreen-capture = { version = "0.11.3", path = "../capture" }
-lscreen-core = { version = "0.11.3", path = "../core" }
-lscreen-ocr = { version = "0.11.3", path = "../ocr" }
-lscreen-record = { version = "0.11.3", path = "../record" }
+lscreen-capture = { version = "0.11.4", path = "../capture" }
+lscreen-core = { version = "0.11.4", path = "../core" }
+lscreen-ocr = { version = "0.11.4", path = "../ocr" }
+lscreen-record = { version = "0.11.4", path = "../record" }
 # 更新检测：纯 Rust TLS（rustls），不引入任何链接型依赖（Win/mac/Linux 各自
 # 的原生 TLS 在 Linux 侧会拖进 OpenSSL 动态库，违反硬约束）。不开 gzip ——
 # GitHub API 只在请求 Accept-Encoding 时才压缩；json 只用于读 tag_name

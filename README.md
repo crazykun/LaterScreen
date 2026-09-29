@@ -209,7 +209,7 @@ command = ["/usr/local/bin/uploader", "--token", "xxx"]
 ./scripts/package.sh x86_64-unknown-linux-gnu   # 指定目标
 ```
 
-交叉编译需装对应 gcc / g++（openh264 是 C++ 源）；rpm 需 `apt install rpm`；AppImage 需 [appimagetool](https://github.com/AppImage/appimagetool)。全平台出包（含 macOS、Windows MSVC）走 GitHub Actions：`git tag v0.11.3 && git push --tags`。
+交叉编译需装对应 gcc / g++（openh264 是 C++ 源）；rpm 需 `apt install rpm`；AppImage 需 [appimagetool](https://github.com/AppImage/appimagetool)。全平台出包（含 macOS、Windows MSVC）走 GitHub Actions：`git tag v0.11.4 && git push --tags`。
 
 ## 🏗️ 架构
 

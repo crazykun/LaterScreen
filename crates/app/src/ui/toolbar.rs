@@ -16,25 +16,13 @@ const BTN: f32 = 24.0;
 /// 宽屏工具栏的目标宽度，用于位置夹取；实际宽度仍受窗口可用宽度限制。
 const BAR_W: f32 = 900.0;
 
-/// 工具栏在当前可用宽度下必须留在主栏的操作。
-/// 输入来自当前窗口的逻辑像素宽度，结果供工具栏布局和回归测试共同使用。
-#[derive(Clone, Copy)]
-struct ToolbarPlan {
-    copy_inline: bool,
-    close_inline: bool,
-    more_inline: bool,
-    low_frequency_inline: bool,
-}
-
-/// 根据窗口可用宽度生成工具栏计划。
-/// 复制、关闭与更多是任何尺寸下的逃生入口，不能因响应式收纳而隐藏。
-fn toolbar_plan(available_width: f32) -> ToolbarPlan {
-    ToolbarPlan {
-        copy_inline: true,
-        close_inline: true,
-        more_inline: true,
-        low_frequency_inline: available_width >= 900.0,
-    }
+/// 根据窗口可用宽度决定工具栏布局行数：
+/// 宽屏（≥ [`BAR_W`]）单行放下全部控件；窄屏分两行——第一行编辑控件
+/// 自然折行，第二行固定放交付动作（保存/上传/贴图/识别/生成/退出/复制），
+/// 再窄也只增加行数，**任何动作都不收进二级菜单**（2026-09-29 用户反馈：
+/// 文字菜单与图标工具栏割裂、竖排展开遮挡操作）。
+fn single_row(available_width: f32) -> bool {
+    available_width >= BAR_W
 }
 
 const TOOLS: &[(Tool, &str)] = &[
@@ -65,7 +53,6 @@ const PALETTE: &[Rgba] = &[
 pub fn show(app: &mut SnipApp, ctx: &egui::Context) {
     let screen = ctx.content_rect();
     let available_width = (screen.width() - 8.0).max(140.0);
-    let plan = toolbar_plan(available_width);
     let bar_width = BAR_W.min(available_width);
     let view = View {
         origin: screen.min,
@@ -73,8 +60,8 @@ pub fn show(app: &mut SnipApp, ctx: &egui::Context) {
     };
     let region_pt = view.rect_pt(app.region);
 
-    // 中窄布局会把编辑控件折成多行；提前为工具栏预留高度，避免贴屏底时被裁掉。
-    let bar_height = if plan.low_frequency_inline {
+    // 窄屏分两行，行数还会随折行增加；提前为工具栏预留高度，避免贴屏底被裁。
+    let bar_height = if single_row(available_width) {
         40.0
     } else if available_width < 320.0 {
         136.0
@@ -111,28 +98,28 @@ pub fn show(app: &mut SnipApp, ctx: &egui::Context) {
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_max_width(bar_width);
-                bar_contents(app, ui, ctx, plan);
+                bar_contents(app, ui, ctx);
             });
         });
 }
 
-/// 按宽度计划排列编辑控件与交付动作。
-/// 宽屏使用单行；中窄窗口把低频动作收进“更多”，并允许编辑控件换行。
-fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context, plan: ToolbarPlan) {
+/// 排列编辑控件与交付动作。宽屏单行；窄屏两行——编辑控件自然折行，
+/// 交付动作固定一行（动作全为图标，折行时仍可全部展示）。
+fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     ui.spacing_mut().item_spacing.x = 2.0;
-    if plan.low_frequency_inline {
+    if single_row(ui.available_width()) {
         ui.horizontal(|ui| {
             editing_controls(app, ui);
             ui.separator();
-            delivery_actions(app, ui, ctx, plan);
+            delivery_actions(app, ui, ctx);
         });
     } else {
         ui.vertical(|ui| {
-            // 中窄窗口先让标注控件自然折行，第二行固定保留退出、更多与复制，
-            // 这样再窄的窗口也不会把完成或退出入口挤到屏幕外。
+            // 窄窗口先让标注控件自然折行，第二行固定放全部交付图标，
+            // 再窄的窗口也不会把完成或退出入口挤到屏幕外。
             ui.horizontal_wrapped(|ui| editing_controls(app, ui));
             ui.separator();
-            ui.horizontal(|ui| delivery_actions(app, ui, ctx, plan));
+            ui.horizontal(|ui| delivery_actions(app, ui, ctx));
         });
     }
 }
@@ -205,33 +192,15 @@ fn editing_controls(app: &mut SnipApp, ui: &mut egui::Ui) {
     }
 }
 
-/// 绘制交付与退出动作，并按宽度计划决定低频动作是否内联。
-/// 保存、上传、贴图和识别会触发各自业务流程；复制与关闭始终留在主栏。
-fn delivery_actions(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context, plan: ToolbarPlan) {
-    if plan.close_inline && close_button(ui) {
+/// 绘制全部交付与退出动作（全图标，任何窗口宽度都直接展示）。
+/// 保存、上传、贴图和识别会触发各自业务流程；生成二维码弹出输入浮层。
+fn delivery_actions(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
+    if close_button(ui) {
         // 关闭只发出窗口退出请求，不保存、不复制，避免与右侧主操作混淆。
         app.request_close(ctx);
     }
     ui.separator();
 
-    if plan.low_frequency_inline {
-        inline_low_frequency_actions(app, ui, ctx);
-    }
-
-    if plan.more_inline {
-        more_menu(app, ui, ctx, !plan.low_frequency_inline);
-    }
-    ui.add_space(6.0);
-
-    if plan.copy_inline && primary_copy_button(ui) {
-        // 主操作会合成当前选区、写入剪贴板并关闭截图窗口。
-        app.copy_and_exit(ctx);
-    }
-}
-
-/// 在宽屏主栏展示保存、上传、贴图与识别动作。
-/// 这些动作在中窄窗口会由“更多”菜单承接，避免挤掉复制和关闭。
-fn inline_low_frequency_actions(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     if action_button(ui, true, "保存为 PNG (Ctrl+S)", draw_save) {
         app.save_and_exit(ctx);
     }
@@ -256,97 +225,56 @@ fn inline_low_frequency_actions(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui
     if action_button(ui, true, "识别选区内的文字 (OCR)", draw_ocr) {
         app.scan_ocr(ctx);
     }
+    qr_generate_button(app, ui, ctx);
+
+    ui.add_space(6.0);
+
+    if primary_copy_button(ui) {
+        // 主操作会合成当前选区、写入剪贴板并关闭截图窗口。
+        app.copy_and_exit(ctx);
+    }
 }
 
-/// 显示“更多”菜单；中窄宽度收纳全部低频动作，宽屏仍保留二维码生成入口。
-/// 菜单项接收当前选区业务数据，可能保存文件、调用上传命令、识别内容或创建贴图。
-fn more_menu(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context, include_all: bool) {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(44.0, 32.0), Sense::click());
-    let visuals = ui.style().interact(&response);
+/// 二维码生成入口：图标按钮 + 弹出文本输入浮层（生成结果插入标注层）。
+/// 图标 = 识别二维码 + 右上角「+」，与识别动作在视觉上成对。
+fn qr_generate_button(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(BTN), Sense::click());
+    let vis = ui.style().interact(&response);
     if response.hovered() {
-        ui.painter().rect_filled(rect, 4.0, visuals.bg_fill);
+        ui.painter().rect_filled(rect, 4.0, vis.bg_fill);
     }
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        "更多",
-        egui::FontId::proportional(13.0),
-        visuals.fg_stroke.color,
-    );
-    let response = response.on_hover_text("更多操作");
+    draw_qr_gen(ui.painter(), rect.shrink(6.0), vis.fg_stroke.color);
+    let response = response.on_hover_text("生成二维码：输入文本插入标注层（可拖动/四角等比缩放）");
     egui::Popup::menu(&response)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
-            ui.set_min_width(190.0);
-            if include_all {
-                // 中窄窗口把会产生文件、外部命令或识别任务的低频动作统一收纳到此处。
-                if ui.button("保存为 PNG (Ctrl+S)").clicked() {
-                    // 合成当前选区并写入配置的保存目录，成功后退出截图窗口。
-                    app.save_and_exit(ctx);
+            ui.set_min_width(230.0);
+            let mut buffer = app.qr_input.clone().unwrap_or_default();
+            ui.label("二维码内容");
+            let edit = egui::TextEdit::singleline(&mut buffer).desired_width(f32::INFINITY);
+            let response = ui.add(edit);
+            let mut insert =
+                response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            app.qr_input = Some(buffer);
+            ui.horizontal(|ui| {
+                if ui.button("插入").clicked() {
+                    insert = true;
+                }
+                if ui.button("取消").clicked() {
+                    app.qr_input = None;
                     ui.close();
                 }
-                let upload_busy = app.upload_job.is_some();
-                if app.config.upload_command().is_some()
-                    && ui
-                        .add_enabled(!upload_busy, egui::Button::new("上传并复制链接"))
-                        .clicked()
-                {
-                    // 先保存选区，再把文件路径交给用户配置的上传命令，并复制返回链接。
-                    app.upload_and_exit(ctx);
-                    ui.close();
+            });
+            if insert {
+                let text = app.qr_input.take().unwrap_or_default();
+                let text = text.trim();
+                if !text.is_empty() {
+                    // 生成二维码位图并写入当前文档，后续仍可移动、缩放和撤销。
+                    app.insert_qr(ctx, text);
                 }
-                if ui.button("贴图 (Ctrl+P)").clicked() {
-                    // 导出当前选区并创建独立贴图窗口，原截图窗口随即退出。
-                    app.pin_and_exit(ctx);
-                    ui.close();
-                }
-                if ui.button("识别二维码").clicked() {
-                    // 异步扫描当前选区，结果稍后回到截图界面展示或复制。
-                    app.scan_qr(ctx);
-                    ui.close();
-                }
-                if ui.button("识别文字 (OCR)").clicked() {
-                    // 异步识别当前选区文字，避免阻塞覆盖层绘制。
-                    app.scan_ocr(ctx);
-                    ui.close();
-                }
-                ui.separator();
-            }
-            qr_generate_menu(app, ui, ctx);
-        });
-}
-
-/// 在“更多”中提供二维码文本输入并把生成结果插入标注层。
-/// 输入来自用户文本，成功后生成位图图元供当前文档继续移动和缩放。
-fn qr_generate_menu(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
-    ui.menu_button("生成二维码…", |ui| {
-        ui.set_min_width(230.0);
-        let mut buffer = app.qr_input.clone().unwrap_or_default();
-        ui.label("二维码内容");
-        let edit = egui::TextEdit::singleline(&mut buffer).desired_width(f32::INFINITY);
-        let response = ui.add(edit);
-        let mut insert =
-            response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-        app.qr_input = Some(buffer);
-        ui.horizontal(|ui| {
-            if ui.button("插入").clicked() {
-                insert = true;
-            }
-            if ui.button("取消").clicked() {
-                app.qr_input = None;
                 ui.close();
             }
         });
-        if insert {
-            let text = app.qr_input.take().unwrap_or_default();
-            let text = text.trim();
-            if !text.is_empty() {
-                // 生成二维码位图并写入当前文档，后续仍可移动、缩放和撤销。
-                app.insert_qr(ctx, text);
-            }
-            ui.close();
-        }
-    });
 }
 
 /// 绘制独立的关闭按钮；返回是否请求退出，不直接修改截图会话。
@@ -370,8 +298,10 @@ fn close_button(ui: &mut egui::Ui) -> bool {
 /// 该按钮固定为 76×32 逻辑点，让完成动作比普通图标更醒目且含义更明确。
 fn primary_copy_button(ui: &mut egui::Ui) -> bool {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(76.0, 32.0), Sense::click());
+    // 悬停压深一档而非提亮：ACCENT_FILL 上提亮白字对比度跌破 AA（4.98→4.36），
+    // 压深则升到 5.65（同色系 Material Red 800 方向）。
     let fill = if response.hovered() {
-        ACCENT_FILL.gamma_multiply(1.08)
+        ACCENT_FILL.gamma_multiply(0.92)
     } else {
         ACCENT_FILL
     };
@@ -730,9 +660,11 @@ pub(crate) fn draw_save(p: &egui::Painter, r: Rect, c: Color32) {
     );
 }
 
-/// 绿色对号：复制并退出（最常用动作，固定绿色突出）。
-pub(crate) fn draw_check(p: &egui::Painter, r: Rect, _c: Color32) {
-    let s = Stroke::new(2.0, Color32::from_rgb(0x4c, 0xaf, 0x50));
+/// 对号图标：颜色跟随调用方（`c`）——贴图条把它画在弹层底色上（普通前景
+/// 色），截图覆盖层的主复制按钮把它画在品牌红实心底上（传 `ACCENT_ON_TEXT`
+/// 白，v0.11.4 修复：绿色对号在红底上只有 1.79:1，红绿色弱也不可辨）。
+pub(crate) fn draw_check(p: &egui::Painter, r: Rect, c: Color32) {
+    let s = Stroke::new(2.0, c);
     let w = r.width();
     p.add(Shape::line(
         vec![
@@ -810,6 +742,16 @@ fn draw_qr(p: &egui::Painter, r: Rect, c: Color32) {
         0.0,
         c,
     );
+}
+
+/// 生成二维码图标（M13）：识别图标 + 右上角「+」——生成语义与识别区分。
+fn draw_qr_gen(p: &egui::Painter, r: Rect, c: Color32) {
+    draw_qr(p, r, c);
+    let (cx, cy) = (r.max.x, r.min.y);
+    let s = 2.5;
+    let plus = Stroke::new(1.2, c);
+    p.line_segment([Pos2::new(cx - s, cy), Pos2::new(cx + s, cy)], plus);
+    p.line_segment([Pos2::new(cx, cy - s), Pos2::new(cx, cy + s)], plus);
 }
 
 fn draw_ocr(p: &egui::Painter, r: Rect, c: Color32) {
@@ -892,33 +834,14 @@ fn apply_style_to_selected(app: &mut SnipApp, snapshot: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::toolbar_plan;
+    use super::single_row;
 
-    /// 不同宽度下，完成与退出入口都必须留在主工具栏。
+    /// 宽屏单行、窄屏两行折行；任何宽度下都没有动作被收进二级菜单
+    /// （布局函数已是「全图标常驻」，这里锁住行数切换阈值不被误改）。
     #[test]
-    fn available_width_never_hides_copy_close_or_more() {
-        for available_width in [1200.0, 620.0, 260.0] {
-            let plan = toolbar_plan(available_width);
-            assert!(
-                plan.copy_inline,
-                "{available_width}px 时复制必须留在主工具栏"
-            );
-            assert!(
-                plan.close_inline,
-                "{available_width}px 时关闭必须留在主工具栏"
-            );
-            assert!(
-                plan.more_inline,
-                "{available_width}px 时更多必须留在主工具栏"
-            );
-        }
-    }
-
-    /// 中窄窗口必须收纳低频动作，宽屏则可直接展示。
-    #[test]
-    fn medium_and_narrow_widths_move_low_frequency_actions_into_more() {
-        assert!(toolbar_plan(1200.0).low_frequency_inline);
-        assert!(!toolbar_plan(620.0).low_frequency_inline);
-        assert!(!toolbar_plan(260.0).low_frequency_inline);
+    fn row_layout_switches_at_bar_width() {
+        assert!(single_row(1200.0), "宽屏应单行");
+        assert!(!single_row(620.0), "中窄窗口应折行两行");
+        assert!(!single_row(260.0), "极窄窗口应折行两行");
     }
 }

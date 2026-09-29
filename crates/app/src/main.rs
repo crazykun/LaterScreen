@@ -15,6 +15,7 @@ mod export;
 mod font;
 mod history;
 // mac 裸 F1–F12 热键拦截兜底层（CGEventTap + 辅助功能权限），仅 mac 编译
+mod instance;
 #[cfg(target_os = "macos")]
 mod mac_fnkey_tap;
 mod pin;
@@ -524,6 +525,15 @@ fn run_tray(foreground: bool) -> Result<(), String> {
     use std::process::Stdio;
     const CHILD_ENV: &str = "LSCREEN_TRAY_CHILD";
     if !foreground && std::env::var_os(CHILD_ENV).is_none() {
+        // 派生驻留子进程前先在**本进程**抢托盘单例：已有实例时直接提示退出，
+        // 不再 spawn 第二个 --foreground 子进程（否则会多出一个托盘图标 +
+        // 一串热键注册失败——热键已被第一个实例占住）。
+        if !instance::acquire(instance::Kind::Tray) {
+            if let Some(msg) = instance::Kind::Tray.conflict_message() {
+                eprintln!("{msg}");
+            }
+            return Ok(());
+        }
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         std::process::Command::new(exe)
             .args(["tray", "--foreground"])
@@ -536,11 +546,29 @@ fn run_tray(foreground: bool) -> Result<(), String> {
         eprintln!("LaterScreen 已驻留后台：托盘菜单或全局热键唤起（lscreen tray --foreground 可前台运行）");
         return Ok(());
     }
+    // 前台形态（含被派生的子进程）：再抢一次。父进程若还在（spawn 后的
+    // 短暂窗口期）锁已由它持有——本进程是同一意图的继承者，幂等放行；
+    // 真正的第二个前台实例（如终端手动再敲一次）会被拦下。
+    if !instance::acquire(instance::Kind::Tray) {
+        if let Some(msg) = instance::Kind::Tray.conflict_message() {
+            eprintln!("{msg}");
+        }
+        return Ok(());
+    }
     tray::run()
 }
 
 /// 配置面板窗口。
 fn run_settings() -> Result<(), String> {
+    // 单例（v0.11.4）：连开两个配置窗会各写各的 config.toml，后保存的
+    // 覆盖先保存的。已开着时本进程留下 raise 信号（活着的窗口会跳到前台）
+    // 后直接退出。
+    if !instance::acquire(instance::Kind::Settings) {
+        if let Some(msg) = instance::Kind::Settings.conflict_message() {
+            eprintln!("{msg}");
+        }
+        return Ok(());
+    }
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_app_id("lscreen")
         .with_inner_size([480.0, 640.0])
@@ -628,6 +656,11 @@ fn reexec_after_pick(sub: &str, region: &str, extra: &[String]) -> Result<(), St
 /// 交互框选录制区域：复用截图覆盖层（Mode::Record），框完即关窗；
 /// 返回绝对物理坐标的 "X,Y,W,H"；用户 Esc 取消返回 None。
 fn pick_region_interactive() -> Result<Option<String>, String> {
+    // 覆盖层单例：已有截图/框选交互在跑时静默让路（返回「取消」语义），
+    // 避免两层全屏覆盖层叠罗汉、第二层把第一层截进图里。
+    if !instance::acquire(instance::Kind::Overlay) {
+        return Ok(None);
+    }
     // Wayland 无自绘覆盖层，portal 也只能回选区图像拿不到绝对坐标，
     // 而区域采帧/录屏本身依赖 X11——明确告知不支持，而不是走进 X11
     // 路径报一串难懂的连接错误
@@ -780,6 +813,11 @@ fn wait_delay(delay: Option<f64>) -> Result<bool, String> {
 }
 
 fn run_gui_delayed(mode: ui::Mode, delay: Option<f64>) -> Result<(), String> {
+    // 覆盖层单例要连倒计时窗一起算进去：延时截图期间再按热键，第二层
+    // 覆盖层会把倒计时窗截进图里。冲突时静默让路（第一层交互仍在进行）。
+    if !instance::acquire(instance::Kind::Overlay) {
+        return Ok(());
+    }
     if !wait_delay(delay)? {
         return Ok(()); // 取消 = 静默退出，与覆盖层 Esc 同语义
     }
@@ -787,6 +825,11 @@ fn run_gui_delayed(mode: ui::Mode, delay: Option<f64>) -> Result<(), String> {
 }
 
 fn run_gui(mode: ui::Mode) -> Result<(), String> {
+    // 覆盖层单例（`pick` 子命令直达这里；`gui` 经 run_gui_delayed 已抢过，
+    // 同进程幂等）。冲突 = 已有截图/取色交互在跑，静默让路。
+    if !instance::acquire(instance::Kind::Overlay) {
+        return Ok(());
+    }
     // Wayland：合成器禁止自绘覆盖层抓屏/框选，改走交互式 portal——由合成器
     // 弹原生框选 UI，回选中区域，再进标注窗。坐标由合成器保证，绕开多屏
     // 混合 DPI 的映射难题。Pick（取色）无对应 portal 交互，仍走原路径降级。
@@ -2013,6 +2056,9 @@ fn spawn_annotate_stdin(png: &[u8]) -> Result<(), String> {
 /// OCR/二维码）。滚动截图拼接结果的内部预览入口——独立进程跑，因为拼接
 /// 进程已消耗过自己的事件循环额度（macOS 限制），见 run_scroll。
 fn run_annotate(input: Option<PathBuf>) -> Result<(), String> {
+    // 标注窗也走覆盖层单例：它带着完整工具栏，与截图覆盖层同为独占式
+    // 标注交互；冲突时静默让路。stdin 场景（滚动拼接转交）必须**先读完
+    // 再判断**——父进程 write_all 阻塞在对端，提前退出会把父进程卡死。
     let img = match input {
         Some(path) => image::open(&path)
             .map_err(|e| format!("无法读取 {}: {e}", path.display()))?
@@ -2026,6 +2072,9 @@ fn run_annotate(input: Option<PathBuf>) -> Result<(), String> {
                 .into_rgba8()
         }
     };
+    if !instance::acquire(instance::Kind::Overlay) {
+        return Ok(());
+    }
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 {
         return Err("空图片".into());

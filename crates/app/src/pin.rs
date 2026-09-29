@@ -32,6 +32,11 @@ const TOAST_SECS: f64 = 1.6;
 /// 底部工具条条带高度：窗口高 = 图像显示高 + BAR_H，按钮在图像外侧，
 /// 不遮挡贴图内容（与截图覆盖层「工具栏在选区下方」同布局）
 pub const BAR_H: f32 = 34.0;
+/// 工具条全量图标常驻所需的窗口逻辑宽下限（含边距）。
+/// 窗口逻辑宽低于它时按此值钳制下限——**穿透开关是工具条上的图标**，
+/// 窗口被图片宽度拖到极窄（如 40px 小图）时若不保底，穿透按钮会被挤出
+/// 条带，穿透开后无处可点恢复（2026-09-29 用户反馈的真实死锁）。
+pub const MIN_TOOLBAR_W: f32 = 320.0;
 /// 放大用最近邻（滚轮放大像素格清晰），缩小用线性
 fn texture_options() -> egui::TextureOptions {
     egui::TextureOptions {
@@ -110,9 +115,16 @@ fn flip_rgba(rgba: &mut [u8], w: u32, h: u32, horizontal: bool) {
     }
 }
 
-/// 贴图窗口初始逻辑尺寸：图像 + 底部工具条条带。
+/// 贴图窗口初始逻辑尺寸：图像 + 底部工具条条带。宽度保底
+/// [`MIN_TOOLBAR_W`]——再窄的图也要放得下完整工具条（穿透可恢复）。
 pub fn window_size(w: u32, h: u32, scale: f32) -> Vec2 {
-    Vec2::new(w as f32 / scale, h as f32 / scale + BAR_H)
+    window_size_at(Vec2::new(w as f32 / scale, h as f32 / scale))
+}
+
+/// 图像显示尺寸（逻辑点） → 窗口尺寸：加条带、宽度钳 [`MIN_TOOLBAR_W`]。
+/// 建窗与缩放/旋转变换共用，保证任何尺寸下工具条完整可放。
+fn window_size_at(image: Vec2) -> Vec2 {
+    Vec2::new(image.x.max(MIN_TOOLBAR_W), image.y + BAR_H)
 }
 
 /// 窗口逻辑尺寸 → 底部条带的物理像素矩形（x, y, w, h），XShape 输入区
@@ -133,30 +145,8 @@ fn bar_strip_physical(inner: Vec2, ppp: f32) -> (i32, i32, u32, u32) {
     )
 }
 
-/// 贴图工具条中的功能组。布局阶段只决定入口放在条带还是“更多”菜单，
-/// 实际点击后的保存、穿透等副作用仍由 `PinApp` 统一执行。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ToolbarItem {
-    CopyAndClose,
-    Close,
-    Zoom,
-    Topmost,
-    Through,
-    Rotate,
-    Flip,
-    Save,
-    Upload,
-    More,
-}
-
-/// 工具条布局结果：`direct` 是条带上的固定入口，`overflow` 是“更多”菜单入口。
-#[derive(Debug, PartialEq, Eq)]
-struct ToolbarLayout {
-    direct: Vec<ToolbarItem>,
-    overflow: Vec<ToolbarItem>,
-}
-
-/// 工具条和“更多”菜单共用的用户动作，避免两套入口各自维护魔法数字。
+/// 贴图工具条的用户动作。工具条与键盘快捷键共用一套语义，由 `PinApp`
+/// 统一执行（保存、穿透等副作用不进 UI 层）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ToolbarAction {
     Save,
@@ -195,60 +185,6 @@ fn through_request(
     } else {
         ThroughRequest::AskForFullWindowConfirmation
     }
-}
-
-/// 根据条带可用宽度生成布局。无论窗口多窄，都为用户保留关闭和“更多”两个恢复入口；
-/// `has_upload` 来自启动时读取的上传配置，未配置时上传不应出现在条带或菜单中。
-fn toolbar_layout(available_width: f32, has_upload: bool) -> ToolbarLayout {
-    // 单图标 24pt、相邻间距 2pt；缩放组包含两个图标和 40pt 百分比按钮。
-    // 先预留“关闭 + 更多”的 52pt，再按使用频率把可选功能贪心放进条带。
-    let mut remaining = (available_width - 52.0).max(0.0);
-    let mut selected = Vec::new();
-    let priorities = [
-        (ToolbarItem::CopyAndClose, 26.0),
-        (ToolbarItem::Zoom, 92.0),
-        (ToolbarItem::Topmost, 26.0),
-        (ToolbarItem::Through, 26.0),
-        (ToolbarItem::Rotate, 26.0),
-        (ToolbarItem::Flip, 26.0),
-        (ToolbarItem::Save, 26.0),
-        (ToolbarItem::Upload, 26.0),
-    ];
-    for (item, width) in priorities {
-        if item == ToolbarItem::Upload && !has_upload {
-            continue;
-        }
-        if remaining >= width {
-            selected.push(item);
-            remaining -= width;
-        }
-    }
-
-    // 条带沿用既有视觉顺序；菜单也按这个顺序收纳所有放不下的入口，避免功能静默消失。
-    let visual_order = [
-        ToolbarItem::Topmost,
-        ToolbarItem::Through,
-        ToolbarItem::Rotate,
-        ToolbarItem::Flip,
-        ToolbarItem::Zoom,
-        ToolbarItem::Save,
-        ToolbarItem::Upload,
-        ToolbarItem::CopyAndClose,
-    ];
-    let mut direct = visual_order
-        .iter()
-        .copied()
-        .filter(|item| selected.contains(item))
-        .collect::<Vec<_>>();
-    direct.push(ToolbarItem::Close);
-    direct.push(ToolbarItem::More);
-    let overflow = visual_order
-        .iter()
-        .copied()
-        .filter(|item| (*item != ToolbarItem::Upload || has_upload) && !selected.contains(item))
-        .collect();
-
-    ToolbarLayout { direct, overflow }
 }
 
 pub struct PinApp {
@@ -660,9 +596,9 @@ impl PinApp {
         }
         // 锚点几何随尺寸失效，新手势重新取锚
         self.zoom_anchor = None;
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(
-            self.base * self.zoom + Vec2::new(0.0, BAR_H),
-        ));
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(window_size_at(
+            self.base * self.zoom,
+        )));
     }
 
     fn rotate_cw(&mut self, ctx: &egui::Context) {
@@ -694,9 +630,7 @@ impl PinApp {
         }
         self.zoom = z;
         self.zoom_anchor = None;
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(
-            self.base * z + Vec2::new(0.0, BAR_H),
-        ));
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(window_size_at(self.base * z)));
         let pct = (z * 100.0).round() as i32;
         self.toast(ctx, format!("{pct}%"));
     }
@@ -832,27 +766,22 @@ impl PinApp {
     /// 底部条带工具条：按钮在图像外侧的专属条带里（与截图覆盖层
     /// 「工具栏在选区下方」同布局），不遮挡贴图内容。
     ///
-    /// 条带宽度放不下全部按钮时，始终保留“关闭 + 更多”；其他入口按使用频率
-    /// 放入条带，放不下的全部进入“更多”菜单，避免窄图片让功能静默消失。
+    /// 全图标常驻（v0.11.4）：窗口宽度由 [`MIN_TOOLBAR_W`] 保底，不再按
+    /// 宽度收纳进「更多」——收纳曾把穿透按钮藏进二级菜单，穿透开启后
+    /// 菜单锚在穿透窗口里点不开，只剩 Esc/托盘两条暗道可恢复。
+    /// 悬停即出文字提示（icon_button 自带 on_hover_text）。
     fn show_toolbar(&mut self, ctx: &egui::Context, bar: Rect) {
         use crate::ui::toolbar::{
             action_button, draw_check, draw_close, draw_save, draw_upload, icon_button,
         };
-        let has_upload = self.upload_cmd.is_some();
-        let budget = bar.width() - 8.0;
-        let layout = toolbar_layout(budget, has_upload);
-        let shown = layout
-            .direct
-            .iter()
-            .map(|item| {
-                if *item == ToolbarItem::Zoom {
-                    92.0
-                } else {
-                    26.0
-                }
-            })
-            .sum::<f32>();
-        let pos = Pos2::new(bar.center().x - shown / 2.0 + 4.0, bar.center().y - 12.0);
+        // 图标总宽（与 MIN_TOOLBAR_W 的估值同源）：无上传 9 组 ≈300pt、
+        // 有上传再加 26pt。用于整排水平居中。
+        let shown = if self.upload_cmd.is_some() {
+            326.0
+        } else {
+            300.0
+        };
+        let pos = Pos2::new(bar.center().x - shown / 2.0, bar.center().y - 12.0);
         let mut action = None;
         let (topmost, through, zoom, upload_busy) = (
             self.topmost,
@@ -867,61 +796,53 @@ impl PinApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = Vec2::splat(2.0);
-                    if layout.direct.contains(&ToolbarItem::Topmost)
-                        && icon_button(ui, topmost, "置顶：保持在最上层（点击切换）", draw_topmost)
-                            .clicked()
+                    if icon_button(ui, topmost, "置顶：保持在最上层（点击切换）", draw_topmost)
+                        .clicked()
                     {
                         action = Some(ToolbarAction::ToggleTopmost);
                     }
-                    if layout.direct.contains(&ToolbarItem::Through) {
-                        // 区域穿透平台（X11）：条带保留交互，再点本按钮恢复；
-                        // 整窗平台首次开启前会明确提示只能用 Esc/托盘恢复。
-                        let tip = if lscreen_capture::NativeWindow::input_region_supported() {
-                            "点击穿透：图片区点击穿到下层窗口，工具条仍可操作（再点一次恢复，或 Esc/托盘菜单）"
-                        } else {
-                            "点击穿透：整窗将不再接收点击，开启前会提示恢复方式"
-                        };
-                        if icon_button(ui, through, tip, draw_through).clicked() {
-                            action = Some(ToolbarAction::ToggleThrough);
-                        }
+                    // 区域穿透平台（X11）：条带保留交互，再点本按钮恢复；
+                    // 整窗平台首次开启前会明确提示只能用 Esc/托盘恢复。
+                    let tip = if lscreen_capture::NativeWindow::input_region_supported() {
+                        "点击穿透：图片区点击穿到下层窗口，工具条仍可操作（再点一次恢复，或 Esc/托盘菜单）"
+                    } else {
+                        "点击穿透：整窗将不再接收点击，开启前会提示恢复方式"
+                    };
+                    if icon_button(ui, through, tip, draw_through).clicked() {
+                        action = Some(ToolbarAction::ToggleThrough);
                     }
-                    if layout.direct.contains(&ToolbarItem::Rotate)
-                        && action_button(ui, true, "旋转 90° (R)", draw_rotate)
-                    {
+                    if action_button(ui, true, "顺时针旋转 90° (R)", draw_rotate) {
                         action = Some(ToolbarAction::Rotate);
                     }
-                    if layout.direct.contains(&ToolbarItem::Flip)
-                        && action_button(ui, true, "水平翻转 (H)，垂直翻转 (V)", draw_flip)
-                    {
+                    if action_button(ui, true, "水平翻转 (H)", draw_flip) {
                         action = Some(ToolbarAction::FlipHorizontal);
                     }
-                    if layout.direct.contains(&ToolbarItem::Zoom) {
-                        if action_button(ui, true, "缩小（键盘 -）", draw_minus) {
-                            action = Some(ToolbarAction::ZoomOut);
-                        }
-                        // 百分比 = 缩放预览，点击重置 100%
-                        let pct = (zoom * 100.0).round() as i32;
-                        let btn = egui::Button::new(
-                            egui::RichText::new(format!("{pct}%")).strong().size(12.0),
-                        )
-                        .min_size(Vec2::new(40.0, 24.0));
-                        if ui
-                            .add(btn)
-                            .on_hover_text("缩放预览，点击重置为 100%（键盘 0）")
-                            .clicked()
-                        {
-                            action = Some(ToolbarAction::ZoomReset);
-                        }
-                        if action_button(ui, true, "放大（键盘 +）", draw_plus) {
-                            action = Some(ToolbarAction::ZoomIn);
-                        }
+                    if action_button(ui, true, "垂直翻转 (V)", draw_flip_v) {
+                        action = Some(ToolbarAction::FlipVertical);
                     }
-                    if layout.direct.contains(&ToolbarItem::Save)
-                        && action_button(ui, true, "保存为 PNG (Ctrl+S)", draw_save)
+                    if action_button(ui, true, "缩小（键盘 -）", draw_minus) {
+                        action = Some(ToolbarAction::ZoomOut);
+                    }
+                    // 百分比 = 缩放预览，点击重置 100%
+                    let pct = (zoom * 100.0).round() as i32;
+                    let btn =
+                        egui::Button::new(egui::RichText::new(format!("{pct}%")).strong().size(12.0))
+                            .min_size(Vec2::new(40.0, 24.0));
+                    if ui
+                        .add(btn)
+                        .on_hover_text("缩放预览，点击重置为 100%（键盘 0）")
+                        .clicked()
                     {
+                        action = Some(ToolbarAction::ZoomReset);
+                    }
+                    if action_button(ui, true, "放大（键盘 +）", draw_plus) {
+                        action = Some(ToolbarAction::ZoomIn);
+                    }
+                    if action_button(ui, true, "保存为 PNG (Ctrl+S)", draw_save) {
                         action = Some(ToolbarAction::Save);
                     }
-                    if layout.direct.contains(&ToolbarItem::Upload) {
+                    // 上传按钮仅配置了 [upload].command 时出现
+                    if self.upload_cmd.is_some() {
                         let tip = if upload_busy {
                             "上传中…"
                         } else {
@@ -931,92 +852,13 @@ impl PinApp {
                             action = Some(ToolbarAction::Upload);
                         }
                     }
-                    if action_button(ui, true, "关闭贴图 (Esc / Delete)", draw_close)
-                    {
+                    if action_button(ui, true, "关闭贴图 (Esc / Delete)", draw_close) {
                         action = Some(ToolbarAction::Close);
                     }
-                    if layout.direct.contains(&ToolbarItem::CopyAndClose)
-                        && action_button(ui, true, "复制并关闭 (双击/Ctrl+C 仅复制)", draw_check)
-                    {
+                    // 最常用动作放最右：对号 = 复制并关闭（仅复制走双击/Ctrl+C）
+                    if action_button(ui, true, "复制并关闭 (双击/Ctrl+C 仅复制)", draw_check) {
                         action = Some(ToolbarAction::CopyAndClose);
                     }
-
-                    // “更多”永远保留；宽屏没有溢出项时仍提供垂直翻转，避免空菜单。
-                    let more = ui
-                        .add(
-                            egui::Button::new(egui::RichText::new("⋯").strong().size(16.0))
-                                .min_size(Vec2::splat(24.0)),
-                        )
-                        .on_hover_text("更多贴图操作");
-                    egui::Popup::menu(&more)
-                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                        .show(|ui| {
-                            if layout.overflow.contains(&ToolbarItem::Topmost)
-                                && ui.button(if topmost { "取消置顶" } else { "置顶" }).clicked()
-                            {
-                                action = Some(ToolbarAction::ToggleTopmost);
-                                ui.close();
-                            }
-                            if layout.overflow.contains(&ToolbarItem::Through)
-                                && ui
-                                    .button(if through { "关闭点击穿透" } else { "开启点击穿透" })
-                                    .clicked()
-                            {
-                                action = Some(ToolbarAction::ToggleThrough);
-                                ui.close();
-                            }
-                            if layout.overflow.contains(&ToolbarItem::Rotate)
-                                && ui.button("顺时针旋转 90°").clicked()
-                            {
-                                action = Some(ToolbarAction::Rotate);
-                                ui.close();
-                            }
-                            if layout.overflow.contains(&ToolbarItem::Flip)
-                                && ui.button("水平翻转").clicked()
-                            {
-                                action = Some(ToolbarAction::FlipHorizontal);
-                                ui.close();
-                            }
-                            if ui.button("垂直翻转").clicked() {
-                                action = Some(ToolbarAction::FlipVertical);
-                                ui.close();
-                            }
-                            if layout.overflow.contains(&ToolbarItem::Zoom) {
-                                ui.separator();
-                                if ui.button("放大").clicked() {
-                                    action = Some(ToolbarAction::ZoomIn);
-                                    ui.close();
-                                }
-                                if ui.button("缩小").clicked() {
-                                    action = Some(ToolbarAction::ZoomOut);
-                                    ui.close();
-                                }
-                                if ui.button("重置为 100%").clicked() {
-                                    action = Some(ToolbarAction::ZoomReset);
-                                    ui.close();
-                                }
-                            }
-                            if layout.overflow.contains(&ToolbarItem::Save)
-                                && ui.button("保存为 PNG").clicked()
-                            {
-                                action = Some(ToolbarAction::Save);
-                                ui.close();
-                            }
-                            if layout.overflow.contains(&ToolbarItem::Upload)
-                                && ui
-                                    .add_enabled(!upload_busy, egui::Button::new("上传"))
-                                    .clicked()
-                            {
-                                action = Some(ToolbarAction::Upload);
-                                ui.close();
-                            }
-                            if layout.overflow.contains(&ToolbarItem::CopyAndClose)
-                                && ui.button("复制并关闭").clicked()
-                            {
-                                action = Some(ToolbarAction::CopyAndClose);
-                                ui.close();
-                            }
-                        });
                 });
             });
         match action {
@@ -1334,20 +1176,35 @@ fn draw_rotate(p: &egui::Painter, r: Rect, c: Color32) {
     p.line_segment([tip, tip + Vec2::new(-w * 0.02, -w * 0.20)], s);
 }
 
-/// 翻转图标：圆角矩形 + 中央竖直虚线（镜像轴，两半互为镜像）。
+/// 水平翻转图标：圆角矩形 + 中央竖直虚线（镜像轴，左右两半互为镜像）。
 fn draw_flip(p: &egui::Painter, r: Rect, c: Color32) {
+    dashed_mirror_axis(p, r, c, true);
+}
+
+/// 垂直翻转图标：同款镜像轴改为水平虚线（上下两半互为镜像）。
+/// 与水平版共用虚线节奏，只换轴向，视觉上明确「一对翻转」。
+fn draw_flip_v(p: &egui::Painter, r: Rect, c: Color32) {
+    dashed_mirror_axis(p, r, c, false);
+}
+
+fn dashed_mirror_axis(p: &egui::Painter, r: Rect, c: Color32, vertical: bool) {
     let s = Stroke::new(ICON_W, c);
     let w = r.width();
     p.rect_stroke(r.shrink(0.5), 2.0, s, egui::StrokeKind::Inside);
-    let cx = r.center().x;
+    let (cx, cy) = (r.center().x, r.center().y);
     for (a, b) in [(0.14, 0.38), (0.46, 0.54), (0.62, 0.86)] {
-        p.line_segment(
+        let seg = if vertical {
             [
                 Pos2::new(cx, r.min.y + w * a),
                 Pos2::new(cx, r.min.y + w * b),
-            ],
-            s,
-        );
+            ]
+        } else {
+            [
+                Pos2::new(r.min.x + w * a, cy),
+                Pos2::new(r.min.x + w * b, cy),
+            ]
+        };
+        p.line_segment(seg, s);
     }
 }
 
@@ -1460,28 +1317,15 @@ mod tests {
     }
 
     #[test]
-    fn narrow_toolbar_keeps_close_and_more_as_recovery_entries() {
-        let layout = toolbar_layout(0.0, true);
-
-        assert_eq!(layout.direct, vec![ToolbarItem::Close, ToolbarItem::More]);
-    }
-
-    #[test]
-    fn narrow_toolbar_moves_every_optional_action_into_more_menu() {
-        let layout = toolbar_layout(0.0, true);
-
+    fn window_width_never_shrinks_below_toolbar_floor() {
+        // 大图：原样（图像宽就是窗口宽）
+        assert_eq!(window_size(800, 600, 1.0), Vec2::new(800.0, 634.0));
+        // 40px 小图：窗口宽钳到工具条保底宽——穿透按钮必须始终在条带上
+        assert_eq!(window_size(40, 40, 1.0), Vec2::new(MIN_TOOLBAR_W, 74.0));
+        // 深缩放同理：0.25x 的 800px 图也保底
         assert_eq!(
-            layout.overflow,
-            vec![
-                ToolbarItem::Topmost,
-                ToolbarItem::Through,
-                ToolbarItem::Rotate,
-                ToolbarItem::Flip,
-                ToolbarItem::Zoom,
-                ToolbarItem::Save,
-                ToolbarItem::Upload,
-                ToolbarItem::CopyAndClose,
-            ]
+            window_size_at(Vec2::new(200.0, 150.0)),
+            Vec2::new(MIN_TOOLBAR_W.max(200.0), 184.0)
         );
     }
 
@@ -1543,7 +1387,7 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.set_pixels_per_point(4.0); // 4x 渲染，缩略图也看得清线稿
         let input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 40.0))),
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(360.0, 40.0))),
             ..Default::default()
         };
         let out = ctx.run_ui(input, |ui| {
@@ -1554,6 +1398,8 @@ mod tests {
                     icon_button(ui, true, "", draw_through);
                     action_button(ui, true, "", draw_rotate);
                     action_button(ui, true, "", draw_flip);
+                    action_button(ui, true, "", draw_flip_v);
+                    action_button(ui, true, "", draw_flip_v);
                     action_button(ui, true, "", draw_minus);
                     // 百分比按钮原样占位；其文字走字体图集纹理，下面的
                     // 光栅化只画无纹理几何，文字留空不影响核对
@@ -1576,7 +1422,7 @@ mod tests {
         // （texture 均为 Managed(0)），靠 uv 区分：字形 quad 的 uv 落在
         // 字体图集内，逐三角形过滤（uv==WHITE_UV 才是无纹理几何）
         let ppp = out.pixels_per_point;
-        let w = (300.0 * ppp) as usize;
+        let w = (360.0 * ppp) as usize;
         let h = (40.0 * ppp) as usize;
         // 累积 alpha 与预乘 rgb，末端归一化后对深灰底做 src-over，
         // 保留 Frame 底色与线条白色的层次

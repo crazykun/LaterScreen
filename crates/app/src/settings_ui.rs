@@ -606,12 +606,26 @@ impl eframe::App for SettingsApp {
         }
 
         self.discard_confirmation(&ctx);
+        self.poll_raise(&ctx);
     }
 }
 
 // ---------------------------------------------------------------- 页面
 
 impl SettingsApp {
+    /// 单例唤起心跳（v0.11.4）：第二个 `lscreen config` 进程会留下 raise
+    /// 信号。窗口在后台时无输入事件，eframe 不会主动重绘——必须自己
+    /// `request_repaint_after` 保持心跳（与 history::poll_raise 同一坑）。
+    fn poll_raise(&mut self, ctx: &egui::Context) {
+        const POLL: std::time::Duration = std::time::Duration::from_millis(300);
+        if crate::instance::take_raise(crate::instance::Kind::Settings) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        ctx.request_repaint_after(POLL);
+    }
+
     fn page(&mut self, ui: &mut egui::Ui) {
         // 页头
         ui.horizontal(|ui| {
@@ -1117,8 +1131,10 @@ mod tests {
 
     #[test]
     fn discard_restores_saved_config_including_previewed_theme() {
-        let mut original = Config::default();
-        original.theme = config::ThemeMode::Light;
+        let original = Config {
+            theme: config::ThemeMode::Light,
+            ..Config::default()
+        };
         let mut edited = original.clone();
         edited.theme = config::ThemeMode::Dark;
         let mut guard = UnsavedChanges::new(&original);

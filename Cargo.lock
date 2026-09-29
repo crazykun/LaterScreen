@@ -2572,7 +2572,7 @@ dependencies = [
 
 [[package]]
 name = "lscreen"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "arboard",
  "clap",
@@ -2599,7 +2599,7 @@ dependencies = [
 
 [[package]]
 name = "lscreen-capture"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "ashpd",
  "async-io",
@@ -2616,7 +2616,7 @@ dependencies = [
 
 [[package]]
 name = "lscreen-core"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "ab_glyph",
  "image",
@@ -2627,7 +2627,7 @@ dependencies = [
 
 [[package]]
 name = "lscreen-ocr"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "ab_glyph",
  "image",
@@ -2641,7 +2641,7 @@ dependencies = [
 
 [[package]]
 name = "lscreen-record"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "block2 0.6.2",
  "bytes",
@@ -2663,7 +2663,7 @@ dependencies = [
 
 [[package]]
 name = "lscreen-setup"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "eframe",
  "image",
