@@ -82,6 +82,8 @@ pub struct SettingsApp {
     record_hint: Option<(String, f64)>,
     /// 热键下标越界时的写入兜底槽（正常路径用不到，见 `hotkey_field_mut`）
     hotkey_spill: String,
+    /// 更新检测状态机（手动触发，见 `update` 模块）
+    update: crate::update::UpdateCheck,
 }
 
 impl SettingsApp {
@@ -103,6 +105,7 @@ impl SettingsApp {
             recording: None,
             record_hint: None,
             hotkey_spill: String::new(),
+            update: crate::update::UpdateCheck::default(),
         }
     }
 
@@ -470,6 +473,49 @@ impl SettingsApp {
         );
         ui.add_space(14.0);
 
+        // 新版本提示条（只在确实查到更新时出现）：品牌红描边卡片 +
+        // 「去下载」跳 release 页。放在最顶上——进面板第一眼就能看到
+        if let Some(Ok(crate::update::Outcome::Newer(tag))) = self.update.result() {
+            let tag = tag.clone();
+            egui::Frame::NONE
+                .fill(field(ui))
+                .stroke(egui::Stroke::new(1.0, accent_border(ui)))
+                .corner_radius(8)
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .outer_margin(egui::Margin {
+                    bottom: 10,
+                    ..Default::default()
+                })
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("有新版本 {tag}"))
+                                .color(accent_text(ui))
+                                .strong(),
+                        );
+                        ui.add_space(8.0);
+                        if ui
+                            .link(
+                                egui::RichText::new("去下载")
+                                    .color(accent_text(ui))
+                                    .strong(),
+                            )
+                            .on_hover_text("在浏览器打开最新版本的下载页")
+                            .clicked()
+                        {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(
+                                crate::update::release_page_url(),
+                            ));
+                        }
+                        ui.add_space(6.0);
+                        if ui.small_button("知道了").clicked() {
+                            self.update.clear();
+                        }
+                    });
+                });
+            ui.add_space(4.0);
+        }
+
         card(ui, "保存", |ui| {
             egui::Grid::new("save-grid")
                 .num_columns(2)
@@ -781,6 +827,77 @@ impl SettingsApp {
             );
         }
         ui.add_space(6.0);
+        self.update_row(ui);
+        ui.add_space(6.0);
+    }
+
+    /// 「检查更新」行：当前版本 + 按钮 + 结果文案。
+    ///
+    /// 手动触发而非自动联网（理由见 `update` 模块头）：按钮点一次发一次
+    /// 请求，网络 IO 在后台线程，检查中按钮禁用并持续重绘。
+    fn update_row(&mut self, ui: &mut egui::Ui) {
+        self.update.poll();
+        ui.horizontal(|ui| {
+            let checking = self.update.in_flight();
+            let btn = egui::Button::new(if checking {
+                egui::RichText::new("检查中…").color(muted(ui))
+            } else {
+                egui::RichText::new("检查更新").color(text(ui))
+            })
+            .corner_radius(8)
+            .min_size(egui::vec2(88.0, crate::theme::FIELD_H))
+            .stroke(egui::Stroke::new(1.0, line(ui)))
+            .fill(field(ui));
+            if ui
+                .add_enabled(!checking, btn)
+                .on_hover_text("查询 GitHub 上是否有新版本（手动触发，不会后台自动联网）")
+                .clicked()
+            {
+                self.update.start(ui.ctx());
+            }
+            ui.add_space(10.0);
+            // 结果文案：失败要可行动，**不**把失败说成「已是最新」；
+            // 未检查过时只报当前版本，不暗示任何结论
+            match self.update.result() {
+                None if !checking => {
+                    ui.label(
+                        egui::RichText::new(format!("当前 v{}", env!("CARGO_PKG_VERSION")))
+                            .color(muted(ui))
+                            .size(12.0),
+                    );
+                }
+                Some(Ok(crate::update::Outcome::UpToDate)) => {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "当前 v{}，已是最新",
+                            env!("CARGO_PKG_VERSION")
+                        ))
+                        .color(muted(ui))
+                        .size(12.0),
+                    );
+                }
+                Some(Ok(crate::update::Outcome::Newer(tag))) => {
+                    ui.label(
+                        egui::RichText::new(format!("有新版本 {tag}，见上方提示"))
+                            .color(accent_text(ui))
+                            .size(12.0),
+                    );
+                }
+                Some(Err(e)) => {
+                    ui.label(
+                        egui::RichText::new(format!("未能确认：{e}"))
+                            .color(muted(ui))
+                            .size(12.0),
+                    );
+                }
+                _ => {}
+            }
+        });
+        // 检查中保持重绘：结果回来时线程会 request_repaint，这里补上
+        // 「请求已发出、等待中」期间的帧（否则窗口可能休眠不刷）
+        if self.update.in_flight() {
+            ui.ctx().request_repaint();
+        }
     }
 }
 

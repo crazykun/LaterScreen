@@ -24,6 +24,7 @@ mod settings_ui;
 mod theme;
 mod tray;
 mod ui;
+mod update;
 mod upload;
 
 use clap::{Parser, Subcommand};

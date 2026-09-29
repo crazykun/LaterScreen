@@ -6,9 +6,10 @@
 
 跨平台截图标注工具，Rust 编写，命令名 `lscreen`：截图、标注、取色、二维码、OCR、GIF/MP4 录屏、贴图、滚动截图。
 
-- **单文件 ≤ 20MB**，无动态库依赖，拷走即用
+- **单文件 ≤ 20MB**（当前约 14MB），无动态库依赖，拷走即用
 - **三平台**：Linux（x64 / arm64 / armv7 / x86）、Windows 10+、macOS
 - **GUI + CLI 双形态**：完整交互标注界面，每个功能也都能纯命令行调用
+- **不后台联网**：只有你在配置面板点「检查更新」时才发一次请求（纯 Rust TLS，无动态库）
 
 ![主界面：框选 → 标注工具栏](docs/img/image.png)
 
@@ -72,7 +73,7 @@ cargo install --path crates/app
 
 ## 配置
 
-零配置可用，不生成文件。`lscreen config` 打开面板调整（保存目录、文件名模板、配置窗口主题（自动/浅色/夜间）、默认工具/颜色、初始选区（最前窗口 / 上次选区 / 全屏 / 无——「上次选区」在显示器布局变化后自动作废回退）、录制格式、录制音频（仅 MP4 生效；mac 面板只给 关/麦克风）、录制点击高亮、历史条数、七个全局热键等），运行中的托盘 1 秒内自动热加载。配置文件：Linux `~/.config/lscreen/config.toml`、Windows `%APPDATA%\lscreen\config.toml`、macOS `~/Library/Application Support/lscreen/config.toml`。自动主题由 egui 跟随当前操作系统配色。
+零配置可用，不生成文件。`lscreen config` 打开面板调整（保存目录、文件名模板、配置窗口主题（自动/浅色/夜间）、默认工具/颜色、初始选区（最前窗口 / 上次选区 / 全屏 / 无——「上次选区」在显示器布局变化后自动作废回退）、录制格式、录制音频（仅 MP4 生效；mac 面板只给 关/麦克风）、录制点击高亮、历史条数、七个全局热键等），运行中的托盘 1 秒内自动热加载。配置文件：Linux `~/.config/lscreen/config.toml`、Windows `%APPDATA%\lscreen\config.toml`、macOS `~/Library/Application Support/lscreen/config.toml`。自动主题由 egui 跟随当前操作系统配色。面板底部可「检查更新」：手动查询 GitHub 上是否有新版本，有则在顶部出现提示条并可直接打开下载页——**不会后台自动联网**。
 
 历史副本不放配置目录，而是缓存目录（Linux `~/.cache/lscreen/history/`、Windows `%LOCALAPPDATA%\lscreen\history\`、macOS `~/Library/Caches/lscreen/history/`）：那是可随时删掉、不影响配置的派生数据，嫌占地方直接删整个目录即可。面板顶栏也能看到占用体积并一键清空。
 
@@ -111,7 +112,7 @@ cargo test --workspace                # 单元测试（无需显示器）
 
 产物：Linux tar.gz / deb / rpm / AppImage，Windows zip / 自绘安装器 exe，macOS tar.gz / dmg（仅 CI 出包）。交叉编译需装对应 gcc / g++（openh264 为 C++ 源）；rpm 格式需 `apt install rpm`；AppImage 需 [appimagetool](https://github.com/AppImage/appimagetool)。
 
-全平台出包（含 macOS、Windows MSVC）走 GitHub Actions：`git tag v0.11.2 && git push --tags`。
+全平台出包（含 macOS、Windows MSVC）走 GitHub Actions：`git tag v0.11.3 && git push --tags`。
 
 ## 架构
 
