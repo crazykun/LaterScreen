@@ -653,49 +653,6 @@ impl SettingsApp {
         );
         ui.add_space(14.0);
 
-        // 新版本提示条（只在确实查到更新时出现）：品牌红描边卡片 +
-        // 「去下载」跳 release 页。放在最顶上——进面板第一眼就能看到
-        if let Some(Ok(crate::update::Outcome::Newer(tag))) = self.update.result() {
-            let tag = tag.clone();
-            egui::Frame::NONE
-                .fill(field(ui))
-                .stroke(egui::Stroke::new(1.0, accent_border(ui)))
-                .corner_radius(8)
-                .inner_margin(egui::Margin::symmetric(12, 8))
-                .outer_margin(egui::Margin {
-                    bottom: 10,
-                    ..Default::default()
-                })
-                .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(
-                            egui::RichText::new(format!("有新版本 {tag}"))
-                                .color(accent_text(ui))
-                                .strong(),
-                        );
-                        ui.add_space(8.0);
-                        if ui
-                            .link(
-                                egui::RichText::new("去下载")
-                                    .color(accent_text(ui))
-                                    .strong(),
-                            )
-                            .on_hover_text("在浏览器打开最新版本的下载页")
-                            .clicked()
-                        {
-                            ui.ctx().open_url(egui::OpenUrl::new_tab(
-                                crate::update::release_page_url(),
-                            ));
-                        }
-                        ui.add_space(6.0);
-                        if ui.small_button("知道了").clicked() {
-                            self.update.clear();
-                        }
-                    });
-                });
-            ui.add_space(4.0);
-        }
-
         card(ui, "保存", |ui| {
             egui::Grid::new("save-grid")
                 .num_columns(2)
@@ -1011,12 +968,53 @@ impl SettingsApp {
         ui.add_space(6.0);
     }
 
-    /// 「检查更新」行：当前版本 + 按钮 + 结果文案。
+    /// 「检查更新」区：结果横幅 + 当前版本 + 按钮 + 结果文案。
     ///
     /// 手动触发而非自动联网（理由见 `update` 模块头）：按钮点一次发一次
     /// 请求，网络 IO 在后台线程，检查中按钮禁用并持续重绘。
     fn update_row(&mut self, ui: &mut egui::Ui) {
         self.update.poll();
+        // 新版本提示条（只在确实查到更新时出现）：品牌红描边卡片 +
+        // 「去下载」跳 release 页。紧贴「检查更新」按钮上方——检查动作
+        // 发生在哪，结果就出现在哪；页面长于视口时放页顶会落在视野外
+        // （v0.11.4 实测：查到更新后用户停在页底，看不见提示条）
+        if let Some(Ok(crate::update::Outcome::Newer(tag))) = self.update.result() {
+            let tag = tag.clone();
+            egui::Frame::NONE
+                .fill(field(ui))
+                .stroke(egui::Stroke::new(1.0, accent_border(ui)))
+                .corner_radius(8)
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .outer_margin(egui::Margin {
+                    bottom: 10,
+                    ..Default::default()
+                })
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("有新版本 {tag}"))
+                                .color(accent_text(ui))
+                                .strong(),
+                        );
+                        ui.add_space(8.0);
+                        if ui
+                            .link(
+                                egui::RichText::new("去下载")
+                                    .color(accent_text(ui))
+                                    .strong(),
+                            )
+                            .on_hover_text("在浏览器打开最新版本的下载页")
+                            .clicked()
+                        {
+                            crate::update::open_in_browser(&crate::update::release_page_url());
+                        }
+                        ui.add_space(6.0);
+                        if ui.small_button("知道了").clicked() {
+                            self.update.clear();
+                        }
+                    });
+                });
+        }
         ui.horizontal(|ui| {
             let checking = self.update.in_flight();
             let btn = egui::Button::new(if checking {
@@ -1056,13 +1054,7 @@ impl SettingsApp {
                         .size(12.0),
                     );
                 }
-                Some(Ok(crate::update::Outcome::Newer(tag))) => {
-                    ui.label(
-                        egui::RichText::new(format!("有新版本 {tag}，见上方提示"))
-                            .color(accent_text(ui))
-                            .size(12.0),
-                    );
-                }
+                // 有新版本时不在这里重复文案——提示条就在按钮正上方
                 Some(Err(e)) => {
                     ui.label(
                         egui::RichText::new(format!("未能确认：{e}"))

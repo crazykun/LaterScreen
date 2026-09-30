@@ -31,6 +31,34 @@ pub fn release_page_url() -> String {
     format!("https://github.com/{REPO}/releases/latest")
 }
 
+/// 用系统默认浏览器打开 URL（「去下载」用）。
+///
+/// **不走** egui 的 `ctx.open_url`：其 native 实现经 webbrowser crate 自行
+/// 解析默认浏览器的 `.desktop` 再直接拼命令行——默认浏览器是玲珑
+/// （linglong）容器应用时（Deepin 上 Edge 常见此形态），拼出的 `ll-cli`
+/// 命令行不被接受，spawn 失败后逐级降级到 `x-www-browser`（本机实测
+/// 弹出的是另一款浏览器且不带导航）。`xdg-open` 交回系统做规范的
+/// desktop-entry 字段替换与调度，能正确唤起容器内默认浏览器。
+pub fn open_in_browser(url: &str) {
+    // Windows 无 ShellExecute 绑定时等价走 rundll32；URL 作为独立 argv
+    // 传递，不经 shell 解释
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut c = std::process::Command::new("rundll32");
+        c.arg("url.dll,FileProtocolHandler");
+        c
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+    } else {
+        std::process::Command::new("xdg-open")
+    };
+    let _ = cmd
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 /// 最新 release 查询接口。只读公开信息，无需 token；未认证限额
 /// 60 次/小时/IP，手动点几次远达不到。
 const LATEST_API: &str = "https://api.github.com/repos/crazykun/LaterScreen/releases/latest";
