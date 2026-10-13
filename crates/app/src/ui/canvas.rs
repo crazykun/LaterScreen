@@ -407,6 +407,11 @@ fn selecting(
         }
     }
 
+    // 轻点抖动视为单击：egui 指针位移超过拖动阈值（~6px）即算拖拽，快速
+    // 点按常带这么大的抖动——手势落在 drag_stopped 且矩形小于最小选区，
+    // 原先被静默吞掉，表现为「点了窗口却没选上」。视作单击重新走
+    // 选窗/全屏语义
+    let mut tiny_drag_ended = false;
     if response.drag_stopped() {
         if let Some(r) = current {
             if r.width() >= 4.0 && r.height() >= 4.0 {
@@ -418,10 +423,13 @@ fn selecting(
             }
         }
         app.drag = None;
+        tiny_drag_ended = true;
     }
-    if response.clicked() {
-        // 单击（未拖拽）：窗口上 = 选中该窗口；空白处 = 全屏（旧行为）
-        if let Some(i) = hover {
+    if response.clicked() || tiny_drag_ended {
+        // 单击（未拖拽）：窗口上 = 选中该窗口；空白处 = 全屏（旧行为）。
+        // 拖拽期间悬停命中是关闭的（hovered_window 对 drag 返回 None），
+        // 此时 drag 已清，须重新取悬停窗口
+        if let Some(i) = hovered_window(app) {
             app.region = app.windows[i].rect;
         } else {
             app.region = RectF::from_points(
@@ -522,7 +530,7 @@ fn editing(
             }
         }
         if response.double_clicked() {
-            on_double_click(app, ui.ctx(), pointer_px);
+            on_double_click(app, ui.ctx());
         }
 
         // ---- 悬停状态（仅 Select 工具） ----
@@ -897,8 +905,7 @@ fn on_release(app: &mut SnipApp) {
     }
 }
 
-fn on_double_click(app: &mut SnipApp, ctx: &egui::Context, pointer_px: Option<P2>) {
-    let Some(p) = pointer_px else { return };
+fn on_double_click(app: &mut SnipApp, ctx: &egui::Context) {
     if app.text_edit.is_some() {
         return;
     }
@@ -925,10 +932,9 @@ fn on_double_click(app: &mut SnipApp, ctx: &egui::Context, pointer_px: Option<P2
             }
         }
     }
-    // 其余情况：双击选区内 = 复制并退出
-    if app.region.contains(p) {
-        app.copy_and_exit(ctx);
-    }
+    // 其余情况：双击任意处（选区内/外）= 复制并退出。区域外双击常用于
+    // 「就用当前选区出图」，与 QQ/PixPin 惯例一致；选区内双击为原有行为
+    app.copy_and_exit(ctx);
 }
 
 fn constrain_square(start: P2, p: P2) -> P2 {
