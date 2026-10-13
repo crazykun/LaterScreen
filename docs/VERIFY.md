@@ -71,7 +71,10 @@ cargo test -p lscreen-record audio_e2e_system -- --ignored --nocapture
 ### 前置：TCC 权限（cargo 测试进程归属 Terminal）
 
 测试二进制无签名无 bundle，TCC 按责任进程归属 **Terminal**（或你跑
-cargo 的终端 App）：
+cargo 的终端 App）。发布产物同样无签名（仓库不持有代码签名证书）：
+TCC 按二进制内容识别应用，**每次发版升级后「屏幕录制 / 麦克风」授权
+都会失效重新弹窗**，需删除系统设置里的旧条目重新授权并重启进程
+（用户侧说明见 README「安装」节）：
 
 - **屏幕录制**：系统设置 → 隐私与安全性 → 屏幕录制 → 开启终端，然后
   **重启终端**（不重启对新进程不生效）。未授权时窗口枚举只看得到

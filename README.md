@@ -57,6 +57,8 @@ lscreen config                           # 配置面板
 brew install --cask crazykun/ailater/lscreen
 ```
 
+> **macOS 权限提示（升级后重新弹窗）**：产物未做代码签名，macOS 按二进制内容识别应用，每次 `brew upgrade`（或换装新版 dmg / `cargo install` 重装）都会被当作新应用，「屏幕录制 / 麦克风」授权失效重新弹窗。处理：完全退出 lscreen（托盘菜单退出或 `pkill lscreen`）→ 系统设置 ▸ 隐私与安全性 ▸ 屏幕录制 / 麦克风，删除旧条目 → 重启 lscreen 触发一次截图重新授权 → **授权后再重启一次 lscreen**（常驻进程只在启动时读取授权，不重启会一直弹）。
+
 或从 [Releases](https://github.com/crazykun/LaterScreen/releases) 下载：
 
 - **Linux**：Debian 系 `*.deb`（`sudo apt install ./lscreen_*.deb`）、Fedora 系 `*.rpm`，或通用的 `*.AppImage` / `*.tar.gz`
