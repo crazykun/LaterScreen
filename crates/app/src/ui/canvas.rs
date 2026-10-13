@@ -530,7 +530,7 @@ fn editing(
             }
         }
         if response.double_clicked() {
-            on_double_click(app, ui.ctx());
+            on_double_click(app, ui.ctx(), pointer_px);
         }
 
         // ---- 悬停状态（仅 Select 工具） ----
@@ -905,36 +905,60 @@ fn on_release(app: &mut SnipApp) {
     }
 }
 
-fn on_double_click(app: &mut SnipApp, ctx: &egui::Context) {
+/// 双击在画布上的最终业务动作。
+/// 选择工具双击空白（选区内/外皆可）= 复制退出；命中图元、非选择工具、
+/// 文本编辑中等情形由 on_double_click 的前置分支先行处理。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoubleClickAction {
+    None,
+    Copy,
+}
+
+/// 根据双击上下文决定是否复制退出。
+/// 输入来自当前工具与指针命中结果，返回值供画布事件处理使用。
+fn double_click_action(tool: Tool, hit_element: bool) -> DoubleClickAction {
+    if tool == Tool::Select && !hit_element {
+        DoubleClickAction::Copy
+    } else {
+        DoubleClickAction::None
+    }
+}
+
+/// 处理画布双击：优先进入文本编辑；双击空白任意处（选区内/外）= 复制并
+/// 退出——区域外双击常用于「就用当前选区出图」（QQ/PixPin 惯例）。
+/// 指针坐标来自当前画布响应；方法可能开启文档快照或触发复制并关闭窗口。
+fn on_double_click(app: &mut SnipApp, ctx: &egui::Context, pointer_px: Option<P2>) {
+    let Some(p) = pointer_px else { return };
     if app.text_edit.is_some() {
         return;
     }
-    // 点击型工具的双击是连续放置（标号 1、2、3…），不触发复制退出
-    if is_click_tool(app.tool) {
+    // 非选择工具的双击保留给连续绘制或放置，不能意外完成截图。
+    if app.tool != Tool::Select {
         return;
     }
-    // Select 工具双击文本 → 进入编辑
-    if app.tool == Tool::Select {
-        if let Some(id) = app.hover.or(app.selected) {
-            if let Some(Element {
-                kind: ElementKind::Text { content, .. },
-                ..
-            }) = app.doc.get(id)
-            {
-                let buffer = content.clone();
-                app.doc.begin_change();
-                app.text_edit = Some(TextEditState {
-                    id,
-                    buffer,
-                    is_new: false,
-                });
-                return;
-            }
+
+    // 直接按双击坐标重新命中，避免使用上一帧 hover 导致“点图元却复制退出”。
+    let hit = app.doc.hit_top(p, HIT_TOL_PT * app.last_view.scale);
+    if let Some(id) = hit {
+        // 选择工具双击文本仍进入编辑；双击其他图元只保留选中态，不执行复制。
+        if let Some(Element {
+            kind: ElementKind::Text { content, .. },
+            ..
+        }) = app.doc.get(id)
+        {
+            let buffer = content.clone();
+            app.doc.begin_change();
+            app.text_edit = Some(TextEditState {
+                id,
+                buffer,
+                is_new: false,
+            });
         }
+        return;
     }
-    // 其余情况：双击任意处（选区内/外）= 复制并退出。区域外双击常用于
-    // 「就用当前选区出图」，与 QQ/PixPin 惯例一致；选区内双击为原有行为
-    app.copy_and_exit(ctx);
+    if double_click_action(app.tool, hit.is_some()) == DoubleClickAction::Copy {
+        app.copy_and_exit(ctx);
+    }
 }
 
 fn constrain_square(start: P2, p: P2) -> P2 {
@@ -1283,5 +1307,29 @@ pub fn show_text_editor(app: &mut SnipApp, ctx: &egui::Context) {
     } else if cancel {
         app.text_edit = None;
         app.doc.cancel_change();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{double_click_action, DoubleClickAction};
+    use lscreen_core::Tool;
+
+    /// 选择工具在空白处双击（选区内/外皆可）即复制退出；命中图元或
+    /// 非选择工具不触发。
+    #[test]
+    fn double_click_copy_requires_select_tool_and_blank_hit() {
+        assert_eq!(
+            double_click_action(Tool::Select, false),
+            DoubleClickAction::Copy
+        );
+        assert_eq!(
+            double_click_action(Tool::Select, true),
+            DoubleClickAction::None
+        );
+        assert_eq!(
+            double_click_action(Tool::Rect, false),
+            DoubleClickAction::None
+        );
     }
 }

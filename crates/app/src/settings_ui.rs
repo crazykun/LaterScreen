@@ -29,6 +29,16 @@ fn field(ui: &egui::Ui) -> egui::Color32 {
 fn line(ui: &egui::Ui) -> egui::Color32 {
     ui.visuals().widgets.noninteractive.bg_stroke.color
 }
+/// 品牌红作**文字**用（录屏提示/热键文案等）：走主题化前景色，别直接用
+/// `theme::ACCENT`——品牌红当文字在浅色下只有 3.6:1，见 theme::accent_ink
+fn accent_text(ui: &egui::Ui) -> egui::Color32 {
+    theme::accent_ink(ui.visuals())
+}
+/// 品牌红作**描边**用（聚焦/录入态边框）：比 ink 再推一档，见
+/// `theme::accent_line`
+fn accent_border(ui: &egui::Ui) -> egui::Color32 {
+    theme::accent_line(ui.visuals())
+}
 
 // ---------------------------------------------------------------- 卡片容器
 
@@ -63,18 +73,91 @@ fn card<R>(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui) -> R
 
 // ---------------------------------------------------------------- App
 
+/// 用户尝试关闭配置面板时，未保存保护层给 UI 的处理结论。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseDecision {
+    /// 当前配置没有改动，可以立即关闭窗口。
+    CloseNow,
+    /// 当前配置有未保存改动，需要先让用户确认是否放弃。
+    ConfirmDiscard,
+}
+
+/// 配置编辑会话的未保存保护状态。
+///
+/// `saved` 来自窗口打开时加载的配置，或最近一次成功落盘的配置；UI 每帧把
+/// 当前编辑值传入，从而统一判断保存按钮、Esc、关闭按钮和系统关闭事件。
+struct UnsavedChanges {
+    saved: Config,
+    confirming_discard: bool,
+}
+
+impl UnsavedChanges {
+    /// 以已落盘配置创建保护状态；输入来自配置窗口初始化，后续用于判断是否有改动。
+    fn new(saved: &Config) -> Self {
+        Self {
+            saved: saved.clone(),
+            confirming_discard: false,
+        }
+    }
+
+    /// 比较当前编辑值和最近一次成功保存值；返回结果供保存按钮和关闭流程共用。
+    fn is_dirty(&self, current: &Config) -> bool {
+        current != &self.saved
+    }
+
+    /// 处理一次关闭请求；有改动时转入确认态，无改动时允许窗口直接关闭。
+    fn request_close(&mut self, current: &Config) -> CloseDecision {
+        if self.is_dirty(current) {
+            self.confirming_discard = true;
+            CloseDecision::ConfirmDiscard
+        } else {
+            CloseDecision::CloseNow
+        }
+    }
+
+    /// 用户选择继续编辑后退出确认态；当前配置保持不变，仍然标记为未保存。
+    fn continue_editing(&mut self) {
+        self.confirming_discard = false;
+    }
+
+    /// 返回是否正在等待用户确认放弃修改，供确认弹窗决定是否展示。
+    fn confirming_discard(&self) -> bool {
+        self.confirming_discard
+    }
+
+    /// 在配置成功落盘后更新基线；输入是刚写入磁盘的配置，返回后的编辑态为干净。
+    fn mark_saved(&mut self, current: &Config) {
+        self.saved = current.clone();
+        self.confirming_discard = false;
+    }
+
+    /// 放弃编辑并把当前配置恢复为最近保存值；调用方随后重新应用主题并关闭窗口。
+    fn discard_into(&mut self, current: &mut Config) {
+        *current = self.saved.clone();
+        self.confirming_discard = false;
+    }
+}
+
 pub struct SettingsApp {
     cfg: Config,
+    /// 最近一次成功落盘的配置与关闭确认状态，用于统一保护所有未保存编辑。
+    unsaved: UnsavedChanges,
     toast: Option<(String, f64)>,
     /// 正在捕获哪个热键字段（0=截图 1=取色 2=贴图）
     recording: Option<usize>,
     /// 捕获提示（裸键被拒等瞬时反馈）
     record_hint: Option<(String, f64)>,
+    /// 热键下标越界时的写入兜底槽（正常路径用不到，见 `hotkey_field_mut`）
+    hotkey_spill: String,
+    /// 更新检测状态机（手动触发，见 `update` 模块）
+    update: crate::update::UpdateCheck,
 }
 
 impl SettingsApp {
+    /// 创建配置窗口；配置从磁盘加载，副本作为本次编辑会话的未保存判断基线。
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let cfg = Config::load();
+        let unsaved = UnsavedChanges::new(&cfg);
         crate::apply_window_class(cc);
         theme::apply(&cc.egui_ctx, cfg.theme);
         // 独立窗口必须自己挂中文字体；先用 core Renderer 验证可解析
@@ -87,9 +170,12 @@ impl SettingsApp {
         }
         Self {
             cfg,
+            unsaved,
             toast: None,
             recording: None,
             record_hint: None,
+            hotkey_spill: String::new(),
+            update: crate::update::UpdateCheck::default(),
         }
     }
 
@@ -104,23 +190,26 @@ impl SettingsApp {
             return;
         }
         // 先取副本再校验：避免循环持有 &self.cfg 的同时调 self.toast 可变借用
-        let hotkeys = [
-            ("截图热键", self.cfg.hotkey_screenshot.clone()),
-            ("取色热键", self.cfg.hotkey_picker.clone()),
-            ("贴图热键", self.cfg.hotkey_pin.clone()),
-            ("录屏热键", self.cfg.hotkey_record.clone()),
-            ("滚动截图热键", self.cfg.hotkey_scroll.clone()),
-            ("延时截图热键", self.cfg.hotkey_delay.clone()),
-            ("历史热键", self.cfg.hotkey_history.clone()),
-        ];
-        for (name, raw) in hotkeys {
+        for (field, label) in crate::tray::HOTKEY_FIELDS.iter().map(|(f, l, _)| (*f, *l)) {
+            let raw = crate::tray::hotkey_field(&self.cfg, field);
             if raw.trim().is_empty() {
                 continue;
             }
-            if let Err(e) = crate::tray::parse_hotkey(&raw) {
-                self.toast(ctx, format!("{name}「{raw}」无效: {e}"));
+            if let Err(e) = crate::tray::parse_hotkey(raw) {
+                self.toast(ctx, format!("{label}热键「{raw}」无效: {e}"));
                 return;
             }
+        }
+        // 重复组合：同组合绑两个动作时后者静默失效（HotKey 的 id 由
+        // 修饰键+主键直接算出，事件只会命中先注册的那个），必须在落盘前拦下
+        if let Some((first, second)) = crate::tray::duplicate_hotkey(&self.cfg) {
+            self.toast(
+                ctx,
+                format!(
+                    "「{first}」与「{second}」绑了同一个热键：同时只有一个会生效，请改掉其中一个"
+                ),
+            );
+            return;
         }
         if config::parse_hex_color(&self.cfg.default_color).is_none() {
             self.toast(
@@ -138,8 +227,69 @@ impl SettingsApp {
             return;
         }
         match self.cfg.save() {
-            Ok(()) => self.toast(ctx, "已保存（托盘进程自动生效）"),
+            Ok(()) => {
+                // 只有真实落盘成功才推进基线；保存失败时必须继续保持未保存状态，
+                // 否则用户关闭窗口会丢掉尚未写入磁盘的配置。
+                self.unsaved.mark_saved(&self.cfg);
+                self.toast(ctx, "已保存（托盘进程自动生效）");
+            }
             Err(e) => self.toast(ctx, format!("保存失败: {e}")),
+        }
+    }
+
+    /// 响应关闭按钮、Esc 或系统标题栏关闭；无改动直接关窗，有改动则打开确认框。
+    fn request_close(&mut self, ctx: &egui::Context) {
+        match self.unsaved.request_close(&self.cfg) {
+            CloseDecision::CloseNow => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            CloseDecision::ConfirmDiscard => {
+                // 关闭确认优先于热键录入，避免录入态继续吞掉确认框的 Esc。
+                self.recording = None;
+            }
+        }
+    }
+
+    /// 绘制未保存确认框；放弃时恢复最近保存值和主题，继续编辑则只关闭确认框。
+    fn discard_confirmation(&mut self, ctx: &egui::Context) {
+        if !self.unsaved.confirming_discard() {
+            return;
+        }
+
+        let response =
+            egui::Modal::new(egui::Id::new("settings-discard-confirmation")).show(ctx, |ui| {
+                ui.set_min_width(320.0);
+                ui.strong("放弃未保存的修改？");
+                ui.add_space(8.0);
+                ui.label("当前修改尚未保存，关闭后将无法恢复。");
+                ui.add_space(12.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let discard = ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("放弃修改")
+                                    .color(theme::ACCENT_ON_TEXT)
+                                    .strong(),
+                            )
+                            .fill(theme::ACCENT_FILL)
+                            .corner_radius(6),
+                        )
+                        .clicked();
+                    let continue_editing = ui.button("继续编辑").clicked();
+                    (discard, continue_editing)
+                })
+                .inner
+            });
+        let (discard, continue_editing) = response.inner;
+
+        if discard {
+            // 主题选择会即时预览，因此放弃编辑时必须在关窗前恢复已保存主题，
+            // 避免窗口关闭动画或其它共享视图短暂保留未保存外观。
+            self.unsaved.discard_into(&mut self.cfg);
+            theme::apply(ctx, self.cfg.theme);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if continue_editing || response.should_close() {
+            self.unsaved.continue_editing();
         }
     }
 
@@ -182,6 +332,20 @@ impl SettingsApp {
         if let Some((text, mods, key)) = captured {
             match crate::tray::parse_hotkey(&text) {
                 Ok(hk) => {
+                    // 重复组合就地拦下：同组合绑两个动作时后者静默失效（全局
+                    // 热键事件按 HotKey id 命中先注册者）。这里**不**先把值写进
+                    // cfg 再判——冲突时留在录制态并提示，用户看到的是「按了没
+                    // 进去」，比事后才发现某个热键不工作好用
+                    if let Some(other) = crate::tray::hotkey_conflict_with(&self.cfg, &hk, idx) {
+                        self.record_hint = Some((
+                            format!(
+                                "「{text}」已被「{other}」占用：同一个组合绑两个动作时只有一个\
+                                 会生效，请按其它组合或 Esc 取消"
+                            ),
+                            ctx.input(|i| i.time) + 4.0,
+                        ));
+                        return;
+                    }
                     // mac 裸 F 键：Carbon 注册收不到媒体键模式事件，但托盘的
                     // CGEventTap 兜底层持有辅助功能权限时可直接生效，录入时就地提醒
                     if cfg!(target_os = "macos") && crate::tray::is_bare_fn_key(&hk) {
@@ -211,15 +375,24 @@ impl SettingsApp {
         }
     }
 
+    /// 按下标取热键字段的可变引用。下标语义 = [`crate::tray::HOTKEY_FIELDS`]
+    /// 的行序（UI 行、录制态索引、托盘注册顺序共用），改那边要同步这里。
     fn hotkey_field_mut(&mut self, idx: usize) -> &mut String {
-        match idx {
-            0 => &mut self.cfg.hotkey_screenshot,
-            1 => &mut self.cfg.hotkey_picker,
-            2 => &mut self.cfg.hotkey_pin,
-            3 => &mut self.cfg.hotkey_record,
-            4 => &mut self.cfg.hotkey_scroll,
-            5 => &mut self.cfg.hotkey_delay,
-            _ => &mut self.cfg.hotkey_history,
+        let Some((field, _, _)) = crate::tray::HOTKEY_FIELDS.get(idx) else {
+            // 越界不应发生（下标由遍历产生）；真发生了就把写入丢到一个临时
+            // 槽里而不是 panic——配置面板崩掉会连未保存的编辑一起丢
+            return &mut self.hotkey_spill;
+        };
+        let field = *field;
+        match field {
+            "hotkey_screenshot" => &mut self.cfg.hotkey_screenshot,
+            "hotkey_picker" => &mut self.cfg.hotkey_picker,
+            "hotkey_pin" => &mut self.cfg.hotkey_pin,
+            "hotkey_record" => &mut self.cfg.hotkey_record,
+            "hotkey_scroll" => &mut self.cfg.hotkey_scroll,
+            "hotkey_delay" => &mut self.cfg.hotkey_delay,
+            "hotkey_history" => &mut self.cfg.hotkey_history,
+            _ => &mut self.hotkey_spill,
         }
     }
 
@@ -229,9 +402,9 @@ impl SettingsApp {
         let (label, stroke) = if active {
             (
                 egui::RichText::new("按下组合键…  (Esc 取消 / Backspace 清除)")
-                    .color(theme::ACCENT)
+                    .color(accent_text(ui))
                     .monospace(),
-                egui::Stroke::new(1.5, theme::ACCENT),
+                egui::Stroke::new(1.5, accent_border(ui)),
             )
         } else if value.is_empty() {
             (
@@ -311,15 +484,35 @@ impl eframe::App for SettingsApp {
         visuals.panel_fill.to_normalized_gamma_f32()
     }
 
+    /// 绘制配置面板并统一处理保存快捷键和三种关闭入口的未保存保护。
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         // 热键捕获必须最先处理：吃掉所有按键事件（含 Esc，防止录制中关窗）
         self.capture_hotkey(&ctx);
+        // 系统标题栏关闭会在本帧标记 close_requested；有修改时必须立即取消，
+        // 等用户在确认框作出选择；无修改时不发 CancelClose，让 eframe 正常退出。
+        if ctx.input(|i| i.viewport().close_requested()) && self.unsaved.is_dirty(&self.cfg) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.request_close(&ctx);
+        }
+
+        let save_shortcut =
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S));
+        if save_shortcut && self.unsaved.is_dirty(&self.cfg) {
+            // 快捷键和保存按钮共用完整校验与落盘流程；失败只提示，不推进保存基线。
+            self.save(&ctx);
+        }
+
         let esc = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         if esc {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            return;
+            if self.unsaved.confirming_discard() {
+                self.unsaved.continue_editing();
+            } else {
+                self.request_close(&ctx);
+            }
         }
+
+        let dirty = self.unsaved.is_dirty(&self.cfg);
 
         // 底部按钮条（固定高度，勿动：见上一版 Panel 高度自增 bug 的复盘注释）
         egui::Panel::bottom(egui::Id::new("settings-bottom"))
@@ -336,13 +529,20 @@ impl eframe::App for SettingsApp {
                     // 主按钮：品牌红底白字（两主题通用）
                     let save_btn = egui::Button::new(
                         egui::RichText::new("保存")
-                            .color(egui::Color32::WHITE)
+                            .color(theme::ACCENT_ON_TEXT)
                             .strong(),
                     )
-                    .fill(theme::ACCENT)
+                    // 承载白字的实心底：用深一档的品牌红（品牌红本尊配白字
+                    // 4.23:1，差一点到 AA），见 theme::ACCENT_FILL
+                    .fill(theme::ACCENT_FILL)
                     .corner_radius(8)
                     .min_size(egui::vec2(96.0, 34.0));
-                    if ui.add(save_btn).clicked() {
+                    let save_response = ui.add_enabled(dirty, save_btn).on_hover_text(if dirty {
+                        "保存修改（Ctrl/Cmd+S）"
+                    } else {
+                        "当前没有需要保存的修改"
+                    });
+                    if save_response.clicked() {
                         self.save(&ctx);
                     }
                     ui.add_space(8.0);
@@ -352,7 +552,15 @@ impl eframe::App for SettingsApp {
                         .min_size(egui::vec2(80.0, 34.0))
                         .stroke(egui::Stroke::new(1.0, line(ui)));
                     if ui.add(close_btn).clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        self.request_close(&ctx);
+                    }
+                    if dirty {
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new("有未保存修改")
+                                .color(muted(ui))
+                                .size(12.0),
+                        );
                     }
                 });
             });
@@ -377,22 +585,47 @@ impl eframe::App for SettingsApp {
                 egui::Area::new(egui::Id::new("settings-toast"))
                     .anchor(egui::Align2::CENTER_BOTTOM, egui::Vec2::new(0.0, -72.0))
                     .show(&ctx, |ui| {
+                        // Toast 跟随主题：底色比面板抬起一层、文字用主文字令牌、
+                        // 描边用主题化的品牌红（此前两主题都是黑底红框，浅色下
+                        // 是在白面板上糊一块黑，用户反馈太丑）
                         egui::Frame::NONE
-                            .fill(egui::Color32::from_black_alpha(230))
-                            .stroke(egui::Stroke::new(1.0, theme::ACCENT))
+                            .fill(theme::toast_fill(ui.visuals()))
+                            .stroke(egui::Stroke::new(1.0, accent_border(ui)))
                             .corner_radius(8)
                             .inner_margin(egui::Margin::symmetric(14, 8))
-                            .show(ui, |ui| ui.colored_label(egui::Color32::WHITE, msg));
+                            .shadow(egui::epaint::Shadow {
+                                offset: [0, 3],
+                                blur: 12,
+                                spread: 0,
+                                color: egui::Color32::from_black_alpha(38),
+                            })
+                            .show(ui, |ui| ui.colored_label(text(ui), msg));
                     });
                 ctx.request_repaint();
             }
         }
+
+        self.discard_confirmation(&ctx);
+        self.poll_raise(&ctx);
     }
 }
 
 // ---------------------------------------------------------------- 页面
 
 impl SettingsApp {
+    /// 单例唤起心跳（v0.11.4）：第二个 `lscreen config` 进程会留下 raise
+    /// 信号。窗口在后台时无输入事件，eframe 不会主动重绘——必须自己
+    /// `request_repaint_after` 保持心跳（与 history::poll_raise 同一坑）。
+    fn poll_raise(&mut self, ctx: &egui::Context) {
+        const POLL: std::time::Duration = std::time::Duration::from_millis(300);
+        if crate::instance::take_raise(crate::instance::Kind::Settings) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        ctx.request_repaint_after(POLL);
+    }
+
     fn page(&mut self, ui: &mut egui::Ui) {
         // 页头
         ui.horizontal(|ui| {
@@ -546,7 +779,7 @@ impl SettingsApp {
                 ui.add_space(8.0);
                 // 必须用 link：Label（ui.small）默认 Sense::hover，clicked() 永远不触发
                 if ui
-                    .link(egui::RichText::new("打开目录").color(theme::ACCENT))
+                    .link(egui::RichText::new("打开目录").color(accent_text(ui)))
                     .on_hover_text("调用系统文件管理器打开当前保存目录")
                     .clicked()
                 {
@@ -670,27 +903,18 @@ impl SettingsApp {
                 .num_columns(2)
                 .spacing([12.0, 10.0])
                 .show(ui, |ui| {
-                    row_label(ui, "截图");
-                    self.hotkey_capture(ui, 0, &self.cfg.hotkey_screenshot.clone());
-                    ui.end_row();
-                    row_label(ui, "取色");
-                    self.hotkey_capture(ui, 1, &self.cfg.hotkey_picker.clone());
-                    ui.end_row();
-                    row_label(ui, "贴图");
-                    self.hotkey_capture(ui, 2, &self.cfg.hotkey_pin.clone());
-                    ui.end_row();
-                    row_label(ui, "录屏");
-                    self.hotkey_capture(ui, 3, &self.cfg.hotkey_record.clone());
-                    ui.end_row();
-                    row_label(ui, "滚动截图");
-                    self.hotkey_capture(ui, 4, &self.cfg.hotkey_scroll.clone());
-                    ui.end_row();
-                    row_label(ui, "延时截图");
-                    self.hotkey_capture(ui, 5, &self.cfg.hotkey_delay.clone());
-                    ui.end_row();
-                    row_label(ui, "历史");
-                    self.hotkey_capture(ui, 6, &self.cfg.hotkey_history.clone());
-                    ui.end_row();
+                    // 行序与值都取自 tray::HOTKEY_FIELDS（下标即字段索引，
+                    // 见 hotkey_field_mut），新增可绑动作时这里不用改
+                    for (i, (field, label)) in crate::tray::HOTKEY_FIELDS
+                        .iter()
+                        .map(|(f, l, _)| (*f, *l))
+                        .enumerate()
+                    {
+                        row_label(ui, label);
+                        let value = crate::tray::hotkey_field(&self.cfg, field).to_string();
+                        self.hotkey_capture(ui, i, &value);
+                        ui.end_row();
+                    }
                 });
             ui.add_space(2.0);
             let mut hint = "点击右侧输入框后直接按下组合键即可录入；Backspace 清除，Esc 取消；留空 = 不注册。托盘运行中保存即生效。".to_string();
@@ -740,6 +964,112 @@ impl SettingsApp {
             );
         }
         ui.add_space(6.0);
+        self.update_row(ui);
+        ui.add_space(6.0);
+    }
+
+    /// 「检查更新」区：结果横幅 + 当前版本 + 按钮 + 结果文案。
+    ///
+    /// 手动触发而非自动联网（理由见 `update` 模块头）：按钮点一次发一次
+    /// 请求，网络 IO 在后台线程，检查中按钮禁用并持续重绘。
+    fn update_row(&mut self, ui: &mut egui::Ui) {
+        self.update.poll();
+        // 新版本提示条（只在确实查到更新时出现）：品牌红描边卡片 +
+        // 「去下载」跳 release 页。紧贴「检查更新」按钮上方——检查动作
+        // 发生在哪，结果就出现在哪；页面长于视口时放页顶会落在视野外
+        // （v0.11.4 实测：查到更新后用户停在页底，看不见提示条）
+        if let Some(Ok(crate::update::Outcome::Newer(tag))) = self.update.result() {
+            let tag = tag.clone();
+            egui::Frame::NONE
+                .fill(field(ui))
+                .stroke(egui::Stroke::new(1.0, accent_border(ui)))
+                .corner_radius(8)
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .outer_margin(egui::Margin {
+                    bottom: 10,
+                    ..Default::default()
+                })
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("有新版本 {tag}"))
+                                .color(accent_text(ui))
+                                .strong(),
+                        );
+                        ui.add_space(8.0);
+                        if ui
+                            .link(
+                                egui::RichText::new("去下载")
+                                    .color(accent_text(ui))
+                                    .strong(),
+                            )
+                            .on_hover_text("在浏览器打开最新版本的下载页")
+                            .clicked()
+                        {
+                            crate::update::open_in_browser(&crate::update::release_page_url());
+                        }
+                        ui.add_space(6.0);
+                        if ui.small_button("知道了").clicked() {
+                            self.update.clear();
+                        }
+                    });
+                });
+        }
+        ui.horizontal(|ui| {
+            let checking = self.update.in_flight();
+            let btn = egui::Button::new(if checking {
+                egui::RichText::new("检查中…").color(muted(ui))
+            } else {
+                egui::RichText::new("检查更新").color(text(ui))
+            })
+            .corner_radius(8)
+            .min_size(egui::vec2(88.0, crate::theme::FIELD_H))
+            .stroke(egui::Stroke::new(1.0, line(ui)))
+            .fill(field(ui));
+            if ui
+                .add_enabled(!checking, btn)
+                .on_hover_text("查询 GitHub 上是否有新版本（手动触发，不会后台自动联网）")
+                .clicked()
+            {
+                self.update.start(ui.ctx());
+            }
+            ui.add_space(10.0);
+            // 结果文案：失败要可行动，**不**把失败说成「已是最新」；
+            // 未检查过时只报当前版本，不暗示任何结论
+            match self.update.result() {
+                None if !checking => {
+                    ui.label(
+                        egui::RichText::new(format!("当前 v{}", env!("CARGO_PKG_VERSION")))
+                            .color(muted(ui))
+                            .size(12.0),
+                    );
+                }
+                Some(Ok(crate::update::Outcome::UpToDate)) => {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "当前 v{}，已是最新",
+                            env!("CARGO_PKG_VERSION")
+                        ))
+                        .color(muted(ui))
+                        .size(12.0),
+                    );
+                }
+                // 有新版本时不在这里重复文案——提示条就在按钮正上方
+                Some(Err(e)) => {
+                    ui.label(
+                        egui::RichText::new(format!("未能确认：{e}"))
+                            .color(muted(ui))
+                            .size(12.0),
+                    );
+                }
+                _ => {}
+            }
+        });
+        // 检查中保持重绘：结果回来时线程会 request_repaint，这里补上
+        // 「请求已发出、等待中」期间的帧（否则窗口可能休眠不刷）
+        if self.update.in_flight() {
+            ui.ctx().request_repaint();
+        }
     }
 }
 
@@ -756,4 +1086,56 @@ fn input_field(ui: &mut egui::Ui, builder: egui::TextEdit<'_>) -> egui::Response
 
 fn egui_to_rgba(c: egui::Color32) -> lscreen_core::Rgba {
     lscreen_core::Rgba([c.r(), c.g(), c.b(), 0xff])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn changed_config_requires_confirmation_and_can_continue_editing() {
+        let original = Config::default();
+        let mut edited = original.clone();
+        edited.save_dir = "D:/截图".to_string();
+        let mut guard = UnsavedChanges::new(&original);
+
+        assert_eq!(guard.request_close(&edited), CloseDecision::ConfirmDiscard);
+        assert!(guard.confirming_discard());
+
+        guard.continue_editing();
+        assert!(!guard.confirming_discard());
+        assert!(guard.is_dirty(&edited));
+    }
+
+    #[test]
+    fn successful_save_clears_dirty_state_and_allows_close() {
+        let original = Config::default();
+        let mut edited = original.clone();
+        edited.default_width = 8.0;
+        let mut guard = UnsavedChanges::new(&original);
+        assert!(guard.is_dirty(&edited));
+
+        guard.mark_saved(&edited);
+
+        assert!(!guard.is_dirty(&edited));
+        assert_eq!(guard.request_close(&edited), CloseDecision::CloseNow);
+    }
+
+    #[test]
+    fn discard_restores_saved_config_including_previewed_theme() {
+        let original = Config {
+            theme: config::ThemeMode::Light,
+            ..Config::default()
+        };
+        let mut edited = original.clone();
+        edited.theme = config::ThemeMode::Dark;
+        let mut guard = UnsavedChanges::new(&original);
+        assert_eq!(guard.request_close(&edited), CloseDecision::ConfirmDiscard);
+
+        guard.discard_into(&mut edited);
+
+        assert_eq!(edited.theme, config::ThemeMode::Light);
+        assert!(!guard.is_dirty(&edited));
+        assert!(!guard.confirming_discard());
+    }
 }

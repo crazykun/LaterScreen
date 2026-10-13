@@ -414,6 +414,89 @@ fn parse_key(lower: &str) -> Option<Code> {
     })
 }
 
+/// 可绑热键的动作：配置字段 →（中文名，动作）。**单一事实来源**——注册
+/// （`Hotkeys::apply`）、菜单文案、Wayland shortcuts、配置面板的逐条校验与
+/// 重复检测全都读它，避免新增字段时某处漏掉。
+///
+/// **顺序即优先级**：注册按此顺序进行，两个动作绑到同一组合时靠前的一个
+/// 生效（全局热键事件按 id 命中先注册者）。同时配置面板直接用下标当字段
+/// 索引（`hotkey_field_mut`），改序即改 UI 行序，别随意重排。
+pub const HOTKEY_FIELDS: &[(&str, &str, Action)] = &[
+    ("hotkey_screenshot", "截图", Action::Screenshot),
+    ("hotkey_picker", "取色", Action::Picker),
+    ("hotkey_pin", "贴图", Action::Pin),
+    ("hotkey_record", "录屏", Action::Record),
+    ("hotkey_scroll", "滚动截图", Action::Scroll),
+    ("hotkey_delay", "延时截图", Action::DelayShot),
+    ("hotkey_history", "历史", Action::History),
+];
+
+/// 取某个动作当前配置的热键原文；顺序与 [`HOTKEY_FIELDS`] 一致。
+pub fn hotkey_of(cfg: &Config, a: Action) -> &str {
+    HOTKEY_FIELDS
+        .iter()
+        .find(|(_, _, act)| *act == a)
+        .map(|(field, _, _)| hotkey_field(cfg, field))
+        .unwrap_or("")
+}
+
+/// 取某个热键字段当前配置的热键原文（`HOTKEY_FIELDS` 里的字段名）。
+/// 对外暴露是给配置面板的逐条校验用的——那里按字段遍历，而不是按动作。
+pub fn hotkey_field<'a>(cfg: &'a Config, field: &str) -> &'a str {
+    match field {
+        "hotkey_screenshot" => &cfg.hotkey_screenshot,
+        "hotkey_delay" => &cfg.hotkey_delay,
+        "hotkey_picker" => &cfg.hotkey_picker,
+        "hotkey_pin" => &cfg.hotkey_pin,
+        "hotkey_record" => &cfg.hotkey_record,
+        "hotkey_scroll" => &cfg.hotkey_scroll,
+        "hotkey_history" => &cfg.hotkey_history,
+        _ => "",
+    }
+}
+
+/// 热键重复检测：返回（被占用方的中文名，重复的组合）。
+///
+/// 同一个组合绑两个动作时**后者静默失效**——`HotKey::id()` 由
+/// `mods<<16 | key` 直接算出，两个同组合的热键 id 相同，全局热键事件
+/// 只能命中先注册的（`action_for_id` 找第一个匹配项），菜单里却两条都
+/// 显示着同一个键，用户无法从界面看出为什么有一个不工作。因此必须在
+/// 保存与录入时就地拦下。
+///
+/// 比较用规范化后的 `HotKey`（`parse_hotkey` 的结果）而非字符串：
+/// "Ctrl+A" 与 "CONTROL+a" 是同一个组合，字符串比不出来。
+pub fn duplicate_hotkey(cfg: &Config) -> Option<(String, String)> {
+    let mut seen: Vec<(&str, HotKey)> = Vec::new();
+    for (field, label, _) in HOTKEY_FIELDS {
+        let raw = hotkey_field(cfg, field);
+        if raw.trim().is_empty() {
+            continue;
+        }
+        let Ok(hk) = parse_hotkey(raw) else {
+            continue; // 无效值由 `save` 的校验分支负责报错
+        };
+        if let Some((prev_label, _)) = seen.iter().find(|(_, h)| h.id() == hk.id()) {
+            return Some((prev_label.to_string(), label.to_string()));
+        }
+        seen.push((label, hk));
+    }
+    None
+}
+
+/// 把「待录入到 idx 号字段」的热键与其余字段比对：冲突则返回对方的中文名。
+/// 与 [`duplicate_hotkey`] 同一个判定（按 `HotKey::id()` 比较），但排除 idx
+/// 自身——配置面板录入时用它就地拦截（此时新值还没写进 cfg）。
+pub fn hotkey_conflict_with(cfg: &Config, hk: &HotKey, idx: usize) -> Option<String> {
+    HOTKEY_FIELDS
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != idx)
+        .find(|(_, (_, _, act))| {
+            parse_hotkey(hotkey_of(cfg, act.clone())).is_ok_and(|h| h.id() == hk.id())
+        })
+        .map(|(_, (_, label, _))| label.to_string())
+}
+
 /// 已注册热键集合：热键 → 动作。配置热加载时重建。
 /// manager 为 Option：Wayland 等无 X11 会话创建失败时热键整体降级，
 /// 托盘本体（D-Bus / 系统 API）不受影响。
@@ -473,26 +556,15 @@ impl Hotkeys {
         for (hk, _) in self.entries.drain(..) {
             let _ = manager.unregister(hk);
         }
-        for (field, raw, action) in [
-            (
-                "hotkey_screenshot",
-                &cfg.hotkey_screenshot,
-                Action::Screenshot,
-            ),
-            ("hotkey_delay", &cfg.hotkey_delay, Action::DelayShot),
-            ("hotkey_picker", &cfg.hotkey_picker, Action::Picker),
-            ("hotkey_pin", &cfg.hotkey_pin, Action::Pin),
-            ("hotkey_record", &cfg.hotkey_record, Action::Record),
-            ("hotkey_scroll", &cfg.hotkey_scroll, Action::Scroll),
-            ("hotkey_history", &cfg.hotkey_history, Action::History),
-        ] {
+        for (field, _label, action) in HOTKEY_FIELDS {
+            let raw = hotkey_field(cfg, field);
             let _ = field;
             if raw.trim().is_empty() {
                 continue;
             }
             match parse_hotkey(raw) {
                 Ok(hk) => match manager.register(hk) {
-                    Ok(()) => self.entries.push((hk, action)),
+                    Ok(()) => self.entries.push((hk, action.clone())),
                     Err(e) => {
                         eprintln!("lscreen tray: 热键注册失败（可能被占用）「{raw}」: {e}")
                     }
@@ -613,19 +685,10 @@ fn shortcut_specs(cfg: &Config) -> Vec<lscreen_capture::ShortcutSpec> {
         let Some(id) = action_shortcut_id(action) else {
             continue;
         };
-        let raw = match action {
-            Action::Screenshot => &cfg.hotkey_screenshot,
-            Action::DelayShot => &cfg.hotkey_delay,
-            Action::Picker => &cfg.hotkey_picker,
-            Action::Record => &cfg.hotkey_record,
-            Action::Scroll => &cfg.hotkey_scroll,
-            Action::History => &cfg.hotkey_history,
-            _ => continue,
-        };
         out.push(lscreen_capture::ShortcutSpec {
             id: id.to_string(),
             description: label.to_string(),
-            preferred_trigger: to_preferred_trigger(raw),
+            preferred_trigger: to_preferred_trigger(hotkey_of(cfg, action.clone())),
         });
     }
     out
@@ -639,15 +702,7 @@ fn menu_label(cfg: &Config, a: &Action) -> String {
         .find(|(act, _)| *act == *a)
         .map(|(_, label)| *label)
         .unwrap_or("");
-    let hk = match a {
-        Action::Screenshot => &cfg.hotkey_screenshot,
-        Action::DelayShot => &cfg.hotkey_delay,
-        Action::Picker => &cfg.hotkey_picker,
-        Action::Record => &cfg.hotkey_record,
-        Action::Scroll => &cfg.hotkey_scroll,
-        Action::History => &cfg.hotkey_history,
-        _ => "",
-    };
+    let hk = hotkey_of(cfg, a.clone());
     if hk.trim().is_empty() {
         base.to_string()
     } else {
@@ -873,7 +928,7 @@ mod native_impl {
 
     use std::collections::HashMap;
     use tray_icon::menu::{Menu, MenuEvent, MenuItem};
-    use tray_icon::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
+    use tray_icon::{TrayIcon, TrayIconBuilder};
     use winit::application::ApplicationHandler;
     use winit::event::WindowEvent;
     use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -881,7 +936,6 @@ mod native_impl {
 
     enum UserEvent {
         Menu(String),
-        TrayClick,
         Hotkey(u32),
     }
 
@@ -931,12 +985,10 @@ mod native_impl {
             if let Some(icon) = icon {
                 builder = builder.with_icon(icon);
             }
-            // Windows：右键才弹菜单，左键保留为快速截图入口（tray-icon 的
-            // menu_on_left_click 默认开——左键会同时弹菜单并触发快速动作）。
-            // macOS 保持默认：左键弹菜单符合系统惯例，见 handle() 的 TrayClick。
-            if cfg!(windows) {
-                builder = builder.with_menu_on_left_click(false);
-            }
+            // 三平台统一：**左键与右键单击都只弹菜单**，不再把左键派发成
+            // 快速截图（v0.11.1 及之前 Windows 独有的设计，用户主诉「点一
+            // 下托盘图标就开始截图了」）。快速入口改为菜单项/全局热键。
+            // tray-icon 的 `menu_on_left_click` 默认即为 true，此处不再覆写。
             match builder.build() {
                 Ok(tray) => self.tray = Some(tray),
                 // 创建失败（托盘服务不可用等）降级为「仅热键」常驻：事件循环
@@ -966,13 +1018,6 @@ mod native_impl {
                     "quit" => Some(Action::Quit),
                     _ => None,
                 },
-                // 左键/双击托盘 = 快速截图（完整菜单在右键）。macOS 例外：
-                // 左键弹菜单是系统惯例（menu_on_left_click 默认开启），若再派发
-                // 截图会「弹菜单的同时又开了截图覆盖层」
-                #[cfg(not(target_os = "macos"))]
-                UserEvent::TrayClick => Some(Action::Screenshot),
-                #[cfg(target_os = "macos")]
-                UserEvent::TrayClick => None,
                 UserEvent::Hotkey(id) => self.hotkeys.action_for_id(id),
             };
             if let Some(a) = action {
@@ -1093,21 +1138,9 @@ mod native_impl {
                 let _ = p.send_event(UserEvent::Menu(ev.id.0.clone()));
             }));
         }
-        {
-            let p = proxy.clone();
-            TrayIconEvent::set_event_handler(Some(move |ev: TrayIconEvent| {
-                let left = matches!(
-                    &ev,
-                    TrayIconEvent::Click { button, .. } if *button == MouseButton::Left
-                ) || matches!(
-                    &ev,
-                    TrayIconEvent::DoubleClick { button, .. } if *button == MouseButton::Left
-                );
-                if left {
-                    let _ = p.send_event(UserEvent::TrayClick);
-                }
-            }));
-        }
+        // 托盘点击不再注册处理器：tray-icon 自身会在左右键单击时弹菜单
+        // （`menu_on_left_click`/`menu_on_right_click` 均默认为 true）。
+        // 此前这里监听左键并派发快速截图，就是用户主诉的「点图标就开始截图」。
         {
             let p = proxy;
             GlobalHotKeyEvent::set_event_handler(Some(move |ev: GlobalHotKeyEvent| {
@@ -1202,6 +1235,78 @@ mod tests {
         assert!(parse_hotkey("Ctrl+Q+Q").is_err()); // 多主键
         assert!(parse_hotkey("Ctrl+HyperSpace").is_err()); // 未知键
         assert!(parse_hotkey("Ctrl+Alt").is_err());
+    }
+
+    #[test]
+    fn hotkey_table_covers_every_bindable_action() {
+        // HOTKEY_FIELDS 是「可绑热键的动作」的单一事实来源：注册、菜单文案、
+        // Wayland shorts、配置面板校验与重复检测都读它。这里锁住它与
+        // action_shortcut_id 的可绑集合一致（Linux 之外也要成立，故不 cfg 门）
+        // 集合一致即可（顺序是 UI 行序与注册优先级，另由 hotkey_field_mut
+        // 的下标语义保证，这里不做顺序断言）
+        let mut bindable: Vec<Action> = vec![
+            Action::Screenshot,
+            Action::DelayShot,
+            Action::Picker,
+            Action::Pin,
+            Action::Record,
+            Action::Scroll,
+            Action::History,
+        ];
+        let mut in_table: Vec<Action> = HOTKEY_FIELDS.iter().map(|(_, _, a)| a.clone()).collect();
+        bindable.sort_by_key(|a| format!("{a:?}"));
+        in_table.sort_by_key(|a| format!("{a:?}"));
+        assert_eq!(in_table, bindable, "HOTKEY_FIELDS 与可绑动作集合不一致");
+        // 字段名不重复（否则重复检测会漏项）
+        let mut seen = std::collections::HashSet::new();
+        for (field, _, _) in HOTKEY_FIELDS {
+            assert!(seen.insert(*field), "重复的热键字段 {field}");
+        }
+        // 每个字段都能从 Config 取到（拼写错误会静默返回空串）
+        let cfg = Config::default();
+        for (field, _, _) in HOTKEY_FIELDS {
+            let _ = hotkey_field(&cfg, field);
+        }
+        // 默认配置只有 F1 有值，且读到的就是它
+        assert_eq!(hotkey_field(&cfg, "hotkey_screenshot"), "F1");
+    }
+
+    #[test]
+    fn duplicate_hotkey_detected() {
+        let mut cfg = Config::default(); // 截图 = F1
+        assert_eq!(duplicate_hotkey(&cfg), None, "默认无重复");
+
+        // 大小写/空白不同的写法也算同一个组合（按 HotKey::id 比较，不是字符串）
+        cfg.hotkey_picker = "f1".to_string();
+        let dup = duplicate_hotkey(&cfg).expect("F1 与 f1 应判重复");
+        assert_eq!(dup.0, "截图");
+        assert_eq!(dup.1, "取色");
+
+        // 不同组合不误报
+        cfg.hotkey_picker = "Ctrl+Alt+P".to_string();
+        assert_eq!(duplicate_hotkey(&cfg), None);
+        // 修饰键不同也不算重复（Ctrl+A vs Ctrl+Shift+A）
+        cfg.hotkey_picker = "Ctrl+Shift+F1".to_string();
+        assert_eq!(duplicate_hotkey(&cfg), None);
+        // 空值不参与比较
+        cfg.hotkey_picker = String::new();
+        assert_eq!(duplicate_hotkey(&cfg), None);
+
+        // 录入期拦截：新值还没写进 cfg 也能判出来（排除自身字段）
+        let hk = parse_hotkey("F1").unwrap();
+        assert_eq!(
+            hotkey_conflict_with(&cfg, &hk, 0).as_deref(),
+            None,
+            "与自身字段比较不应报冲突"
+        );
+        assert_eq!(
+            hotkey_conflict_with(&cfg, &hk, 1).as_deref(),
+            Some("截图"),
+            "取色字段录入 F1 应报与截图冲突"
+        );
+        // 无效值不参与比较（由 save 的校验分支负责报错）
+        cfg.hotkey_record = "裸字母".to_string();
+        assert_eq!(duplicate_hotkey(&cfg), None);
     }
 
     #[test]

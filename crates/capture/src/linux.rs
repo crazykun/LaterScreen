@@ -774,27 +774,57 @@ impl NativeWindow {
         })
     }
 
+    /// 本平台点击穿透是否支持**区域保留**（穿透时留一块仍可交互的
+    /// 输入区）。X11 的 XShape 输入区是任意矩形集合 → true；Win/mac
+    /// 原语只有整窗语义 → false。
+    pub fn input_region_supported() -> bool {
+        true
+    }
+
     /// 点击穿透：改 XShape 输入区。协议规范语义（易踩反）：
     /// - **空矩形列表**（ShapeRectangles `&[]`）= client 输入区为**空集**
-    ///   → 全窗不收指针事件，点击落到下层窗口（开穿透）
+    ///   → 全窗不收指针事件，点击落到下层窗口（开穿透，keep=None）
     /// - **ShapeMask(src=None)** = **移除** client 输入区 → 恢复默认
     ///   （默认输入区 = 全窗口，关穿透）
+    /// - **keep=Some((x, y, w, h))** = 输入区设为窗口内该物理像素矩形
+    ///   → 矩形外点击穿透、矩形内（如贴图工具条条带）仍可交互
     ///
-    /// 两者不是同一件事：空 region ≠ None。
-    pub fn set_click_through(&self, through: bool) -> Result<()> {
+    /// 前两者不是同一件事：空 region ≠ None。坐标相对窗口原点（物理
+    /// 像素，无边框 client 区即整窗）。
+    pub fn set_click_through(
+        &self,
+        through: bool,
+        keep: Option<(i32, i32, u32, u32)>,
+    ) -> Result<()> {
         use x11rb::protocol::shape::{ConnectionExt as _, SK, SO};
         use x11rb::protocol::xproto::ClipOrdering;
         with_conn(|conn, _| {
             let r = if through {
-                conn.shape_rectangles(
-                    SO::SET,
-                    SK::INPUT,
-                    ClipOrdering::UNSORTED,
-                    self.0,
-                    0,
-                    0,
-                    &[],
-                )
+                match keep {
+                    Some((x, y, w, h)) => conn.shape_rectangles(
+                        SO::SET,
+                        SK::INPUT,
+                        ClipOrdering::UNSORTED,
+                        self.0,
+                        x as i16,
+                        y as i16,
+                        &[x11rb::protocol::xproto::Rectangle {
+                            x: 0,
+                            y: 0,
+                            width: w.min(u16::MAX as u32) as u16,
+                            height: h.min(u16::MAX as u32) as u16,
+                        }],
+                    ),
+                    None => conn.shape_rectangles(
+                        SO::SET,
+                        SK::INPUT,
+                        ClipOrdering::UNSORTED,
+                        self.0,
+                        0,
+                        0,
+                        &[],
+                    ),
+                }
             } else {
                 conn.shape_mask(SO::SET, SK::INPUT, self.0, 0, 0, x11rb::NONE)
             };
@@ -1013,7 +1043,8 @@ mod tests {
     use super::*;
 
     /// 真机冒烟（env 门控 + `--ignored` 手动跑）：对 `LSCREEN_TEST_WIN` 指定
-    /// 的活窗口依次设置不透明度 0.5 → 穿透 → 恢复，每步停留 2s 供外部用
+    /// 的活窗口依次设置不透明度 0.5 → 整窗穿透 → 区域穿透（顶部留一块
+    /// 可点区）→ 恢复，每步停留 2s 供外部用
     /// `xprop -id <win> _NET_WM_WINDOW_OPACITY` / `xwininfo -shape -id <win>`
     /// 人工核对。CI 永不执行（ignore）。
     ///
@@ -1041,14 +1072,19 @@ mod tests {
                 .unwrap_or(2),
         );
         n.set_opacity(0.5).expect("set_opacity(0.5)");
-        eprintln!("[1/3] 不透明度 0.5，停 2s（此时 xprop 应见 _NET_WM_WINDOW_OPACITY）");
+        eprintln!("[1/4] 不透明度 0.5，停 {dwell:?}（此时 xprop 应见 _NET_WM_WINDOW_OPACITY）");
         std::thread::sleep(dwell);
-        n.set_click_through(true).expect("set_click_through(true)");
-        eprintln!("[2/3] 穿透开，停 2s（xwininfo -shape 应见空 Input shape）");
+        n.set_click_through(true, None)
+            .expect("set_click_through(true)");
+        eprintln!("[2/4] 整窗穿透，停 {dwell:?}（xwininfo -shape 应见空 Input shape）");
         std::thread::sleep(dwell);
-        n.set_click_through(false)
+        n.set_click_through(true, Some((0, 100, 400, 40)))
+            .expect("set_click_through(true, keep)");
+        eprintln!("[3/4] 区域穿透（窗口顶部 400x40@y=100 可点，其余穿透），停 {dwell:?}");
+        std::thread::sleep(dwell);
+        n.set_click_through(false, None)
             .expect("set_click_through(false)");
         n.set_opacity(1.0).expect("set_opacity(1.0)");
-        eprintln!("[3/3] 已恢复");
+        eprintln!("[4/4] 已恢复");
     }
 }
