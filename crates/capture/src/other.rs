@@ -201,6 +201,255 @@ mod mac {
             .iter()
             .position(|s| x >= s.x && x < s.x + s.w && y >= s.y && y < s.y + s.h)
     }
+
+    // ---------------------------------------- 窗口枚举（单次 CGWindowList 扫描）
+    //
+    // xcap 0.9.8 的 mac Window 每个字段访问器（x/y/width/height/title/app_name/
+    // is_minimized…）都各自重新全量扫一遍 CGWindowListCopyWindowInfo（见其
+    // get_window_cf_dictionary），上层逐字段读取即 N 窗口 × ~10 次全量枚举，
+    // 每次 GUI 启动叠加 frontmost_window 再翻倍——真机上这是截图入场延迟的
+    // 大头。这里直连 CFDictionary 一次扫完，同时放宽一条：kCGWindowName 缺失
+    // （无「屏幕录制」授权）时保留窗口、仅标题留空——窗口吸附不再依赖授权，
+    // xcap 的实现会把这类窗口整条丢弃。
+
+    /// kCGWindowListOptionOnScreenOnly
+    const WL_ON_SCREEN: u32 = 1 << 0;
+    /// kCGWindowListExcludeDesktopElements
+    const WL_EXCL_DESKTOP: u32 = 1 << 4;
+    /// kCFNumberSInt32Type（CFNumberGetValue 自动做类型转换，请求 32 位足够）
+    const CF_NUM_SINT32: u32 = 3;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFArrayGetCount(array: *const core::ffi::c_void) -> isize;
+        fn CFArrayGetValueAtIndex(
+            array: *const core::ffi::c_void,
+            idx: isize,
+        ) -> *const core::ffi::c_void;
+        fn CFDictionaryGetValue(
+            dict: *const core::ffi::c_void,
+            key: *const core::ffi::c_void,
+        ) -> *const core::ffi::c_void;
+        fn CFStringGetCString(
+            s: *const core::ffi::c_void,
+            buffer: *mut i8,
+            size: isize,
+            encoding: u32,
+        ) -> u8;
+        fn CFStringGetTypeID() -> usize;
+        fn CFNumberGetValue(
+            number: *const core::ffi::c_void,
+            the_type: u32,
+            value: *mut core::ffi::c_void,
+        ) -> u8;
+        fn CFNumberGetTypeID() -> usize;
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGWindowListCopyWindowInfo(option: u32, limit: u32) -> *mut core::ffi::c_void;
+        fn CGRectMakeWithDictionaryRepresentation(
+            dict: *const core::ffi::c_void,
+            rect: *mut CGRect,
+        ) -> u8;
+        fn CGGetActiveDisplayList(max_displays: u32, displays: *mut u32, count: *mut u32) -> i32;
+        fn CGDisplayBounds(display: u32) -> CGRect;
+        fn CGDisplayPixelsWide(display: u32) -> usize;
+    }
+
+    /// CGRectMakeWithDictionaryRepresentation / CGDisplayBounds 的返回布局
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct CGSize {
+        pub w: f64,
+        pub h: f64,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct CGRect {
+        pub origin: CGPoint,
+        pub size: CGSize,
+    }
+
+    fn cf_str(s: &str) -> *mut core::ffi::c_void {
+        unsafe {
+            CFStringCreateWithCString(
+                std::ptr::null_mut(),
+                format!("{s}\0").as_ptr() as *const i8,
+                CF_UTF8,
+            )
+        }
+    }
+
+    unsafe fn dict_string(dict: *const core::ffi::c_void, key: *const core::ffi::c_void) -> String {
+        let v = CFDictionaryGetValue(dict, key);
+        if v.is_null() || CFGetTypeID(v as *mut _) != CFStringGetTypeID() {
+            return String::new();
+        }
+        let mut buf = [0u8; 1024];
+        if CFStringGetCString(v, buf.as_mut_ptr() as *mut i8, buf.len() as isize, CF_UTF8) == 0 {
+            return String::new();
+        }
+        std::ffi::CStr::from_ptr(buf.as_ptr() as *const i8)
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    unsafe fn dict_i32(
+        dict: *const core::ffi::c_void,
+        key: *const core::ffi::c_void,
+    ) -> Option<i32> {
+        let v = CFDictionaryGetValue(dict, key);
+        if v.is_null() || CFGetTypeID(v as *mut _) != CFNumberGetTypeID() {
+            return None;
+        }
+        let mut out: i32 = 0;
+        (CFNumberGetValue(v, CF_NUM_SINT32, &mut out as *mut i32 as *mut _) != 0).then_some(out)
+    }
+
+    unsafe fn dict_rect(
+        dict: *const core::ffi::c_void,
+        key: *const core::ffi::c_void,
+    ) -> Option<CGRect> {
+        let v = CFDictionaryGetValue(dict, key);
+        if v.is_null() {
+            return None;
+        }
+        let mut r = CGRect {
+            origin: CGPoint { x: 0.0, y: 0.0 },
+            size: CGSize { w: 0.0, h: 0.0 },
+        };
+        (CGRectMakeWithDictionaryRepresentation(v, &mut r) != 0).then_some(r)
+    }
+
+    /// 一条枚举出的窗口记录：bounds 为 CG 全局逻辑点（kCGWindowBounds）。
+    pub struct RawWindow {
+        pub id: u32,
+        pub title: String,
+        pub x: f64,
+        pub y: f64,
+        pub w: f64,
+        pub h: f64,
+    }
+
+    /// 单次枚举屏幕上的**普通层（layer 0）**窗口（Z 序自顶向下）。过滤：
+    /// 非零层辅助窗（菜单栏/状态项/Dock——Dock 底窗是整屏大窗、排在应用
+    /// 窗口之上，不滤会把悬停命中与「最前窗口」全吞成全屏）、共享态关闭
+    /// （= 抓不到内容）、StatusIndicator、零尺寸；本程序自己的窗口（贴图/
+    /// 状态窗）按进程名排除。kCGWindowName 缺失（无「屏幕录制」授权）时
+    /// 标题留空、窗口保留。
+    pub fn window_list_raw() -> Vec<RawWindow> {
+        let own = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        let (k_bounds, k_name, k_owner, k_number, k_layer, k_sharing) = (
+            cf_str("kCGWindowBounds"),
+            cf_str("kCGWindowName"),
+            cf_str("kCGWindowOwnerName"),
+            cf_str("kCGWindowNumber"),
+            cf_str("kCGWindowLayer"),
+            cf_str("kCGWindowSharingState"),
+        );
+        let mut out = Vec::new();
+        unsafe {
+            let arr = CGWindowListCopyWindowInfo(WL_ON_SCREEN | WL_EXCL_DESKTOP, 0);
+            if !arr.is_null() {
+                let n = CFArrayGetCount(arr);
+                for i in 0..n {
+                    let d = CFArrayGetValueAtIndex(arr, i);
+                    if d.is_null() {
+                        continue;
+                    }
+                    // kCGWindowName 缺失（无屏幕录制授权）时标题留空、窗口保留
+                    let title = dict_string(d, k_name);
+                    let owner = dict_string(d, k_owner);
+                    if title == "StatusIndicator" && owner == "Window Server" {
+                        continue;
+                    }
+                    if dict_i32(d, k_sharing) == Some(0) {
+                        continue;
+                    }
+                    // 只认普通层（应用窗口）：Dock/菜单栏/状态项全在更高层
+                    if dict_i32(d, k_layer) != Some(0) {
+                        continue;
+                    }
+                    let Some(id) = dict_i32(d, k_number) else {
+                        continue;
+                    };
+                    let Some(r) = dict_rect(d, k_bounds) else {
+                        continue;
+                    };
+                    if r.size.w <= 0.0 || r.size.h <= 0.0 {
+                        continue;
+                    }
+                    if let (Some(own), true) = (&own, !owner.is_empty()) {
+                        if owner.eq_ignore_ascii_case(own) {
+                            continue;
+                        }
+                    }
+                    out.push(RawWindow {
+                        id: id as u32,
+                        title,
+                        x: r.origin.x,
+                        y: r.origin.y,
+                        w: r.size.w,
+                        h: r.size.h,
+                    });
+                }
+                CFRelease(arr);
+            }
+            for k in [k_bounds, k_name, k_owner, k_number, k_layer, k_sharing] {
+                if !k.is_null() {
+                    CFRelease(k);
+                }
+            }
+        }
+        out
+    }
+
+    /// 各活跃显示器的逻辑包围盒与缩放比（物理宽 / 逻辑宽）。枚举一次复用。
+    pub struct DisplayScale {
+        pub x: f64,
+        pub y: f64,
+        pub w: f64,
+        pub h: f64,
+        pub scale: f64,
+    }
+
+    pub fn display_scales() -> Vec<DisplayScale> {
+        let mut ids = [0u32; 16];
+        let mut n: u32 = 0;
+        let mut out = Vec::new();
+        unsafe {
+            if CGGetActiveDisplayList(16, ids.as_mut_ptr(), &mut n) == 0 {
+                for &d in &ids[..n.min(16) as usize] {
+                    let bounds = CGDisplayBounds(d);
+                    if bounds.size.w <= 0.0 || bounds.size.h <= 0.0 {
+                        continue;
+                    }
+                    out.push(DisplayScale {
+                        x: bounds.origin.x,
+                        y: bounds.origin.y,
+                        w: bounds.size.w,
+                        h: bounds.size.h,
+                        scale: CGDisplayPixelsWide(d) as f64 / bounds.size.w,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// 逻辑点所在显示器的缩放比（窗口中心定位）；找不到所在屏回退 1.0
+    /// （与旧 xcap 路径的失败回退一致）。
+    pub fn scale_for_center(displays: &[DisplayScale], cx: f64, cy: f64) -> f64 {
+        displays
+            .iter()
+            .find(|d| cx >= d.x && cx < d.x + d.w && cy >= d.y && cy < d.y + d.h)
+            .map(|d| d.scale)
+            .filter(|s| *s > 0.0)
+            .unwrap_or(1.0)
+    }
 }
 
 /// Win/mac 无 Wayland 概念，恒 false。
@@ -281,88 +530,110 @@ pub fn pointer_state() -> Option<(i32, i32, bool)> {
     None
 }
 
-// ------------------------------------------------- 窗口枚举（M9，委托 xcap）
+// ------------------------------------------------- 窗口枚举（M9）
 
 use crate::WindowInfo;
 
-/// xcap 的 `Window::all()` 两平台都按 Z 序自顶向下返回
-/// （Win = EnumWindows；mac = CGWindowListCopyWindowInfo），
-/// 且已过滤不可见/工具窗口/本进程窗口。
+/// mac 走本文件的 `mac::window_list_raw` 单次扫描（见该函数文档：xcap 的
+/// 每字段重扫在窗口多时是百毫秒级）；Win 委托 xcap——`Window::all()` 按
+/// Z 序自顶向下返回（EnumWindows），且已过滤不可见/工具窗口/本进程窗口。
 pub fn list_windows() -> Vec<WindowInfo> {
-    let Ok(windows) = xcap::Window::all() else {
-        return Vec::new();
-    };
-    // 排除自家其他进程（贴图/录制状态窗）：Windows 的 app_name = 进程 exe 名，
-    // mac = 应用名；与自身可执行文件名比对（大小写不敏感）
-    let own_exe = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
-    let n = windows.len();
-    let mut out = Vec::new();
-    for (i, w) in windows.iter().enumerate() {
-        let (Ok(width), Ok(height)) = (w.width(), w.height()) else {
-            continue;
+    #[cfg(target_os = "macos")]
+    {
+        let displays = mac::display_scales();
+        let list = mac::window_list_raw();
+        let n = list.len();
+        list.into_iter()
+            .enumerate()
+            .map(|(i, w)| mac_to_window_info(w, (n - i) as u32, &displays))
+            .collect()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let Ok(windows) = xcap::Window::all() else {
+            return Vec::new();
         };
-        if width == 0 || height == 0 || w.is_minimized().unwrap_or(false) {
-            continue;
-        }
-        if let (Some(own), Ok(app)) = (&own_exe, w.app_name()) {
-            if app.eq_ignore_ascii_case(own) {
+        // 排除自家其他进程（贴图/录制状态窗）：Windows 的 app_name = 进程 exe 名，
+        // mac = 应用名；与自身可执行文件名比对（大小写不敏感）
+        let own_exe = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        let n = windows.len();
+        let mut out = Vec::new();
+        for (i, w) in windows.iter().enumerate() {
+            let (Ok(width), Ok(height)) = (w.width(), w.height()) else {
+                continue;
+            };
+            if width == 0 || height == 0 || w.is_minimized().unwrap_or(false) {
                 continue;
             }
-        }
-        // 仅在 macOS 缩放换算时会被重新赋值；Windows 无此逻辑，mut 会触发
-        // unused_mut 警告，故按平台条件加 mut（width/height 复用 66 行的绑定）
-        #[cfg(target_os = "macos")]
-        let (mut x, mut y) = (w.x().unwrap_or(0), w.y().unwrap_or(0));
-        #[cfg(not(target_os = "macos"))]
-        let (x, y) = (w.x().unwrap_or(0), w.y().unwrap_or(0));
-        #[cfg(target_os = "macos")]
-        let (mut width, mut height) = (width, height);
-        // macOS：CG 坐标是逻辑点，按窗口中心所在显示器的缩放比换算物理像素，
-        // 与 Screenshot 的坐标系（xcap Monitor 原点 + 物理像素位图）对齐
-        #[cfg(target_os = "macos")]
-        if let Ok(scale) = Monitor::from_point(x + width as i32 / 2, y + height as i32 / 2)
-            .and_then(|m| m.scale_factor())
-        {
-            if scale > 0.0 {
-                x = (x as f32 * scale).round() as i32;
-                y = (y as f32 * scale).round() as i32;
-                width = (width as f32 * scale).round() as u32;
-                height = (height as f32 * scale).round() as u32;
+            if let (Some(own), Ok(app)) = (&own_exe, w.app_name()) {
+                if app.eq_ignore_ascii_case(own) {
+                    continue;
+                }
             }
+            let (x, y) = (w.x().unwrap_or(0), w.y().unwrap_or(0));
+            out.push(WindowInfo {
+                id: w.id().unwrap_or(0) as u64,
+                title: w.title().unwrap_or_default(),
+                x,
+                y,
+                width,
+                height,
+                z_order: (n - i) as u32,
+                is_minimized: false,
+            });
         }
-        out.push(WindowInfo {
-            id: w.id().unwrap_or(0) as u64,
-            title: w.title().unwrap_or_default(),
-            x,
-            y,
-            width,
-            height,
-            z_order: (n - i) as u32,
-            is_minimized: false,
-        });
+        out
     }
-    out
 }
 
+/// 当前最前（活跃）窗口。取不到活跃窗口时退回 Z 序最顶的普通窗口。
 pub fn frontmost_window() -> Option<WindowInfo> {
-    let list = list_windows();
-    if list.is_empty() {
-        return None;
+    #[cfg(target_os = "macos")]
+    {
+        // 枚举已只保留普通层应用窗口：首位即视觉最前者
+        list_windows().into_iter().next()
     }
-    // Win = GetForegroundWindow；mac = 当前活跃 App 的窗口。
-    // 取不到（无前台/活跃窗口）退回列表首个（Z 序最顶）
-    xcap::Window::all()
-        .ok()
-        .and_then(|ws| {
-            ws.iter()
-                .find(|w| w.is_focused().unwrap_or(false))
-                .and_then(|w| w.id().ok())
-        })
-        .and_then(|id| list.iter().find(|i| i.id == id as u64))
-        .cloned()
-        .or_else(|| list.first().cloned())
+    #[cfg(not(target_os = "macos"))]
+    {
+        let list = list_windows();
+        if list.is_empty() {
+            return None;
+        }
+        // Win = GetForegroundWindow（取不到前台/活跃窗口退回列表首个）
+        xcap::Window::all()
+            .ok()
+            .and_then(|ws| {
+                ws.iter()
+                    .find(|w| w.is_focused().unwrap_or(false))
+                    .and_then(|w| w.id().ok())
+            })
+            .and_then(|id| list.iter().find(|i| i.id == id as u64))
+            .cloned()
+            .or_else(|| list.first().cloned())
+    }
+}
+
+/// mac：枚举记录（CG 逻辑点）→ 物理像素 WindowInfo，按窗口中心所在屏的
+/// 缩放比换算，与 `Screenshot` 坐标系对齐（同 list_windows 旧换算约定）。
+#[cfg(target_os = "macos")]
+fn mac_to_window_info(
+    w: mac::RawWindow,
+    z_order: u32,
+    displays: &[mac::DisplayScale],
+) -> WindowInfo {
+    let scale = mac::scale_for_center(displays, w.x + w.w / 2.0, w.y + w.h / 2.0);
+    WindowInfo {
+        id: w.id as u64,
+        title: w.title,
+        x: (w.x * scale).round() as i32,
+        y: (w.y * scale).round() as i32,
+        width: (w.w * scale).round() as u32,
+        height: (w.h * scale).round() as u32,
+        z_order,
+        is_minimized: false,
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
