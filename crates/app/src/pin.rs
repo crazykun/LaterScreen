@@ -928,7 +928,10 @@ impl eframe::App for PinApp {
             (
                 i.consume_key(Modifiers::NONE, Key::Escape),
                 i.consume_key(Modifiers::NONE, Key::Delete),
-                i.consume_key(Modifiers::COMMAND, Key::C),
+                // Ctrl+C 的原始按键被 egui-winit 吞掉转成 Event::Copy（见 ui/mod.rs
+                // handle_keys 同款注释），consume_key 永远匹配不上，改听事件
+                i.consume_key(Modifiers::COMMAND, Key::C)
+                    || i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
                 i.consume_key(Modifiers::COMMAND, Key::S),
                 i.consume_key(Modifiers::NONE, Key::R),
                 i.consume_key(Modifiers::NONE, Key::H),

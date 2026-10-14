@@ -697,7 +697,13 @@ impl SnipApp {
                     i.consume_key(Modifiers::COMMAND, Key::Y),
                     i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z),
                     i.consume_key(Modifiers::COMMAND, Key::S),
-                    i.consume_key(Modifiers::COMMAND, Key::C),
+                    // egui-winit 把 Ctrl+C/X/V 全局转译成 Event::Copy/Cut/Paste 并
+                    // 吞掉原始按键（其 on_keyboard_input 识别后直接 return，Key::C
+                    // 事件根本不进 events），consume_key 永远匹配不上。复制退出改听
+                    // Event::Copy；文本框聚焦时（wants_keyboard）让位给文本复制。
+                    i.consume_key(Modifiers::COMMAND, Key::C)
+                        || (!wants_keyboard
+                            && i.events.iter().any(|e| matches!(e, egui::Event::Copy))),
                     i.consume_key(Modifiers::COMMAND, Key::P),
                     !wants_keyboard
                         && (i.consume_key(Modifiers::NONE, Key::Delete)
