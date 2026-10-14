@@ -200,6 +200,9 @@ pub struct SnipApp {
     /// 最近一帧画布的视图映射（文本编辑器定位用——预览模式下
     /// ctx.content_rect 与画布 rect 不再相等）
     pub last_view: View,
+    /// 上一次单击（释放）的时刻与位置（逻辑点）：自维护双击判定的输入。
+    /// 见 `canvas::poll_double_click`——不复用 egui 内置的 `double_clicked()`。
+    pub last_click: Option<(f64, Pos2)>,
     /// 跨屏覆盖层（Linux X11）：待发的 _NET_WM_FULLSCREEN_MONITORS 剩余帧数。
     /// 大于 0 时每帧向 WM 重发（窗口 map+fullscreen 后才生效，故前几帧重试），
     /// 归零即停。None 或 0 = 不跨屏。
@@ -309,6 +312,7 @@ impl SnipApp {
                 origin: Pos2::ZERO,
                 scale: 1.0,
             },
+            last_click: None,
             span_wid,
             // 前若干帧重发，覆盖 WM map+fullscreen 的延迟窗口
             span_retries: if span_wid.is_some() { 8 } else { 0 },

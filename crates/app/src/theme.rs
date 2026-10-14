@@ -91,6 +91,16 @@ pub fn accent_line(v: &egui::Visuals) -> egui::Color32 {
 /// 品牌红填充上的文字色：两主题都是纯白。
 pub const ACCENT_ON_TEXT: egui::Color32 = egui::Color32::WHITE;
 
+/// **完成/交付**绿（「复制到剪贴板并退出」主按钮的实心底），配 [`SUCCESS_ON_TEXT`]。
+///
+/// 不用调色板里的绿 `#43a047`：它配白字只有 3.30:1，不到 AA 的 4.5:1
+/// （与 [`ACCENT_FILL`] 同因——中间调色承载白字都要压深一档）。这里取
+/// Material Green 800 `#2e7d32`，白字 5.13:1，悬停再压深仍是同一色系。
+pub const SUCCESS_FILL: egui::Color32 = egui::Color32::from_rgb(0x2e, 0x7d, 0x32);
+
+/// 交付绿填充上的文字/图标色：两主题都是纯白（同上，不随主题变化）。
+pub const SUCCESS_ON_TEXT: egui::Color32 = egui::Color32::WHITE;
+
 /// **要放白字**的品牌红填充（按钮/徽章实心底）：比 [`ACCENT`] 深一档。
 /// 品牌红本尊配白字只有 4.2:1，不到正文 AA 门槛；深一档后 5.0:1，仍是
 /// 同一色系（Material Red 700）。装饰性填充（卡片竖条、图标、Toast 描边）
@@ -390,4 +400,25 @@ mod tests {
             "若品牌红配白字已达标，ACCENT_FILL 可简化为 ACCENT（届时同步改注释）"
         );
     }
+
+    #[test]
+    fn success_fill_carries_white_text() {
+        // 交付绿（截图工具栏主复制按钮 + 贴图条「复制并关闭」实心底）承载
+        // 白色对号：调色板绿 #43a047 只有 3.30，曾被硬编码在该按钮上。
+        // 深一档到 #2e7d32 后达标；悬停/禁用态是它的 gamma 倍数，一并锁住
+        let r = contrast(SUCCESS_ON_TEXT, SUCCESS_FILL);
+        assert!(r >= AA, "白字在 SUCCESS_FILL 上仅 {r:.2}（需 ≥ {AA}）");
+        for f in [0.85, 0.92] {
+            let hovered = SUCCESS_FILL.gamma_multiply(f);
+            let r = contrast(SUCCESS_ON_TEXT, hovered);
+            assert!(r >= AA, "白字在 {f} 悬停绿上仅 {r:.2}（需 ≥ {AA}）");
+        }
+        assert!(
+            contrast(SUCCESS_ON_TEXT, PALETTE_GREEN) < AA,
+            "若调色板绿配白字已达标，SUCCESS_FILL 可改用 PALETTE_GREEN"
+        );
+    }
+
+    /// 调色板（标注色）里的标准绿 `#43a047`——只用于标注落地彩，不作按钮实心底。
+    const PALETTE_GREEN: egui::Color32 = egui::Color32::from_rgb(0x43, 0xa0, 0x47);
 }

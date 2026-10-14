@@ -51,6 +51,7 @@ lscreen gui    # 不常驻，直接框选 → 标注 → 复制/保存
 | **元素再编辑** | 已画元素可拖拽、拉控制点，双击改文本 | — |
 | **撤销重做** | 全量快照，图片本体不进栈 | `Ctrl+Z` / `Ctrl+Y` |
 | **输出** | 复制到剪贴板 / 存 PNG | `Ctrl+C` / `Ctrl+S` |
+| **双击交付** | 标注态下双击画布任意处（含选区外暗化区）即复制退出 | 双击左键 |
 | **贴图** | Snipaste 式置顶悬浮，可多窗口并存 | `Ctrl+P` |
 | **取色器** | 放大镜 + 取色历史（最近 8 色） | `Ctrl+R`/`H`/`K` 复制 RGB/HEX/CMYK |
 | **二维码** | 识别屏幕上的码；工具栏也可生成并插入标注层 | — |
@@ -211,7 +212,7 @@ command = ["/usr/local/bin/uploader", "--token", "xxx"]
 ./scripts/package.sh x86_64-unknown-linux-gnu   # 指定目标
 ```
 
-交叉编译需装对应 gcc / g++（openh264 是 C++ 源）；rpm 需 `apt install rpm`；AppImage 需 [appimagetool](https://github.com/AppImage/appimagetool)。全平台出包（含 macOS、Windows MSVC）走 GitHub Actions：`git tag v0.11.4 && git push --tags`。
+交叉编译需装对应 gcc / g++（openh264 是 C++ 源）；rpm 需 `apt install rpm`；AppImage 需 [appimagetool](https://github.com/AppImage/appimagetool)。全平台出包（含 macOS、Windows MSVC）走 GitHub Actions：`git tag v0.11.5 && git push --tags`。
 
 ## 🏗️ 架构
 

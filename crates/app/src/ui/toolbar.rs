@@ -9,7 +9,7 @@ use egui::{Color32, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Vec2
 use lscreen_core::{ElementKind, Rgba, Tool, P2};
 
 use super::{egui_color, SnipApp, View};
-use crate::theme::{ACCENT_FILL, ACCENT_ON_TEXT};
+use crate::theme::{ACCENT_FILL, SUCCESS_FILL, SUCCESS_ON_TEXT};
 
 /// 图标按钮边长（逻辑点）
 const BTN: f32 = 24.0;
@@ -294,29 +294,30 @@ fn close_button(ui: &mut egui::Ui) -> bool {
     response.on_hover_text("退出 (Esc)").clicked()
 }
 
-/// 绘制带文字的主复制按钮；返回是否执行“复制并退出”。
-/// 该按钮固定为 76×32 逻辑点，让完成动作比普通图标更醒目且含义更明确。
+/// 交付/完成动作：绿色实心底 + 白色对号图标——「拿到了，收工」，与其左侧的
+/// 一组灰色线性图标（保存/贴图/OCR…）在权重上一眼分层。
+///
+/// **配色走令牌**（见 [[later-screen-ui-color-tokens]]）：这里的 `SUCCESS_FILL`
+/// 是 #2e7d32（Material Green 800），不是调色板里的绿 #43a047——后者配白字只有
+/// 3.30:1，不到 AA 的 4.5:1（与品牌红同因，中间调色承载白字都要压深一档）。
+/// 达标值由 `theme::success_fill_carries_white_text` 单测锁住。
+///
+/// **为什么没有文字**：v0.11.5 去掉右侧「复制」二字（与全图标工具栏一致，
+/// 语义靠 hover 文案承载）。按钮因此从 76×32 收成 32×32 的正方形图标——
+/// 比普通的 24pt 图标大一圈，补足失去文字后的视觉权重与点击面积。
 fn primary_copy_button(ui: &mut egui::Ui) -> bool {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(76.0, 32.0), Sense::click());
-    // 悬停压深一档而非提亮：ACCENT_FILL 上提亮白字对比度跌破 AA（4.98→4.36），
-    // 压深则升到 5.65（同色系 Material Red 800 方向）。
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::click());
+    // 悬停压深一档而非提亮：绿色不比红色对「提亮->对比度跌破 AA」免疫
+    // （同色系 Material Green 900 方向，白字对比度 5.13 → 5.85）
     let fill = if response.hovered() {
-        ACCENT_FILL.gamma_multiply(0.92)
+        SUCCESS_FILL.gamma_multiply(0.92)
     } else {
-        ACCENT_FILL
+        SUCCESS_FILL
     };
     ui.painter().rect_filled(rect, 5.0, fill);
-    let icon_rect = Rect::from_min_size(rect.min + Vec2::new(9.0, 9.0), Vec2::splat(14.0));
-    draw_check(ui.painter(), icon_rect, ACCENT_ON_TEXT);
-    ui.painter().text(
-        Pos2::new(rect.min.x + 48.0, rect.center().y),
-        egui::Align2::CENTER_CENTER,
-        "复制",
-        egui::FontId::proportional(14.0),
-        ACCENT_ON_TEXT,
-    );
+    draw_check(ui.painter(), rect.shrink(6.0), SUCCESS_ON_TEXT);
     response
-        .on_hover_text("复制到剪贴板并退出 (Ctrl+C / Enter)")
+        .on_hover_text("复制到剪贴板并退出 (双击画布 / Ctrl+C / Enter)")
         .clicked()
 }
 
@@ -661,8 +662,9 @@ pub(crate) fn draw_save(p: &egui::Painter, r: Rect, c: Color32) {
 }
 
 /// 对号图标：颜色跟随调用方（`c`）——贴图条把它画在弹层底色上（普通前景
-/// 色），截图覆盖层的主复制按钮把它画在品牌红实心底上（传 `ACCENT_ON_TEXT`
-/// 白，v0.11.4 修复：绿色对号在红底上只有 1.79:1，红绿色弱也不可辨）。
+/// 色），截图覆盖层的主复制按钮把它画在交付绿实心底上（传 `SUCCESS_ON_TEXT`
+/// 白；v0.11.5 起底是绿不是红，白勾 5.13:1）。此前绿色对号画在品牌红底上只有
+/// 1.79:1（v0.11.4 修复），红绿色弱也不可辨。
 pub(crate) fn draw_check(p: &egui::Painter, r: Rect, c: Color32) {
     let s = Stroke::new(2.0, c);
     let w = r.width();

@@ -35,6 +35,11 @@ const ACCENT: Color32 = Color32::from_rgb(0x21, 0x96, 0xf3);
 const UV_FULL: Rect = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
 /// 命中容差（逻辑点）
 const HIT_TOL_PT: f32 = 4.0;
+/// 双击判定：两次**释放**之间的时间间隔上限（秒）。见 [`poll_double_click`]。
+const DOUBLE_CLICK_SECS: f64 = 0.35;
+/// 双击判定：两次单击落点的距离上限（逻辑点）。手指/触控板微抖仍算双击，
+/// 但「双击两个不同位置」不会误触发。
+const DOUBLE_CLICK_DIST_PT: f32 = 8.0;
 /// 选区角点手柄半径（逻辑点）
 const HANDLE_PT: f32 = 5.0;
 /// 选区角点抓取半径（逻辑点）：比手柄可视尺寸大，框内外一圈都可命中
@@ -519,17 +524,21 @@ fn editing(
         if response.drag_stopped_by(egui::PointerButton::Primary) {
             on_release(app);
         }
+        // 双击判定要**先于**单击处理：第二击若被当成普通单击放图元，
+        // 出来的图元会在复制退出的同时被撤（或留下脏快照）。
+        // 见 `poll_double_click`——不用 egui 内置的 `response.double_clicked()`。
+        let double = poll_double_click(app, ui, response);
         // 原地单击：egui 的 drag_started 需要越过拖动阈值（约 6px），静止点击不会触发。
         // 点击型工具（文本/标号）和 Select 的点选必须单独走一遍 press/release。
         // 双击的第二击让给 on_double_click（复制/编辑文本），避免先误放一个图元。
-        let swallow_second_click = response.double_clicked() && !is_click_tool(app.tool);
+        let swallow_second_click = double && !is_click_tool(app.tool);
         if response.clicked() && !swallow_second_click {
             if let Some(pos) = response.interact_pointer_pos() {
                 on_press(app, view, view.to_px(pos), pos, shift);
                 on_release(app);
             }
         }
-        if response.double_clicked() {
+        if double {
             on_double_click(app, ui.ctx(), pointer_px);
         }
 
@@ -905,9 +914,36 @@ fn on_release(app: &mut SnipApp) {
     }
 }
 
+/// 判定本帧是否为「双击」，并顺带维护上一次单击的时间戳与位置。
+///
+/// **为什么不复用 egui 的 `Response::double_clicked()`**：它的判定挂在
+/// `InputState` 的 `last_click_time` 上，而那个时间戳只在「释放被判为 click」时更新——
+/// click 本身又受 `max_click_duration`（按下超过 0.8s 就不算 click）与
+/// `max_click_dist`（按下期间移动超过 6px）夹逼——任一条件不满足，第二击就
+/// 拿不到 `double_clicked` 事件（用户主诉「Deepin 上双击不管用」）。
+///
+/// 这里自己记：每次「本 widget 释放」就打一次时间戳，双击 = 距上次单击
+/// < [`DOUBLE_CLICK_SECS`] 且落点距离 < [`DOUBLE_CLICK_DIST_PT`]。只看两次
+/// **释放**之间的关系，与按下时长、按下期间的抖动都无关。
+///
+/// 副作用：写入 `app.last_click`（下一次判定的输入）。
+fn poll_double_click(app: &mut SnipApp, ui: &egui::Ui, response: &Response) -> bool {
+    let Some(pos) = response.interact_pointer_pos() else {
+        return false;
+    };
+    if !response.clicked_by(egui::PointerButton::Primary) {
+        return false;
+    }
+    let time = ui.input(|i| i.time);
+    let prev = app.last_click.replace((time, pos));
+    let Some((last_time, last_pos)) = prev else {
+        return false;
+    };
+    time - last_time < DOUBLE_CLICK_SECS && last_pos.distance(pos) <= DOUBLE_CLICK_DIST_PT
+}
+
 /// 双击在画布上的最终业务动作。
-/// 选择工具双击空白（选区内/外皆可）= 复制退出；命中图元、非选择工具、
-/// 文本编辑中等情形由 on_double_click 的前置分支先行处理。
+/// 选择工具 + 没有已选图元 + 没命中图元时即为复制退出；**选区内外都算**。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DoubleClickAction {
     None,
@@ -915,9 +951,13 @@ enum DoubleClickAction {
 }
 
 /// 根据双击上下文决定是否复制退出。
-/// 输入来自当前工具与指针命中结果，返回值供画布事件处理使用。
-fn double_click_action(tool: Tool, hit_element: bool) -> DoubleClickAction {
-    if tool == Tool::Select && !hit_element {
+/// 输入来自当前工具、选中态与指针命中结果，返回值供画布事件处理使用。
+///
+/// **不要求双击落在选区内**（v0.11.5，用户主诉「双击外面空白区域不行」）：
+/// 选区外的暗化区同样属于画布，双击它就该交付——尤其框选窗口时选区紧贴
+/// 内容、边界外只有几十像素可点。
+fn double_click_action(tool: Tool, has_selected: bool, hit_element: bool) -> DoubleClickAction {
+    if tool == Tool::Select && !has_selected && !hit_element {
         DoubleClickAction::Copy
     } else {
         DoubleClickAction::None
@@ -956,7 +996,9 @@ fn on_double_click(app: &mut SnipApp, ctx: &egui::Context, pointer_px: Option<P2
         }
         return;
     }
-    if double_click_action(app.tool, hit.is_some()) == DoubleClickAction::Copy {
+    if double_click_action(app.tool, app.selected.is_some(), hit.is_some())
+        == DoubleClickAction::Copy
+    {
         app.copy_and_exit(ctx);
     }
 }
@@ -1312,24 +1354,50 @@ pub fn show_text_editor(app: &mut SnipApp, ctx: &egui::Context) {
 
 #[cfg(test)]
 mod tests {
-    use super::{double_click_action, DoubleClickAction};
+    use super::{double_click_action, DoubleClickAction, DOUBLE_CLICK_DIST_PT, DOUBLE_CLICK_SECS};
     use lscreen_core::Tool;
 
-    /// 选择工具在空白处双击（选区内/外皆可）即复制退出；命中图元或
-    /// 非选择工具不触发。
+    /// 选择工具 + 无选中 + 未命中图元 = 复制退出；选区**内外**都算（v0.11.5：
+    /// 用户主诉「双击选区外没反应」，而选区边界外的暗化区同样属于画布，
+    /// 靠边界瞄准没必要）。其他工具或有选中/命中图元时让位给各自的语义。
     #[test]
-    fn double_click_copy_requires_select_tool_and_blank_hit() {
+    fn double_click_copy_requires_select_tool_no_selection_and_blank_hit() {
+        // 删除的第四个参数就是 inside_region：以前只有传 true 才 Copy，
+        // 现在同一组条件无条件 Copy（选区外的暗化区也算画布）
         assert_eq!(
-            double_click_action(Tool::Select, false),
+            double_click_action(Tool::Select, false, false),
             DoubleClickAction::Copy
         );
         assert_eq!(
-            double_click_action(Tool::Select, true),
+            double_click_action(Tool::Rect, false, false),
             DoubleClickAction::None
         );
         assert_eq!(
-            double_click_action(Tool::Rect, false),
+            double_click_action(Tool::Select, true, false),
             DoubleClickAction::None
         );
+        assert_eq!(
+            double_click_action(Tool::Select, false, true),
+            DoubleClickAction::None
+        );
+    }
+
+    /// 自维护双击判定的阈值：两次释放间隔 0.35s 内 / 落点 8pt 内才算同一处双击。
+    /// 锁住常量（两者都是 const，用 const block 断言避免编译期常量告警）——
+    /// 它们是从 egui 内置 `double_clicked` 迁移过来的替代方案，放宽到 0.5s
+    /// 会把「两次普通单击」也吃成双击。
+    #[test]
+    fn double_click_thresholds_are_human_paced() {
+        const {
+            assert!(
+                DOUBLE_CLICK_SECS <= 0.4,
+                "双击窗口太宽：两次独立单击会被误判成双击"
+            );
+            assert!(DOUBLE_CLICK_SECS >= 0.25, "双击窗口太窄：慢节奏双击会漏");
+            assert!(
+                DOUBLE_CLICK_DIST_PT >= 6.0 && DOUBLE_CLICK_DIST_PT <= 16.0,
+                "位移容差超出手抖范围"
+            );
+        }
     }
 }
