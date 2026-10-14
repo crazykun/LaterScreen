@@ -408,7 +408,9 @@ mod tests {
         // 深一档到 #2e7d32 后达标；悬停/禁用态是它的 gamma 倍数，一并锁住
         let r = contrast(SUCCESS_ON_TEXT, SUCCESS_FILL);
         assert!(r >= AA, "白字在 SUCCESS_FILL 上仅 {r:.2}（需 ≥ {AA}）");
-        for f in [0.85, 0.92] {
+        // 悬停压深倍数：0.8 是工具栏主按钮现用值，0.85/0.92 是安全区间上界
+        // （倍数越小压越深、白字对比度越高，锁住最浅的 0.92 即锁全部）
+        for f in [0.8, 0.85, 0.92] {
             let hovered = SUCCESS_FILL.gamma_multiply(f);
             let r = contrast(SUCCESS_ON_TEXT, hovered);
             assert!(r >= AA, "白字在 {f} 悬停绿上仅 {r:.2}（需 ≥ {AA}）");

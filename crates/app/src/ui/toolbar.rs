@@ -195,12 +195,6 @@ fn editing_controls(app: &mut SnipApp, ui: &mut egui::Ui) {
 /// 绘制全部交付与退出动作（全图标，任何窗口宽度都直接展示）。
 /// 保存、上传、贴图和识别会触发各自业务流程；生成二维码弹出输入浮层。
 fn delivery_actions(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
-    if close_button(ui) {
-        // 关闭只发出窗口退出请求，不保存、不复制，避免与右侧主操作混淆。
-        app.request_close(ctx);
-    }
-    ui.separator();
-
     if action_button(ui, true, "保存为 PNG (Ctrl+S)", draw_save) {
         app.save_and_exit(ctx);
     }
@@ -227,8 +221,14 @@ fn delivery_actions(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     }
     qr_generate_button(app, ui, ctx);
 
+    // 右端收尾一对「退出」语义：关闭 = 不交付直接退出（悬停品牌红提示），
+    // 紧贴绿色复制按钮——「要走」的两个出口挨在一起，与前面的交付动作分组
     ui.add_space(6.0);
 
+    if close_button(ui) {
+        // 关闭只发出窗口退出请求，不保存、不复制，避免与主操作混淆。
+        app.request_close(ctx);
+    }
     if primary_copy_button(ui) {
         // 主操作会合成当前选区、写入剪贴板并关闭截图窗口。
         app.copy_and_exit(ctx);
@@ -278,9 +278,10 @@ fn qr_generate_button(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context)
 }
 
 /// 绘制独立的关闭按钮；返回是否请求退出，不直接修改截图会话。
-/// 悬停使用品牌强调色提示这是退出动作，并与复制按钮保持分隔。
+/// 悬停使用品牌强调色提示这是退出动作；紧贴复制按钮组成最右的出口对，
+/// 尺寸与其余图标一致（v0.11.5 曾是 32×32，用户反馈统一为 BTN）。
 fn close_button(ui: &mut egui::Ui) -> bool {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(BTN), Sense::click());
     if response.hovered() {
         ui.painter()
             .rect_filled(rect, 4.0, ACCENT_FILL.gamma_multiply(0.18));
@@ -290,7 +291,7 @@ fn close_button(ui: &mut egui::Ui) -> bool {
     } else {
         ui.style().interact(&response).fg_stroke.color
     };
-    draw_close(ui.painter(), rect.shrink(9.0), color);
+    draw_close(ui.painter(), rect.shrink(6.0), color);
     response.on_hover_text("退出 (Esc)").clicked()
 }
 
@@ -303,18 +304,21 @@ fn close_button(ui: &mut egui::Ui) -> bool {
 /// 达标值由 `theme::success_fill_carries_white_text` 单测锁住。
 ///
 /// **为什么没有文字**：v0.11.5 去掉右侧「复制」二字（与全图标工具栏一致，
-/// 语义靠 hover 文案承载）。按钮因此从 76×32 收成 32×32 的正方形图标——
-/// 比普通的 24pt 图标大一圈，补足失去文字后的视觉权重与点击面积。
+/// 语义靠 hover 文案承载）。尺寸与其余图标统一为 BTN：v0.11.5 曾放大到
+/// 32×32 补足失去文字的视觉权重，用户反馈反而突兀——绿色实心底本身就是
+/// 最强的视觉锚点，不再需要额外放大小怪。
 fn primary_copy_button(ui: &mut egui::Ui) -> bool {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(BTN), Sense::click());
     // 悬停压深一档而非提亮：绿色不比红色对「提亮->对比度跌破 AA」免疫
-    // （同色系 Material Green 900 方向，白字对比度 5.13 → 5.85）
+    // （同色系 Material Green 900 方向，白字对比度 5.13 → 7.17）。压深幅度
+    // 取 0.8：v0.11.5 的 0.92 只暗 8%，实心块小到 hover 无感（用户反馈），
+    // 20% 的明度差才与关闭按钮的红色悬停一个量级
     let fill = if response.hovered() {
-        SUCCESS_FILL.gamma_multiply(0.92)
+        SUCCESS_FILL.gamma_multiply(0.8)
     } else {
         SUCCESS_FILL
     };
-    ui.painter().rect_filled(rect, 5.0, fill);
+    ui.painter().rect_filled(rect, 4.0, fill);
     draw_check(ui.painter(), rect.shrink(6.0), SUCCESS_ON_TEXT);
     response
         .on_hover_text("复制到剪贴板并退出 (双击画布 / Ctrl+C / Enter)")
