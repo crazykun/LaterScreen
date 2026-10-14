@@ -1127,28 +1127,22 @@ fn draw_topmost(p: &egui::Painter, r: Rect, c: Color32) {
     p.line_segment([tip, Pos2::new(cx + w * 0.28, r.min.y + w * 0.52)], s);
 }
 
-/// 穿透图标：圆盾 + 一支斜射的箭穿盾而过（射中即穿透——点击落到
-/// 下层）。箭是视觉主角（大箭头 + 尾羽开叉），与单纯斜杠的「禁止」符
-/// 号拉开距离；盾心坐在箭杆上偏尾侧。激活态由 icon_button 高亮。
+/// 穿透图标：同心圆靶 + 一根从左下刺入圆心的针（2026-10 用户手绘稿
+/// 直接矢量化）。针穿过外/中/内三环止于靶心 = 点击落到贴图下层的
+/// 窗口；素线无箭头（手稿如此），三环本身已足以读成「命中靶心」而
+/// 非禁止斜杠。激活态由 icon_button 高亮。
 fn draw_through(p: &egui::Painter, r: Rect, c: Color32) {
     let s = Stroke::new(ICON_W, c);
     let w = r.width();
     let at = |fx: f32, fy: f32| Pos2::new(r.min.x + w * fx, r.min.y + w * fy);
-    // 箭杆：左下 → 右上，约 40°（避开 45°——那是禁止符号的角度）
-    let (tail, tip) = (at(0.05, 0.85), at(0.95, 0.10));
-    p.line_segment([tail, tip], s);
-    let v = tip - tail;
-    let (dir, nrm) = (v.normalized(), Vec2::new(-v.y, v.x).normalized());
-    // 箭头：从尖端沿杆后折、向两侧张开（尺寸要压得住盾）
-    for sgn in [1.0, -1.0] {
-        p.line_segment([tip, tip + (dir * -0.22 + nrm * 0.10 * sgn) * w], s);
+    // 圆心偏右上，给左下针尾留出画外起笔的空间（比例照手绘稿）
+    let center = at(0.57, 0.46);
+    // 三环靶：外/中/内半径比 ≈ 1 : 0.56 : 0.29，照手绘稿量得
+    for rad in [0.41, 0.23, 0.12] {
+        p.circle_stroke(center, w * rad, s);
     }
-    // 尾羽开叉：尾部两根短线沿杆向前、向两侧张开
-    for sgn in [1.0, -1.0] {
-        p.line_segment([tail, tail + (dir * 0.16 + nrm * 0.10 * sgn) * w], s);
-    }
-    // 圆盾：盾心在杆上偏尾侧，半径留足箭头/尾羽与盾缘的间隙
-    p.circle_stroke(tail + v * 0.46, w * 0.23, s);
+    // 针：左下角起笔，穿三环止于圆心
+    p.line_segment([at(0.02, 0.98), center], s);
 }
 
 /// 旋转图标：小方块画面 + 一道掠过右上角的贝塞尔弧，末端箭头指向
