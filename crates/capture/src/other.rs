@@ -254,7 +254,9 @@ mod mac {
         ) -> u8;
         fn CGGetActiveDisplayList(max_displays: u32, displays: *mut u32, count: *mut u32) -> i32;
         fn CGDisplayBounds(display: u32) -> CGRect;
-        fn CGDisplayPixelsWide(display: u32) -> usize;
+        fn CGDisplayCopyDisplayMode(display: u32) -> *mut core::ffi::c_void;
+        fn CGDisplayModeGetPixelWidth(mode: *const core::ffi::c_void) -> usize;
+        fn CGDisplayModeRelease(mode: *const core::ffi::c_void);
     }
 
     /// CGRectMakeWithDictionaryRepresentation / CGDisplayBounds 的返回布局
@@ -332,16 +334,43 @@ mod mac {
         pub h: f64,
     }
 
+    /// 本程序窗口在 CGWindowList 里可能出现的 owner 名集合：
+    /// - CLI 直跑：owner = 可执行文件名（lscreen）
+    /// - 打包 .app：kCGWindowOwnerName 取的是**应用名**（LaterScreen.app →
+    ///   LaterScreen），与可执行文件名（lscreen）不同——只认后者时设置面板/
+    ///   历史面板等自家普通层窗口会漏进吸附列表，甚至顶成「最前窗口」预选
+    pub fn own_owner_names() -> Vec<String> {
+        let mut names = Vec::new();
+        let Ok(exe) = std::env::current_exe() else {
+            return names;
+        };
+        if let Some(stem) = exe.file_stem() {
+            names.push(stem.to_string_lossy().into_owned());
+        }
+        // 自底向上找最近的 .app 祖先目录，取 bundle 名
+        let mut p = exe.as_path();
+        while let Some(parent) = p.parent() {
+            p = parent;
+            if let Some(stem) = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(".app"))
+            {
+                names.push(stem.to_owned());
+                break;
+            }
+        }
+        names
+    }
+
     /// 单次枚举屏幕上的**普通层（layer 0）**窗口（Z 序自顶向下）。过滤：
     /// 非零层辅助窗（菜单栏/状态项/Dock——Dock 底窗是整屏大窗、排在应用
     /// 窗口之上，不滤会把悬停命中与「最前窗口」全吞成全屏）、共享态关闭
     /// （= 抓不到内容）、StatusIndicator、零尺寸；本程序自己的窗口（贴图/
-    /// 状态窗）按进程名排除。kCGWindowName 缺失（无「屏幕录制」授权）时
-    /// 标题留空、窗口保留。
+    /// 状态窗）按 owner 名排除（两种名字都认，见 [`own_owner_names`]）。
+    /// kCGWindowName 缺失（无「屏幕录制」授权）时标题留空、窗口保留。
     pub fn window_list_raw() -> Vec<RawWindow> {
-        let own = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        let own_names = own_owner_names();
         let (k_bounds, k_name, k_owner, k_number, k_layer, k_sharing) = (
             cf_str("kCGWindowBounds"),
             cf_str("kCGWindowName"),
@@ -382,10 +411,9 @@ mod mac {
                     if r.size.w <= 0.0 || r.size.h <= 0.0 {
                         continue;
                     }
-                    if let (Some(own), true) = (&own, !owner.is_empty()) {
-                        if owner.eq_ignore_ascii_case(own) {
-                            continue;
-                        }
+                    if !owner.is_empty() && own_names.iter().any(|n| owner.eq_ignore_ascii_case(n))
+                    {
+                        continue;
                     }
                     out.push(RawWindow {
                         id: id as u32,
@@ -427,12 +455,29 @@ mod mac {
                     if bounds.size.w <= 0.0 || bounds.size.h <= 0.0 {
                         continue;
                     }
+                    // 缩放比必须与截屏位图同口径：取「当前显示模式像素宽 / 逻辑宽」
+                    // （同 xcap Monitor::scale_factor）。不能用 CGDisplayPixelsWide——
+                    // GPU 缩放模式下它返回的是逻辑宽而非面板/模式物理宽（真机
+                    // 实测 1440 vs 2880），算出 scale=1 会让窗口矩形留在逻辑坐标，
+                    // 初始预选/吸附只有物理位图的 1/2 边长、贴在左上角。
+                    let mode = CGDisplayCopyDisplayMode(d);
+                    let px = if mode.is_null() {
+                        0
+                    } else {
+                        let px = CGDisplayModeGetPixelWidth(mode);
+                        CGDisplayModeRelease(mode);
+                        px
+                    };
                     out.push(DisplayScale {
                         x: bounds.origin.x,
                         y: bounds.origin.y,
                         w: bounds.size.w,
                         h: bounds.size.h,
-                        scale: CGDisplayPixelsWide(d) as f64 / bounds.size.w,
+                        scale: if px > 0 {
+                            px as f64 / bounds.size.w
+                        } else {
+                            1.0
+                        },
                     });
                 }
             }
