@@ -13,8 +13,11 @@ use crate::theme::{ACCENT_FILL, SUCCESS_FILL, SUCCESS_ON_TEXT};
 
 /// 图标按钮边长（逻辑点）
 const BTN: f32 = 24.0;
-/// 宽屏工具栏的目标宽度，用于位置夹取；实际宽度仍受窗口可用宽度限制。
-const BAR_W: f32 = 900.0;
+/// 宽屏工具栏的目标宽度，用于位置夹取与单/双行布局判定；实际宽度仍受窗口
+/// 可用宽度限制。24px 图标 + 2px 间距下单行实际需求约 610pt（预览模式，无
+/// 尺寸编辑）/ 740pt（覆盖层模式带尺寸编辑），900 是 32px 按钮时代的旧值，
+/// 会让 900pt 级的预览窗差几个点就折行（用户反馈「工具栏换行了」）
+const BAR_W: f32 = 760.0;
 
 /// 根据窗口可用宽度决定工具栏布局行数：
 /// 宽屏（≥ [`BAR_W`]）单行放下全部控件；窄屏分两行——第一行编辑控件
@@ -61,7 +64,9 @@ pub fn show(app: &mut SnipApp, ctx: &egui::Context) {
     let region_pt = view.rect_pt(app.region);
 
     // 窄屏分两行，行数还会随折行增加；提前为工具栏预留高度，避免贴屏底被裁。
-    let bar_height = if single_row(available_width) {
+    // Record（录屏/滚动截图框选）的调整阶段恒为单行精简条，与宽屏同高
+    let record_adjust = app.mode == super::Mode::Record;
+    let bar_height = if record_adjust || single_row(available_width) {
         40.0
     } else if available_width < 320.0 {
         136.0
@@ -97,10 +102,59 @@ pub fn show(app: &mut SnipApp, ctx: &egui::Context) {
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_max_width(bar_width);
-                bar_contents(app, ui, ctx);
+                if record_adjust {
+                    record_bar_contents(app, ui, ctx);
+                } else {
+                    ui.set_max_width(bar_width);
+                    bar_contents(app, ui, ctx);
+                }
             });
         });
+}
+
+/// Record（录屏/滚动截图框选）调整阶段的精简条：操作提示 + 取消/确认。
+/// 与完整标注工具栏分流——此阶段只做选区几何调整（拖内部移动、拖角/边
+/// 改大小），标注动作全部不适用。
+fn record_bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.label(
+            egui::RichText::new("拖动移动 · 拖角/边调整 · Enter 确认 · Esc 取消")
+                .size(12.0)
+                .color(ui.visuals().weak_text_color()),
+        );
+        ui.separator();
+        // 取消：与关闭按钮同款悬停品牌红；不写共享通道直接关窗 = 取消
+        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(BTN), Sense::click());
+        if resp.hovered() {
+            ui.painter()
+                .rect_filled(rect, 4.0, ACCENT_FILL.gamma_multiply(0.18));
+        }
+        let color = if resp.hovered() {
+            ACCENT_FILL
+        } else {
+            ui.style().interact(&resp).fg_stroke.color
+        };
+        draw_close(ui.painter(), rect.shrink(6.0), color);
+        if resp.on_hover_text("取消选区 (Esc)").clicked() {
+            app.request_close(ctx);
+        }
+        // 确认：绿实心对号（复制按钮同款视觉锚点），交付选区给录屏/拼接进程
+        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(BTN), Sense::click());
+        let fill = if resp.hovered() {
+            SUCCESS_FILL.gamma_multiply(0.8)
+        } else {
+            SUCCESS_FILL
+        };
+        ui.painter().rect_filled(rect, 4.0, fill);
+        draw_check(ui.painter(), rect.shrink(6.0), SUCCESS_ON_TEXT);
+        if resp
+            .on_hover_text("确认选区，开始录制/滚动 (Enter)")
+            .clicked()
+        {
+            app.deliver_region(ctx);
+        }
+    });
 }
 
 /// 排列编辑控件与交付动作。宽屏单行；窄屏两行——编辑控件自然折行，

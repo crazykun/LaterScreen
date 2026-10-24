@@ -12,7 +12,7 @@ use lscreen_core::render::mosaic_cells;
 use lscreen_core::{Element, ElementKind, RectF, Tool, P2};
 
 use super::{
-    egui_color, DragOp, ImageTextureCache, MosaicCache, SnipApp, Stage, TextEditState, View,
+    egui_color, DragOp, ImageTextureCache, Mode, MosaicCache, SnipApp, Stage, TextEditState, View,
 };
 
 /// 马赛克色块缓存的几何指纹：点数 + 全部坐标 + 笔刷/格子尺寸。
@@ -978,6 +978,12 @@ fn on_double_click(app: &mut SnipApp, ctx: &egui::Context, pointer_px: Option<P2
     }
 
     // 直接按双击坐标重新命中，避免使用上一帧 hover 导致“点图元却复制退出”。
+    // Record 调整阶段（录屏/滚动截图框选）：双击 = 确认交付选区，与 Snip
+    // 的「双击画布复制退出」同款手势习惯
+    if app.mode == Mode::Record {
+        app.deliver_region(ctx);
+        return;
+    }
     let hit = app.doc.hit_top(p, HIT_TOL_PT * app.last_view.scale);
     if let Some(id) = hit {
         // 选择工具双击文本仍进入编辑；双击其他图元只保留选中态，不执行复制。

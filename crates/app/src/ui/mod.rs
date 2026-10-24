@@ -400,18 +400,32 @@ impl SnipApp {
         self.region.max.y = self.region.min.y + h;
     }
 
-    /// 选区确认：Snip 进标注阶段；Record 交付区域并关窗。
-    pub fn confirm_region(&mut self, ctx: &egui::Context) {
+    /// 选区确认：两模式都进标注/调整阶段。Snip 在此标注后经保存/复制交付；
+    /// Record（录屏/滚动截图框选）进入**可调整阶段**——拖内部移动选区、
+    /// 拖角/边改大小，确认后才交付（此前画完即交付关窗，框画错只能 Esc
+    /// 重画，用户反馈「截图框不能移动」）
+    pub fn confirm_region(&mut self, _ctx: &egui::Context) {
         self.sel_window = None;
         if self.mode == Mode::Record {
-            if let Some(shared) = &self.record_region {
-                *shared.lock().unwrap() = Some(self.region);
-            }
-            self.remember_selection();
-            self.request_close(ctx);
-        } else {
-            self.stage = Stage::Editing;
+            // 调整阶段只做选区几何操作：强制选择工具，杜绝带着配置默认的
+            // 画图工具进来把标注图元画进截图底图
+            self.tool = Tool::Select;
         }
+        self.stage = Stage::Editing;
+    }
+
+    /// Record 模式交付选区：写共享通道（录屏/滚动截图进程取走）+ 记忆
+    /// 「上次选区」+ 关窗。由精简工具栏的确认按钮 / Enter / 双击触发；
+    /// Esc / 取消按钮不写通道直接关窗 = 取消。
+    pub fn deliver_region(&mut self, ctx: &egui::Context) {
+        if self.mode != Mode::Record {
+            return;
+        }
+        if let Some(shared) = &self.record_region {
+            *shared.lock().unwrap() = Some(self.region);
+        }
+        self.remember_selection();
+        self.request_close(ctx);
     }
 
     /// 记忆本次交付选区（M13）：绝对物理像素写入 `<cache>/screen.sel`，
@@ -735,19 +749,27 @@ impl SnipApp {
             self.doc.redo();
         }
         if matches!(self.stage, Stage::Editing) {
-            if save {
-                self.save_and_exit(ctx);
-            }
-            if pin {
-                self.pin_and_exit(ctx);
-            }
-            if copy || enter {
-                self.copy_and_exit(ctx);
-            }
-            if del {
-                if let Some(id) = self.selected.take() {
-                    self.doc.begin_change();
-                    self.doc.remove(id);
+            if self.mode == Mode::Record {
+                // 录屏/滚动截图的选区调整阶段：Enter/复制语义 = 确认交付，
+                // 保存/贴图/撤销等标注动作全部不适用（精简工具栏也不展示）
+                if copy || enter {
+                    self.deliver_region(ctx);
+                }
+            } else {
+                if save {
+                    self.save_and_exit(ctx);
+                }
+                if pin {
+                    self.pin_and_exit(ctx);
+                }
+                if copy || enter {
+                    self.copy_and_exit(ctx);
+                }
+                if del {
+                    if let Some(id) = self.selected.take() {
+                        self.doc.begin_change();
+                        self.doc.remove(id);
+                    }
                 }
             }
         } else if matches!(self.stage, Stage::Selecting) && (enter || copy) {
@@ -1042,7 +1064,9 @@ impl eframe::App for SnipApp {
             canvas::show(self, ui, &texture);
         }
 
-        if self.mode == Mode::Snip && matches!(self.stage, Stage::Editing) {
+        if matches!(self.stage, Stage::Editing) {
+            // Snip：完整标注工具栏；Record（录屏/滚动截图框选）：调整阶段的
+            // 精简条（提示 + 确认/取消），见 toolbar::show 的模式分流
             toolbar::show(self, &ctx);
         }
         canvas::show_text_editor(self, &ctx);
