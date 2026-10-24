@@ -721,6 +721,9 @@ fn base_tooltip() -> String {
 /// NSImage——系统自解 PNG，无需经 image crate 解码。
 pub(crate) const ICON_PNG: &[u8] = include_bytes!("../../../packaging/icon.png");
 
+/// 彩色位图图标：Linux 的 `_NET_WM_ICON` 窗口图标与 Win 托盘在用。
+/// mac 构建托盘改用单色模板图（template_rgba），此函数在 mac 下无调用方。
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn icon_rgba(size: u32) -> Option<image::RgbaImage> {
     let src = image::load_from_memory(ICON_PNG).ok()?.into_rgba8();
     if src.width() == size {
@@ -732,6 +735,108 @@ fn icon_rgba(size: u32) -> Option<image::RgbaImage> {
         size,
         image::imageops::FilterType::Lanczos3,
     ))
+}
+
+/// mac 菜单栏模板图（template image）：tiny-skia 直绘的单色字形——虚线选框
+/// 加铅笔，即品牌图标的剪影化。不直接从彩色品牌图抠 alpha：图标底的亮色
+/// 描边与字形同亮度，任何阈值都切不干净。模板图只读 alpha 通道，颜色由
+/// 系统按菜单栏深浅自动渲染（浅色黑/深色白），与一排原生单色图标观感一致。
+/// 按目标尺寸直绘而非缩放大图，18pt 下笔画依然清晰。
+#[cfg(target_os = "macos")]
+fn template_rgba(size: u32) -> Option<image::RgbaImage> {
+    use tiny_skia::{FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform};
+
+    /// 四分之一圆弧的三次贝塞尔控制系数（κ = 4/3·tan(π/8)）
+    const K: f32 = 0.5523;
+    /// 线宽、选框中心线、角半径、四边中段虚线长（均为画布边长比例）
+    const W: f32 = 0.085;
+    const PAD: f32 = 0.105;
+    const RADIUS: f32 = 0.14;
+    const DASH: f32 = 0.30;
+
+    let s = size as f32;
+    let mut px = Pixmap::new(size, size)?;
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Paint::default()
+    };
+    paint.set_color_rgba8(0, 0, 0, 255);
+
+    // 选框：中心线方框（PAD..1-PAD），四个圆角四分弧 + 四边中段各一段虚线，
+    // 圆头端帽——与品牌图标一致的「虚线选区」母题
+    let (x0, y0, x1, y1) = (PAD * s, PAD * s, (1.0 - PAD) * s, (1.0 - PAD) * s);
+    let r = RADIUS * s;
+    let mut frame = PathBuilder::new();
+    // 角弧走 y 向下坐标系：point(a) = 圆心 + r·(cos a, sin a)
+    let arc = |b: &mut PathBuilder, cx: f32, cy: f32, a0: f32, a1: f32| {
+        let (ax, ay) = (cx + r * a0.cos(), cy + r * a0.sin());
+        let (bx, by) = (cx + r * a1.cos(), cy + r * a1.sin());
+        // 端点切向 = (−sin a, cos a)
+        let (c1x, c1y) = (ax - K * r * a0.sin(), ay + K * r * a0.cos());
+        let (c2x, c2y) = (bx + K * r * a1.sin(), by - K * r * a1.cos());
+        b.move_to(ax, ay);
+        b.cubic_to(c1x, c1y, c2x, c2y, bx, by);
+    };
+    let (pi, hp) = (std::f32::consts::PI, std::f32::consts::FRAC_PI_2);
+    arc(&mut frame, x0 + r, y0 + r, pi, 1.5 * pi); // 左上：西→北
+    arc(&mut frame, x1 - r, y0 + r, 1.5 * pi, 2.0 * pi); // 右上：北→东
+    arc(&mut frame, x1 - r, y1 - r, 0.0, hp); // 右下：东→南
+    arc(&mut frame, x0 + r, y1 - r, hp, pi); // 左下：南→西
+    let (mx, my) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+    let half = DASH * s / 2.0;
+    frame.move_to(mx - half, y0);
+    frame.line_to(mx + half, y0);
+    frame.move_to(mx - half, y1);
+    frame.line_to(mx + half, y1);
+    frame.move_to(x0, my - half);
+    frame.line_to(x0, my + half);
+    frame.move_to(x1, my - half);
+    frame.line_to(x1, my + half);
+    let stroke = Stroke {
+        width: W * s,
+        line_cap: LineCap::Round,
+        line_join: LineJoin::Round,
+        ..Stroke::default()
+    };
+    let frame = frame.finish()?;
+    px.stroke_path(&frame, &paint, &stroke, Transform::identity(), None);
+
+    // 铅笔：笔尖朝左下的斜置五边形（笔尖三角 + 笔身矩形一体），居选框中央
+    let mut pencil = PathBuilder::new();
+    pencil.move_to(0.325 * s, 0.755 * s); // 笔尖
+    pencil.line_to(0.454 * s, 0.722 * s); // 笔尖底右
+    pencil.line_to(0.712 * s, 0.464 * s); // 笔尾右
+    pencil.line_to(0.616 * s, 0.368 * s); // 笔尾左
+    pencil.line_to(0.358 * s, 0.626 * s); // 笔尖底左
+    pencil.close();
+    let pencil = pencil.finish()?;
+    px.fill_path(
+        &pencil,
+        &paint,
+        FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
+
+    // tiny-skia 画布是预乘 alpha；纯黑前景预乘后 RGB 恒为 0，直通即正确
+    Some(image::RgbaImage::from_fn(size, size, |x, y| {
+        let a = px.pixel(x, y).map_or(0, |p| p.alpha());
+        image::Rgba([0, 0, 0, a])
+    }))
+}
+
+/// 托盘图标：mac 用 36px（菜单栏 18pt 的 2x）单色模板图；Win 维持彩色图标。
+/// 解码失败不致命：内嵌资源是构建期不变量，这里只是防御——无图标的托盘
+/// 仍可点击出菜单，不值得为它崩掉常驻进程。
+fn make_tray_icon() -> Option<tray_icon::Icon> {
+    #[cfg(target_os = "macos")]
+    {
+        template_rgba(36).and_then(|img| tray_icon::Icon::from_rgba(img.into_raw(), 36, 36).ok())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        icon_rgba(32).and_then(|img| tray_icon::Icon::from_rgba(img.into_raw(), 32, 32).ok())
+    }
 }
 
 /// 窗口级图标（`_NET_WM_ICON` 用），与托盘共用同一内嵌 PNG。
@@ -978,16 +1083,17 @@ mod native_impl {
                 let _ = menu.append(&item);
                 items.insert(id, item);
             }
-            // 图标解码失败不致命：内嵌资源是构建期不变量，这里只是防御——
-            // 无图标的托盘仍可点击出菜单，不值得为它崩掉常驻进程
-            let icon = icon_rgba(32)
-                .and_then(|img| tray_icon::Icon::from_rgba(img.into_raw(), 32, 32).ok());
+            let icon = make_tray_icon();
             let mut builder = TrayIconBuilder::new()
                 .with_menu(Box::new(menu))
                 .with_tooltip(base_tooltip());
             if let Some(icon) = icon {
                 builder = builder.with_icon(icon);
             }
+            // mac：模板图标记——系统按菜单栏深浅模式给单色字形自动上色
+            // （浅色黑/深色白），源图颜色通道不参与显示
+            #[cfg(target_os = "macos")]
+            let builder = builder.with_icon_as_template(true);
             // 三平台统一：**左键与右键单击都只弹菜单**，不再把左键派发成
             // 快速截图（v0.11.1 及之前 Windows 独有的设计，用户主诉「点一
             // 下托盘图标就开始截图了」）。快速入口改为菜单项/全局热键。
@@ -1325,5 +1431,23 @@ mod tests {
                 assert!(!is_bare_fn_key(&hk), "{s} 不应判为裸功能键");
             }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_tray_template_icon() {
+        let img = template_rgba(36).expect("模板图提取失败");
+        assert_eq!((img.width(), img.height()), (36, 36));
+        // 模板图只读 alpha：颜色通道必须全黑，防止品牌色经系统透出
+        for p in img.pixels() {
+            assert_eq!((p[0], p[1], p[2]), (0, 0, 0), "模板图颜色通道必须为黑");
+        }
+        // 四角在品牌图标里是圆角底之外的透明区，提取后仍应透明
+        for (x, y) in [(0, 0), (35, 0), (0, 35), (35, 35)] {
+            assert_eq!(img.get_pixel(x, y)[3], 0, "({x},{y}) 应透明");
+        }
+        // 字形（铅笔+虚线选框）应占画布主体，接近不透明的像素要够多
+        let opaque = img.pixels().filter(|p| p[3] >= 200).count();
+        assert!(opaque * 10 > 36 * 36, "字形覆盖不足: {opaque}/{}", 36 * 36);
     }
 }

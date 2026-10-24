@@ -47,6 +47,11 @@ zbus = { version = "=5.18.0", default-features = false, features = ["blocking-ap
 tray-icon = "0.24"
 winit = "0.30"
 
+# mac 托盘的菜单栏模板图（tray::template_rgba）：tiny-skia 直绘单色字形。
+# tiny-skia 已随 lscreen-core 链接进产物，此处仅 mac 侧显式引用，零体积增量
+[target.'cfg(target_os = "macos")'.dependencies]
+tiny-skia = "0.12"
+
 # GUI 子系统下附回父控制台（AttachConsole），保证终端里 CLI 输出可见
 # Win32_System_Threading + Win32_Foundation：无控制台时 MessageBoxW 报错
 # （GUI 子系统的 stderr 没有接收方，否则启动失败完全静默）
