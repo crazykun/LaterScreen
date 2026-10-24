@@ -207,12 +207,28 @@ pub fn take_raise(kind: Kind) -> bool {
 mod tests {
     use super::*;
 
+    /// instance 的测试共享同一 cache_dir 下的锁/信号文件，且 acquire 拿锁
+    /// 成功时会删除同用途的 raise 信号（防新窗口自我唤起）——并行跑时
+    /// acquire_is_idempotent 会踩掉 raise_signal_consumed_once 刚写的文件
+    /// （mac CI 真实发生过：CI 无外部托盘，acquire 测试全绿执行）。测试
+    /// 串行化隔离。
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        SERIAL.lock().unwrap()
+    }
+
     /// 两个进程抢同一用途：先拿者胜，后者 false 且留下 raise 信号（可唤起
     /// 用途）。测试内用子进程模拟「别的持有者」不现实（锁是进程级语义），
     /// 这里验证的是「已持锁时重复 acquire 幂等」与「未持锁时能拿到」。
     #[test]
     fn acquire_is_idempotent_per_kind_and_kinds_do_not_conflict() {
-        assert!(acquire(Kind::Tray));
+        let _g = serial();
+        // 开发机常驻真实托盘时 Tray 锁被外部进程持有：本测试的锁语义断言
+        // 依赖「无外部持有者」，此时跳过（CI 干净环境仍全量验证）
+        if !acquire(Kind::Tray) {
+            eprintln!("跳过：Tray 锁被外部进程持有（真实托盘运行中）");
+            return;
+        }
         // 同用途重复抢：本进程已持锁，幂等返回 true
         assert!(acquire(Kind::Tray));
         // 不同用途不互相干扰（托盘进程本身可能再开覆盖层，两把锁并存）
@@ -223,6 +239,7 @@ mod tests {
     /// raise 信号消费一次即消失。
     #[test]
     fn raise_signal_consumed_once() {
+        let _g = serial();
         std::fs::write(raise_path(Kind::Settings), b"1").unwrap();
         assert!(take_raise(Kind::Settings));
         assert!(!take_raise(Kind::Settings));
