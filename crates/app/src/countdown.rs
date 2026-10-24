@@ -16,14 +16,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use egui::{Color32, Pos2};
+use egui::Pos2;
 
-use crate::run_eframe;
-
-const BG: Color32 = Color32::from_rgb(0x21, 0x21, 0x27);
-const TEXT: Color32 = Color32::from_rgb(0xec, 0xec, 0xf0);
-const MUTED: Color32 = Color32::from_rgb(0x9e, 0x9e, 0xaa);
-const ACCENT: Color32 = Color32::from_rgb(0xe5, 0x39, 0x35);
+use crate::{config, run_eframe, theme};
 
 /// 跑一次倒计时窗口。返回 false = 用户取消（调用方应静默退出）。
 /// eframe 启动失败（无 GL 等）按「不阻塞截图」处理：直接返回 true，
@@ -63,6 +58,10 @@ pub fn run(secs: f64) -> bool {
         if let Some(bytes) = crate::font::load_system_font() {
             crate::font::setup_egui_fonts(&cc.egui_ctx, bytes);
         }
+        // 不装主题 = egui 默认 System 跟随：mac 浅色外观下 egui 的按钮
+        // 文字是黑色，压在深色底上就是「黑字黑底看不见」（用户反馈）。
+        // 与设置/历史窗同一套主题入口，深浅底与文字色成对生效
+        theme::apply(&cc.egui_ctx, config::Config::load().theme);
         Ok(Box::new(CountdownApp {
             deadline: Instant::now() + Duration::from_secs_f64(secs),
             done: d,
@@ -105,7 +104,7 @@ impl eframe::App for CountdownApp {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::NONE
-                    .fill(BG)
+                    .fill(ui.visuals().panel_fill)
                     .inner_margin(egui::Margin::same(12)),
             )
             .show(ui, |ui| {
@@ -113,10 +112,16 @@ impl eframe::App for CountdownApp {
                 // 按钮钉在底部（bottom_up：先添加的在最下），数字区在
                 // 剩余空间垂直居中，上下留白由布局自动均分
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                    let btn = egui::Button::new("取消 (Esc)")
-                        .min_size(egui::vec2(ui.available_width(), 26.0))
-                        .fill(ACCENT.gamma_multiply(0.15))
-                        .stroke(egui::Stroke::new(1.0, ACCENT));
+                    // 取消按钮：实心品牌红 + 白字（settings 主按钮同款令牌）。
+                    // 不能用「红压暗 15%」的淡底——浅色主题下 accent_ink 深红字
+                    // 压暗红底只有 ~2.6:1；ACCENT_FILL+白字两主题都 ≥ AA
+                    // （theme::accent_fill_carries_white_text 单测锁定）
+                    let btn = egui::Button::new(
+                        egui::RichText::new("取消 (Esc)").color(theme::ACCENT_ON_TEXT),
+                    )
+                    .min_size(egui::vec2(ui.available_width(), 26.0))
+                    .fill(theme::ACCENT_FILL)
+                    .stroke(egui::Stroke::new(1.0, theme::accent_line(ui.visuals())));
                     if ui.add(btn).clicked() {
                         self.cancelled.store(true, Ordering::Relaxed);
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -132,10 +137,13 @@ impl eframe::App for CountdownApp {
                         ui.label(
                             egui::RichText::new(format!("{secs:.0}"))
                                 .size(34.0)
-                                .color(TEXT)
-                                .strong(),
+                                .color(ui.visuals().text_color()),
                         );
-                        ui.label(egui::RichText::new("秒后截图").size(11.0).color(MUTED));
+                        ui.label(
+                            egui::RichText::new("秒后截图")
+                                .size(11.0)
+                                .color(ui.visuals().weak_text_color()),
+                        );
                     });
                 });
             });

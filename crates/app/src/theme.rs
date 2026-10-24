@@ -423,4 +423,35 @@ mod tests {
 
     /// 调色板（标注色）里的标准绿 `#43a047`——只用于标注落地彩，不作按钮实心底。
     const PALETTE_GREEN: egui::Color32 = egui::Color32::from_rgb(0x43, 0xa0, 0x47);
+
+    #[test]
+    fn countdown_tokens_readable() {
+        // 回归（用户主诉「延时截图按钮上的字和上面都黑成一片」）：倒计时窗
+        // 曾硬编码深色底 + 不装主题，egui 默认 System 跟随在浅色外观下给出
+        // 黑色按钮文字，压深底看不见。现在装 apply() + 全令牌取色，这里锁住
+        // 窗内三处取色组合：大数字/说明行压面板、按钮白字压 ACCENT_FILL、
+        // 红描边在面板上可见
+        let ctx = egui::Context::default();
+        apply(&ctx, ThemeMode::Dark);
+        for (theme, panel) in [(egui::Theme::Dark, DARK_BG), (egui::Theme::Light, LIGHT_BG)] {
+            let v = &ctx.style_of(theme).visuals;
+            let r = contrast(v.text_color(), panel);
+            assert!(
+                r >= AA,
+                "{theme:?} 倒计时数字在面板上仅 {r:.2}（需 ≥ {AA}）"
+            );
+            let r = contrast(v.weak_text_color(), panel);
+            assert!(
+                r >= AA,
+                "{theme:?} 倒计时说明行在面板上仅 {r:.2}（需 ≥ {AA}）"
+            );
+            let r = contrast(ACCENT_ON_TEXT, ACCENT_FILL);
+            assert!(r >= AA, "{theme:?} 取消按钮白字仅 {r:.2}（需 ≥ {AA}）");
+            let r = contrast(accent_line(v), panel);
+            assert!(
+                r >= AA,
+                "{theme:?} 取消按钮描边在面板上仅 {r:.2}（需 ≥ {AA}）"
+            );
+        }
+    }
 }
