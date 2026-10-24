@@ -828,6 +828,13 @@ fn template_rgba(size: u32) -> Option<image::RgbaImage> {
 /// 托盘图标：mac 用 36px（菜单栏 18pt 的 2x）单色模板图；Win 维持彩色图标。
 /// 解码失败不致命：内嵌资源是构建期不变量，这里只是防御——无图标的托盘
 /// 仍可点击出菜单，不值得为它崩掉常驻进程。
+///
+/// **必须带 cfg 门控**：`tray-icon` 只挂在 Win/mac 两个 target 的依赖表上
+/// （Linux 走 ksni，见 Cargo.toml 的 target 段——tray-icon 的 Linux 后端要
+/// 链接 gtk/libappindicator，违反无动态库硬约束），整函数不加门控则 Linux
+/// 构建/校验直接 `cannot find crate tray_icon`。唯一调用方是 Win/mac 共用的
+/// `NativeApp::setup`，门控掉后 Linux 侧无未定义引用。
+#[cfg(any(windows, target_os = "macos"))]
 fn make_tray_icon() -> Option<tray_icon::Icon> {
     #[cfg(target_os = "macos")]
     {
