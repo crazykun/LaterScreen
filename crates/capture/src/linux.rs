@@ -232,6 +232,63 @@ pub fn capture_all() -> Result<Vec<Screenshot>> {
     })
 }
 
+/// 截整个虚拟桌面（全部显示器并集）为单缓冲——多屏覆盖层的快路径。
+/// 与「monitor_bounds + capture_region」两步相比，省掉两次独立 X 连接
+/// 建立与三轮 RandR 往返（实测占覆盖层启动 30-80ms 的大头）；
+/// 并集与像素抓取共用同一次连接、同一次 RandrGetMonitors 应答。
+/// 单显示器时 union == 主屏，行为等同 capture_primary。
+pub fn capture_desktop() -> Result<Screenshot> {
+    if is_wayland() {
+        return portal_screenshot(false);
+    }
+    with_conn(|conn, screen| {
+        let (min_x, min_y, max_x, max_y) = virtual_desktop(conn, screen)?;
+        grab(
+            conn,
+            screen,
+            &MonitorInfo {
+                x: min_x,
+                y: min_y,
+                width: (max_x - min_x) as u32,
+                height: (max_y - min_y) as u32,
+                primary: false,
+            },
+        )
+    })
+}
+
+/// 虚拟桌面并集与主屏矩形，一次连接内取回（多屏覆盖层判断走哪条
+/// 路径用）。等价于 monitor_bounds + primary_monitor_bounds 合并，
+/// 避免各自 connect 的重复开销。
+pub fn desktop_layout() -> Result<(crate::MonitorRect, crate::MonitorRect)> {
+    with_conn(|conn, screen| {
+        let mons = monitors(conn, screen)?;
+        let primary = mons
+            .iter()
+            .find(|m| m.primary)
+            .or_else(|| mons.first())
+            .ok_or_else(|| CaptureError("no monitor found".into()))?;
+        let union = (
+            mons.iter().map(|m| m.x).min().unwrap_or(0),
+            mons.iter().map(|m| m.y).min().unwrap_or(0),
+            mons.iter().map(|m| m.x + m.width as i32).max().unwrap_or(0),
+            mons.iter()
+                .map(|m| m.y + m.height as i32)
+                .max()
+                .unwrap_or(0),
+        );
+        Ok((
+            (
+                union.0,
+                union.1,
+                (union.2 - union.0) as u32,
+                (union.3 - union.1) as u32,
+            ),
+            (primary.x, primary.y, primary.width, primary.height),
+        ))
+    })
+}
+
 pub fn cursor_position() -> Option<(i32, i32)> {
     query_pointer().map(|(x, y, _)| (x, y))
 }

@@ -71,6 +71,20 @@ pub fn capture_all() -> Result<Vec<Screenshot>> {
     platform::capture_all()
 }
 
+/// 截整个虚拟桌面（全部显示器并集）为单缓冲。多屏覆盖层的快路径：
+/// 单连接内完成 RandR 并集计算与像素抓取，省掉逐查询建连接的往返。
+pub fn capture_desktop() -> Result<Screenshot> {
+    platform::capture_desktop()
+}
+
+/// 一个显示器的矩形：虚拟桌面绝对物理像素 (x, y, w, h)。
+pub type MonitorRect = (i32, i32, u32, u32);
+
+/// 虚拟桌面并集与主屏矩形，一次查询取回（覆盖层路径判断用）。
+pub fn desktop_layout() -> Result<(MonitorRect, MonitorRect)> {
+    platform::desktop_layout()
+}
+
 /// 当前是否为纯 Wayland 会话（无 X11）。上层据此决定截图/热键走 portal
 /// 路径还是 X11 自绘路径。非 Linux 恒 false。
 pub fn is_wayland() -> bool {

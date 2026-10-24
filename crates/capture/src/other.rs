@@ -53,6 +53,55 @@ pub fn capture_all() -> Result<Vec<Screenshot>> {
     Monitor::all().map_err(err)?.iter().map(shoot).collect()
 }
 
+/// Win/mac 覆盖层不走跨屏单缓冲路径（capture_span 仅 Linux），此处仅为
+/// 平台 API 完整性：并集 = 各屏包围盒。
+pub fn capture_desktop() -> Result<Screenshot> {
+    let monitors = Monitor::all().map_err(err)?;
+    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for m in &monitors {
+        let (x, y) = (m.x().map_err(err)?, m.y().map_err(err)?);
+        x0 = x0.min(x);
+        y0 = y0.min(y);
+        x1 = x1.max(x + m.width().map_err(err)? as i32);
+        y1 = y1.max(y + m.height().map_err(err)? as i32);
+    }
+    if x1 <= x0 || y1 <= y0 {
+        return Err(CaptureError("no monitor found".into()));
+    }
+    // xcap 无跨屏抓取：截主屏（union 含主屏）作为降级——上层 Windows/macOS
+    // 的覆盖层本来就不调用本函数（走 capture_at + fullscreen 老路径）。
+    capture_primary()
+}
+
+pub fn desktop_layout() -> Result<(crate::MonitorRect, crate::MonitorRect)> {
+    let monitors = Monitor::all().map_err(err)?;
+    let primary = monitors
+        .iter()
+        .find(|m| m.is_primary().unwrap_or(false))
+        .or_else(|| monitors.first())
+        .ok_or_else(|| CaptureError("no monitor found".into()))?;
+    let mut x0 = i32::MAX;
+    let mut y0 = i32::MAX;
+    let mut x1 = i32::MIN;
+    let mut y1 = i32::MIN;
+    for m in &monitors {
+        let (x, y) = (m.x().map_err(err)?, m.y().map_err(err)?);
+        x0 = x0.min(x);
+        y0 = y0.min(y);
+        x1 = x1.max(x + m.width().map_err(err)? as i32);
+        y1 = y1.max(y + m.height().map_err(err)? as i32);
+    }
+    Ok((
+        (x0, y0, (x1 - x0) as u32, (y1 - y0) as u32),
+        (
+            primary.x().map_err(err)?,
+            primary.y().map_err(err)?,
+            primary.width().map_err(err)?,
+            primary.height().map_err(err)?,
+        ),
+    ))
+}
+
 // ------------------------------------------------- macOS 坐标/事件辅助
 //
 // 坐标约定：本 crate 对外一律物理像素；而 macOS 上 xcap 的显示器几何
