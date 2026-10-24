@@ -716,7 +716,10 @@ fn base_tooltip() -> String {
 
 // ---------------------------------------------------------------- 图标
 
-const ICON_PNG: &[u8] = include_bytes!("../../../packaging/icon.png");
+/// 打包图标源图（与 mac bundle 的 icon.icns、Win 资源图标同源）。
+/// mac 的 Dock 图标补设（main::set_dock_icon）也直接把这串 PNG 字节喂给
+/// NSImage——系统自解 PNG，无需经 image crate 解码。
+pub(crate) const ICON_PNG: &[u8] = include_bytes!("../../../packaging/icon.png");
 
 fn icon_rgba(size: u32) -> Option<image::RgbaImage> {
     let src = image::load_from_memory(ICON_PNG).ok()?.into_rgba8();

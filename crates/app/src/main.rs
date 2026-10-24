@@ -59,8 +59,105 @@ pub(crate) fn apply_window_class(cc: &eframe::CreationContext<'_>) {
     }
 }
 
+/// 非 Linux：mac 的 Dock 图标在首帧统一补设（见 `DockIconOnceApp`），
+/// Windows 用 exe 资源图标，均无需窗口级处理。
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn apply_window_class(_cc: &eframe::CreationContext<'_>) {}
+
+/// mac：给**直跑二进制**的进程补设应用图标（首帧经 `DockIconOnceApp` 调用）。
+///
+/// 托盘动作全是 spawn 独立子进程（历史面板/贴图/录制状态窗…），macOS 上
+/// 子进程是裸可执行文件（不经 LaunchServices 启动），Dock 里拿到的是系统
+/// 默认图标——只有经 LaterScreen.app 启动的主进程才有 bundle 图标
+/// （用户反馈「历史面板图标不对，不是我应用的图标」）。
+///
+/// **时机是成败关键**（真机对照实验，macOS 15 / Intel）：同一段
+/// `NSApp setApplicationIconImage` 在 run_eframe 早期或 eframe creator 回调
+/// 里调用，NSApp 状态未报错但 Dock 始终不采纳；**窗口显示后的首帧**再设
+/// 才生效。故通过 `DockIconOnceApp` 在首帧调用本函数。图标源用内嵌打包图
+/// （tray::ICON_PNG，与 bundle 的 icon.icns 同源）落到临时文件再经
+/// `NSImage initWithContentsOfFile:` 加载——系统自解码 PNG。raw libobjc
+/// FFI 直连（AppKit 已在链接闭包内），零新依赖；任一步失败静默跳过——
+/// 图标只是体验问题，与 Linux 侧 set_window_class 同语义。
+#[cfg(target_os = "macos")]
+fn set_dock_icon() {
+    use std::sync::OnceLock;
+    static DONE: OnceLock<()> = OnceLock::new();
+    if DONE.set(()).is_err() {
+        return;
+    }
+    // libobjc 直连（repo 既有风格：capture/other.rs 直连 CG/CF 同款，不引入
+    // objc 系新依赖）。objc_msgSend 只声明**一次**且用 C 变参形状——同符号
+    // 按不同签名重复声明会被 rustc 拒绝；实参全是指针/整数，变参调用在本
+    // 平台 ABI 上与定参一致，void 方法（release）的返回值丢弃即可。
+    #[link(name = "objc", kind = "dylib")]
+    extern "C" {
+        fn objc_getClass(name: *const i8) -> *mut core::ffi::c_void;
+        fn sel_registerName(name: *const i8) -> *const core::ffi::c_void;
+        #[link_name = "objc_msgSend"]
+        fn msg_send(
+            obj: *mut core::ffi::c_void,
+            sel: *const core::ffi::c_void,
+            ...
+        ) -> *mut core::ffi::c_void;
+    }
+    let sel = |name: &'static core::ffi::CStr| unsafe { sel_registerName(name.as_ptr()) };
+    unsafe {
+        let nsapp_cls = objc_getClass(c"NSApplication".as_ptr());
+        let nsimage_cls = objc_getClass(c"NSImage".as_ptr());
+        let nsstring_cls = objc_getClass(c"NSString".as_ptr());
+        if nsapp_cls.is_null() || nsimage_cls.is_null() || nsstring_cls.is_null() {
+            return;
+        }
+        let nsapp = msg_send(nsapp_cls, sel(c"sharedApplication"));
+        if nsapp.is_null() {
+            return;
+        }
+        let tmp = std::env::temp_dir().join("lscreen-dockicon.png");
+        if std::fs::write(&tmp, tray::ICON_PNG).is_err() {
+            return;
+        }
+        let tmp_c = match std::ffi::CString::new(tmp.to_string_lossy().as_bytes()) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let path = msg_send(nsstring_cls, sel(c"stringWithUTF8String:"), tmp_c.as_ptr());
+        let image = msg_send(
+            msg_send(nsimage_cls, sel(c"alloc")),
+            sel(c"initWithContentsOfFile:"),
+            path,
+        );
+        if image.is_null() {
+            return;
+        }
+        msg_send(nsapp, sel(c"setApplicationIconImage:"), image);
+        msg_send(image, sel(c"release"));
+    }
+}
+
+/// mac：首帧补设 Dock 图标的 App 包装层。6 个 App 全部只重载
+/// `ui()`/`clear_color()`，转发这两个即可保持行为；**新 App 若重载了
+/// eframe::App 的其他方法，需在此同步转发**。
+#[cfg(target_os = "macos")]
+struct DockIconOnceApp {
+    inner: Box<dyn eframe::App>,
+    done: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl eframe::App for DockIconOnceApp {
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, frame: &mut eframe::Frame) {
+        if !self.done {
+            self.done = true;
+            set_dock_icon();
+        }
+        self.inner.ui(ui, frame);
+    }
+
+    fn clear_color(&self, visuals: &eframe::egui::Visuals) -> [f32; 4] {
+        self.inner.clear_color(visuals)
+    }
+}
 
 /// 取出 eframe 窗口的 X11 window id（跨屏 fullscreen 用）。非 X11 返回 None。
 #[cfg(target_os = "linux")]
@@ -330,6 +427,13 @@ fn run_eframe(
     options: eframe::NativeOptions,
     app: eframe::AppCreator<'static>,
 ) -> Result<(), String> {
+    // mac 裸子进程的 Dock 图标在首帧补设（早期时机 Dock 不采纳），见
+    // DockIconOnceApp / set_dock_icon
+    #[cfg(target_os = "macos")]
+    let app: eframe::AppCreator<'static> = Box::new(move |cc| {
+        let inner = app(cc)?;
+        Ok(Box::new(DockIconOnceApp { inner, done: false }) as Box<dyn eframe::App>)
+    });
     eframe::run_native(title, options, app).map_err(|e| match e {
         eframe::Error::OpenGL(_)
         | eframe::Error::NoGlutinConfigs(..)
