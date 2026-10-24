@@ -951,13 +951,25 @@ enum DoubleClickAction {
 }
 
 /// 根据双击上下文决定是否复制退出。
-/// 输入来自当前工具、选中态与指针命中结果，返回值供画布事件处理使用。
+/// 输入来自当前工具、选中态、指针命中与是否在选区内，返回值供画布事件处理使用。
 ///
 /// **不要求双击落在选区内**（v0.11.5，用户主诉「双击外面空白区域不行」）：
 /// 选区外的暗化区同样属于画布，双击它就该交付——尤其框选窗口时选区紧贴
 /// 内容、边界外只有几十像素可点。
-fn double_click_action(tool: Tool, has_selected: bool, hit_element: bool) -> DoubleClickAction {
-    if tool == Tool::Select && !has_selected && !hit_element {
+///
+/// **选区外与工具无关**（v0.11.7，用户主诉「切到矩形等绘图工具后双击
+/// 没反应」）：暗化区不是任何工具的绘制目标（on_press 对选区外直接
+/// return），保留第二击没有意义；选区**内**仍按原语义让位——选择工具
+/// 空白处交付，绘图/点击型工具留给连续绘制或文本编辑。
+fn double_click_action(
+    tool: Tool,
+    has_selected: bool,
+    hit_element: bool,
+    inside_region: bool,
+) -> DoubleClickAction {
+    // 选区内：仅「选择工具 + 无选中 + 未命中图元」交付，其余让位原语义
+    let blank_select_inside = tool == Tool::Select && !has_selected && !hit_element;
+    if !inside_region || blank_select_inside {
         DoubleClickAction::Copy
     } else {
         DoubleClickAction::None
@@ -972,7 +984,13 @@ fn on_double_click(app: &mut SnipApp, ctx: &egui::Context, pointer_px: Option<P2
     if app.text_edit.is_some() {
         return;
     }
-    // 非选择工具的双击保留给连续绘制或放置，不能意外完成截图。
+    // 选区外不挑工具（见 double_click_action）；选区内时非选择工具的双击
+    // 保留给连续绘制或放置，不能意外完成截图。
+    let inside = app.region.contains(p);
+    if !inside && app.tool != Tool::Select {
+        app.copy_and_exit(ctx);
+        return;
+    }
     if app.tool != Tool::Select {
         return;
     }
@@ -1002,7 +1020,7 @@ fn on_double_click(app: &mut SnipApp, ctx: &egui::Context, pointer_px: Option<P2
         }
         return;
     }
-    if double_click_action(app.tool, app.selected.is_some(), hit.is_some())
+    if double_click_action(app.tool, app.selected.is_some(), hit.is_some(), inside)
         == DoubleClickAction::Copy
     {
         app.copy_and_exit(ctx);
@@ -1366,25 +1384,56 @@ mod tests {
     /// 选择工具 + 无选中 + 未命中图元 = 复制退出；选区**内外**都算（v0.11.5：
     /// 用户主诉「双击选区外没反应」，而选区边界外的暗化区同样属于画布，
     /// 靠边界瞄准没必要）。其他工具或有选中/命中图元时让位给各自的语义。
+    ///
+    /// v0.11.7：选区**外**升级为与工具无关——暗化区不是任何工具的绘制
+    /// 目标，保留第二击没有意义；选区内维持原语义不变。
     #[test]
     fn double_click_copy_requires_select_tool_no_selection_and_blank_hit() {
-        // 删除的第四个参数就是 inside_region：以前只有传 true 才 Copy，
-        // 现在同一组条件无条件 Copy（选区外的暗化区也算画布）
+        // 删除的参数是 inside_region 的前身：以前只有传 true 才 Copy，
+        // v0.11.5 起选区外的暗化区也算画布，v0.11.7 起不再挑工具
+        // 选择工具 + 选区内空白：复制
         assert_eq!(
-            double_click_action(Tool::Select, false, false),
+            double_click_action(Tool::Select, false, false, true),
+            DoubleClickAction::Copy
+        );
+        // 选区内：绘图工具/有选中/命中图元均让位原语义
+        assert_eq!(
+            double_click_action(Tool::Rect, false, false, true),
+            DoubleClickAction::None
+        );
+        assert_eq!(
+            double_click_action(Tool::Select, true, false, true),
+            DoubleClickAction::None
+        );
+        assert_eq!(
+            double_click_action(Tool::Select, false, true, true),
+            DoubleClickAction::None
+        );
+        // 选区外：任何工具、有选中、命中图元都复制——「就用当前选区出图」
+        for tool in [
+            Tool::Select,
+            Tool::Rect,
+            Tool::Ellipse,
+            Tool::Arrow,
+            Tool::Line,
+            Tool::Curve,
+            Tool::Marker,
+            Tool::Text,
+            Tool::Mosaic,
+            Tool::Eraser,
+        ] {
+            assert_eq!(
+                double_click_action(tool, false, false, false),
+                DoubleClickAction::Copy
+            );
+        }
+        assert_eq!(
+            double_click_action(Tool::Rect, true, false, false),
             DoubleClickAction::Copy
         );
         assert_eq!(
-            double_click_action(Tool::Rect, false, false),
-            DoubleClickAction::None
-        );
-        assert_eq!(
-            double_click_action(Tool::Select, true, false),
-            DoubleClickAction::None
-        );
-        assert_eq!(
-            double_click_action(Tool::Select, false, true),
-            DoubleClickAction::None
+            double_click_action(Tool::Rect, false, true, false),
+            DoubleClickAction::Copy
         );
     }
 
