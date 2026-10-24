@@ -32,6 +32,14 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use ui::SharedRegion;
 
+/// 启动性能采样（LSCREEN_TRACE=1 时输出到 stderr）：记录关键阶段单调时钟，
+/// 真机定位「热键到覆盖层可见」延迟用；平时零开销（一层 env 判断）。
+pub(crate) fn trace_stage(name: &str, since: std::time::Instant) {
+    if std::env::var_os("LSCREEN_TRACE").is_some() {
+        eprintln!("[trace] {name}: {} ms", since.elapsed().as_millis());
+    }
+}
+
 /// 让任务栏/启动器把本窗口关联到 lscreen.desktop（决定显示的图标）。
 ///
 /// 根因：egui 的 `with_app_id` 只在 Wayland 生效；X11 下 winit 不设 WM_CLASS，
@@ -881,13 +889,16 @@ fn capture_overlay() -> Result<OverlayShot, String> {
 /// 非 1 缩放（假混合 DPI）也返回 None，单缓冲映射在那种场景不可靠。
 #[cfg(target_os = "linux")]
 fn capture_span() -> Option<OverlayShot> {
-    let (mx, my, mw, mh) = lscreen_capture::monitor_bounds()?;
-    if let Some(primary) = lscreen_capture::primary_monitor_bounds() {
-        if primary == (mx, my, mw, mh) {
-            return None; // 单屏：union 即主屏，无需跨屏
-        }
+    // 快路径（多屏）：并集/主屏判断与像素抓取都在 capture_desktop 的
+    // 单连接内完成。返回 None 的语义与老路径一致——单屏（union == 主屏）
+    // 或失败时交回「截鼠标所在屏 + fullscreen」老路径。
+    let t = std::time::Instant::now();
+    let ((mx, my, mw, mh), (px, py, pw, ph)) = lscreen_capture::desktop_layout().ok()?;
+    if (mx, my, mw, mh) == (px, py, pw, ph) {
+        return None; // 单屏：union 即主屏，无需跨屏
     }
-    let shot = lscreen_capture::capture_region(mx, my, mw, mh).ok()?;
+    let shot = lscreen_capture::capture_desktop().ok()?;
+    trace_stage("span_capture_desktop", t);
     if shot.scale != 1.0 {
         return None;
     }
@@ -941,18 +952,27 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
     if lscreen_capture::is_wayland() && mode != ui::Mode::Pick {
         return run_gui_wayland();
     }
-    // 先截屏再开窗口，避免把自己截进去。
+    // 先截屏再开窗口，避免把自己截进去。字体定位（fc-match 子进程 + 16MB
+    // 字体文件读取）与截屏互不依赖，并行做——覆盖层启动的关键路径是
+    // 「像素就绪 → 建窗」，字体只在首帧文本绘制前要到手即可。
+    let t = std::time::Instant::now();
+    let font_job = std::thread::spawn(font::load_system_font);
     let OverlayShot {
         shot,
         pos,
         size,
         spanning,
     } = capture_overlay()?;
-    let font = font::load_system_font();
+    trace_stage("capture_overlay", t);
+    let t = std::time::Instant::now();
     let config = config::Config::load();
     // 窗口列表同样必须先于覆盖层建窗采集（否则最前窗口就是自己）；
     // 失败（Wayland 等）返回空列表，覆盖层自动降级为纯手动框选
     let (windows, initial) = overlay_window_list(&shot, mode, &config);
+    trace_stage("windows+config", t);
+    // 字体线程 panic（IO 异常等）：按无字体降级，不阻断截图
+    let font = font_job.join().unwrap_or_default();
+    trace_stage("font_ready(after_join)", t);
 
     // fullscreen 让 WM 精确贴屏；跨屏时叠加 _NET_WM_FULLSCREEN_MONITORS
     // 把这个 fullscreen 窗口从单屏扩展到全部显示器（span=true 时在建窗后设置）。
