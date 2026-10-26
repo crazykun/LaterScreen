@@ -551,8 +551,8 @@ pub fn is_wayland() -> bool {
     false
 }
 
-/// 交互式截图仅 Wayland portal 路径需要；Win/mac 走自绘覆盖层。
-pub fn capture_interactive() -> Result<Screenshot> {
+/// 交互式截图仅 Wayland 需要；Win/mac 走自绘覆盖层。
+pub fn capture_interactive() -> Result<Option<Screenshot>> {
     Err(CaptureError("当前平台不支持交互式 portal 截图".into()))
 }
 

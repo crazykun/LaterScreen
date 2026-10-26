@@ -1,8 +1,11 @@
 //! Linux X11 截屏：x11rb 纯 Rust 实现。
-//! Wayland 会话走 xdg-desktop-portal（M5，纯 D-Bus，只支持整屏快照——
-//! 区域采帧/录屏/指针查询在 Wayland 下明确报错降级）。
+//! Wayland 会话：交互式截图优先合成器 portal（KDE/GNOME 原生框选），
+//! 不可用（niri 等无交互式 portal 实现）退 slurp+grim 子进程；整屏快照
+//! 同阶梯。区域采帧/录屏/指针查询在 Wayland 下明确报错降级。
 
 use crate::{CaptureError, Result, Screenshot};
+
+use std::time::Duration;
 
 use x11rb::connection::Connection;
 use x11rb::protocol::randr::ConnectionExt as _;
@@ -37,16 +40,41 @@ fn ensure_x11() -> Result<()> {
     Ok(())
 }
 
+/// portal 交互式截图的守护超时：正常时长由用户在合成器 UI 里操作决定，
+/// 超时只防 portal 后端卡死把整个流程拖死。
+const PORTAL_INTERACTIVE_TIMEOUT: Duration = Duration::from_secs(90);
+/// portal 非交互整屏应秒回；超时即视为后端不可用（niri 双屏下 portal-gnome
+/// 收到合成器错误后不回包，实测永久挂死）。
+const PORTAL_FULL_TIMEOUT: Duration = Duration::from_secs(12);
+/// grim+slurp 缺失时的安装提示。
+const GRIM_HINT: &str = "需要安装 grim+slurp（Arch: pacman -S grim slurp）";
+
 /// 经 xdg-desktop-portal 截屏（M5 Wayland 路径）。
 ///
 /// `interactive=false`：整屏快照（合成器直接给全桌面 PNG，origin(0,0)，
 /// 无对话框）——无头/整屏路径用。
 /// `interactive=true`：合成器弹**原生框选/选窗 UI**，用户选完只回选中区域的
 /// PNG——覆盖层在 Wayland 下用它替代自绘框选（合成器坐标一定对，绕开
-/// 多屏混合 DPI 的坐标映射难题）。用户取消返回 Err。
+/// 多屏混合 DPI 的坐标映射难题）。
 ///
-/// 首次调用可能触发权限确认（视 DE 的 portal 后端策略）。
-fn portal_screenshot(interactive: bool) -> Result<Screenshot> {
+/// 返回 Ok(None) = 用户在交互 UI 里取消（与 Esc 同义，不是错误）；
+/// Err = portal 不可用/失败/超时。首调可能触发权限确认（视 DE 策略）。
+fn portal_screenshot(interactive: bool, timeout: Duration) -> Result<Option<Screenshot>> {
+    // ashpd 请求没有超时概念：portal 后端不回包（niri 双屏实测）就永久挂死，
+    // 只能放线程里守护等结果。超时后该线程仍阻塞在 D-Bus 上——截图进程
+    // 即起即退，随进程回收，可接受。
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(portal_screenshot_blocking(interactive));
+    });
+    rx.recv_timeout(timeout).map_err(|_| {
+        CaptureError(format!(
+            "portal 截图超时（{timeout:?}无响应，portal 后端可能不支持）"
+        ))
+    })?
+}
+
+fn portal_screenshot_blocking(interactive: bool) -> Result<Option<Screenshot>> {
     async_io::block_on(async {
         use ashpd::desktop::screenshot::{ScreenshotOptions, ScreenshotProxy};
 
@@ -61,10 +89,18 @@ fn portal_screenshot(interactive: bool) -> Result<Screenshot> {
             .screenshot(None, opts)
             .await
             .map_err(|e| CaptureError(format!("portal 请求失败: {e}")))?;
-        let response = request.response().map_err(|e| {
-            // interactive 下用户取消也走这条：合成器返回 cancelled
-            CaptureError(format!("portal 响应失败（未授权或已取消？）: {e}"))
-        })?;
+        let response = match request.response() {
+            // 用户在合成器 UI 里取消：与 Esc 同义，不是错误
+            Ok(r) => r,
+            Err(ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)) => {
+                return Ok(None);
+            }
+            Err(e) => {
+                return Err(CaptureError(format!(
+                    "portal 响应失败（未授权或合成器不支持？）: {e}"
+                )));
+            }
+        };
         let uri = response.uri().as_str();
         let path = uri.strip_prefix("file://").unwrap_or(uri);
         let data = std::fs::read(path)
@@ -74,24 +110,132 @@ fn portal_screenshot(interactive: bool) -> Result<Screenshot> {
             .map_err(|e| CaptureError(format!("portal 截图解码失败: {e}")))?
             .into_rgba8();
         let (width, height) = (img.width(), img.height());
-        Ok(Screenshot {
+        Ok(Some(Screenshot {
             rgba: img.into_raw(),
             width,
             height,
             origin: (0, 0),
             scale: 1.0,
             is_primary: true,
-        })
+        }))
     })
 }
 
-/// Wayland 交互式截图：合成器弹原生框选 UI，回选中区域。仅 Wayland 有意义
-/// （X11 应走自绘覆盖层，返回 Err 让上层用老路径）。用户取消返回 Err。
-pub fn capture_interactive() -> Result<Screenshot> {
+/// niri：交互式 Screenshot portal 无实现（上游 InteractiveScreenshot 未做，
+/// 双屏下连非交互整屏都被合成器以 `outputs.len() == 1` 拒绝且 portal 端
+/// 不回包）。XDG_CURRENT_DESKTOP 可能带冒号后缀（如 "niri:foo"）。
+fn is_niri_desktop(desktop: &str) -> bool {
+    desktop.split(':').any(|d| d.eq_ignore_ascii_case("niri"))
+}
+
+fn desktop_lacks_interactive_portal() -> bool {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .map(|d| is_niri_desktop(&d))
+        .unwrap_or(false)
+}
+
+/// slurp 框选（wlroots 系合成器的标准选区工具，niri 支持 layer-shell）。
+/// 返回 "x,y WxH" 几何串；Ok(None) = 用户 Esc 取消。
+/// slurp 取消 = 退出码非 0 且无任何输出；出错则往 stderr 写原因。
+fn slurp_region() -> Result<Option<String>> {
+    let out = std::process::Command::new("slurp")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| CaptureError(format!("启动 slurp 失败: {e}（{GRIM_HINT}）")))?;
+    if !out.status.success() {
+        return if out.stdout.is_empty() && out.stderr.is_empty() {
+            Ok(None)
+        } else {
+            Err(CaptureError(format!(
+                "slurp 失败: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )))
+        };
+    }
+    let geom = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if geom.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(geom))
+}
+
+/// grim 抓屏（wlr-screencopy，无动态库链接，与 tesseract/arecord 同属
+/// 外部工具子进程豁免）。`region` 为 slurp 输出的 "x,y WxH"（None = 全桌面
+/// 拼接），产物为该区域物理像素，无坐标换算问题。
+fn grim_capture(region: Option<&str>) -> Result<Screenshot> {
+    let mut cmd = std::process::Command::new("grim");
+    if let Some(g) = region {
+        cmd.args(["-g", g]);
+    }
+    let out = cmd
+        .arg("-") // PNG 写 stdout
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| CaptureError(format!("启动 grim 失败: {e}（{GRIM_HINT}）")))?;
+    if !out.status.success() {
+        return Err(CaptureError(format!(
+            "grim 截图失败: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    let img = image::load_from_memory(&out.stdout)
+        .map_err(|e| CaptureError(format!("grim 截图解码失败: {e}")))?
+        .into_rgba8();
+    let (width, height) = (img.width(), img.height());
+    Ok(Screenshot {
+        rgba: img.into_raw(),
+        width,
+        height,
+        origin: (0, 0),
+        scale: 1.0,
+        is_primary: true,
+    })
+}
+
+/// Wayland 交互式截图：优先合成器原生 portal 框选（KDE/GNOME 等），
+/// niri 等无交互式 portal 的合成器直接 slurp+grim；portal 失败也退兜底。
+/// 用户取消（portal 或 slurp）返回 Ok(None)，上层静默退出。
+pub fn capture_interactive() -> Result<Option<Screenshot>> {
     if !is_wayland() {
         return Err(CaptureError("非 Wayland 会话，请走自绘覆盖层".into()));
     }
-    portal_screenshot(true)
+    let mut portal_err = None;
+    if !desktop_lacks_interactive_portal() {
+        match portal_screenshot(true, PORTAL_INTERACTIVE_TIMEOUT) {
+            Ok(Some(s)) => return Ok(Some(s)),
+            Ok(None) => return Ok(None),
+            Err(e) => portal_err = Some(e),
+        }
+    }
+    match slurp_region() {
+        Ok(Some(geom)) => grim_capture(Some(&geom)).map(Some),
+        Ok(None) => Ok(None),
+        Err(grim_err) => match portal_err {
+            Some(pe) => Err(CaptureError(format!(
+                "{pe}；slurp+grim 兜底也失败: {grim_err}"
+            ))),
+            None => Err(grim_err),
+        },
+    }
+}
+
+/// Wayland 整屏快照：portal 优先（niri 跳过——双屏必败且不回包），
+/// 失败退 grim 全桌面拼接。
+fn full_screenshot() -> Result<Screenshot> {
+    let mut portal_err = None;
+    if !desktop_lacks_interactive_portal() {
+        match portal_screenshot(false, PORTAL_FULL_TIMEOUT) {
+            Ok(Some(s)) => return Ok(s),
+            Ok(None) => {} // 非交互无「取消」语义，按失败继续走兜底
+            Err(e) => portal_err = Some(e),
+        }
+    }
+    grim_capture(None).map_err(|g| match portal_err {
+        Some(p) => CaptureError(format!("{p}；grim 兜底也失败: {g}")),
+        None => g,
+    })
 }
 
 fn monitors(conn: &impl Connection, screen: &Screen) -> Result<Vec<MonitorInfo>> {
@@ -191,7 +335,7 @@ fn with_conn<T>(
 
 pub fn capture_primary() -> Result<Screenshot> {
     if is_wayland() {
-        return portal_screenshot(false);
+        return full_screenshot();
     }
     with_conn(|conn, screen| {
         let mons = monitors(conn, screen)?;
@@ -207,7 +351,7 @@ pub fn capture_primary() -> Result<Screenshot> {
 pub fn capture_at(x: i32, y: i32) -> Result<Screenshot> {
     // portal 无显示器区分：Wayland 下任何坐标都给整幅快照
     if is_wayland() {
-        return portal_screenshot(false);
+        return full_screenshot();
     }
     with_conn(|conn, screen| {
         let mons = monitors(conn, screen)?;
@@ -222,7 +366,7 @@ pub fn capture_at(x: i32, y: i32) -> Result<Screenshot> {
 
 pub fn capture_all() -> Result<Vec<Screenshot>> {
     if is_wayland() {
-        return Ok(vec![portal_screenshot(false)?]);
+        return Ok(vec![full_screenshot()?]);
     }
     with_conn(|conn, screen| {
         monitors(conn, screen)?
@@ -239,7 +383,7 @@ pub fn capture_all() -> Result<Vec<Screenshot>> {
 /// 单显示器时 union == 主屏，行为等同 capture_primary。
 pub fn capture_desktop() -> Result<Screenshot> {
     if is_wayland() {
-        return portal_screenshot(false);
+        return full_screenshot();
     }
     with_conn(|conn, screen| {
         let (min_x, min_y, max_x, max_y) = virtual_desktop(conn, screen)?;
@@ -1098,6 +1242,18 @@ pub fn run_global_shortcuts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn niri_desktop_detection() {
+        // XDG_CURRENT_DESKTOP 可能是单值也可能冒号分隔多值
+        assert!(is_niri_desktop("niri"));
+        assert!(is_niri_desktop("niri:foo"));
+        assert!(is_niri_desktop("foo:niri"));
+        assert!(!is_niri_desktop("GNOME"));
+        assert!(!is_niri_desktop("KDE"));
+        assert!(!is_niri_desktop("hyprland"));
+        assert!(!is_niri_desktop(""));
+    }
 
     /// 真机冒烟（env 门控 + `--ignored` 手动跑）：对 `LSCREEN_TEST_WIN` 指定
     /// 的活窗口依次设置不透明度 0.5 → 整窗穿透 → 区域穿透（顶部留一块

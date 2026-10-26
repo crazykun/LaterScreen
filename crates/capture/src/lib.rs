@@ -91,10 +91,11 @@ pub fn is_wayland() -> bool {
     platform::is_wayland()
 }
 
-/// Wayland 交互式截图：由合成器弹原生框选/选窗 UI，返回用户选中区域。
-/// 仅 Wayland 有意义——X11 会话返回 Err（应走自绘覆盖层）；用户取消也返回 Err。
-/// 合成器负责坐标，天然绕开多屏混合 DPI 的坐标映射难题。
-pub fn capture_interactive() -> Result<Screenshot> {
+/// Wayland 交互式截图：优先合成器原生框选 portal（KDE/GNOME 等），不可用
+/// （niri 等）退 slurp+grim 子进程。仅 Wayland 有意义——X11 会话返回 Err
+/// （应走自绘覆盖层）。Ok(None) = 用户在框选 UI 里取消（上层静默退出）；
+/// Err = portal 与兜底都不可用。
+pub fn capture_interactive() -> Result<Option<Screenshot>> {
     platform::capture_interactive()
 }
 
