@@ -2,7 +2,7 @@
 //! 不在二进制里捆绑字体（CJK 字体动辄 10MB+），运行时从系统读取。
 
 use eframe::egui;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::process::Command;
 
@@ -39,7 +39,27 @@ fn candidates() -> Vec<PathBuf> {
 
     #[cfg(target_os = "linux")]
     {
-        // fontconfig 是 Linux 桌面标配，优先让它挑一个中文 sans
+        // fc-list 只列真正声明支持中文的字体。不用 fc-match：实测部分发行版
+        // （本机 CachyOS/Arch）上 `fc-match ':lang=zh'` 会把无汉字的 Noto Sans
+        // 排在全部 CJK 字体之前（family 绑定压过 lang 评分），且该结果恒
+        // status=success——「成功」加载一个中文全变方块的字体。
+        if let Ok(out) = Command::new("fc-list")
+            .args(["-f", "%{file}\n", ":lang=zh"])
+            .output()
+        {
+            if out.status.success() {
+                let files: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty() && Path::new(l).is_file())
+                    .map(str::to_string)
+                    .collect();
+                if let Some(p) = pick_cjk_font(&files) {
+                    list.push(PathBuf::from(p));
+                }
+            }
+        }
+        // fc-match 次选（fc-list 异常的极简系统）；硬编码路径最后兜底
         if let Ok(out) = Command::new("fc-match")
             .args(["-f", "%{file}", "sans:lang=zh"])
             .output()
@@ -83,4 +103,79 @@ fn candidates() -> Vec<PathBuf> {
     // 通用兜底，避免非以上平台时未使用变量警告
     let _ = &mut list;
     list
+}
+
+/// 从 `fc-list :lang=zh` 的文件列表里挑最合适的：已知中文字体家族优先；
+/// 过重的字重（Black/Bold/Heavy，标注正文观感差）与衬线（Serif）降一档；
+/// 同分取先出现者；无已知家族时任取第一个（列表本身已保证支持中文）。
+fn pick_cjk_font(files: &[String]) -> Option<String> {
+    const KNOWN: [&str; 7] = [
+        "cjk",
+        "yahei",
+        "msyh",
+        "wqy",
+        "sourcehan",
+        "simsun",
+        "simhei",
+    ];
+    let score = |f: &str| -> i32 {
+        let l = f.to_lowercase();
+        let mut s = 0;
+        if KNOWN.iter().any(|k| l.contains(k)) {
+            s += 2;
+            if ["black", "bold", "heavy"].iter().any(|k| l.contains(k)) {
+                s -= 1;
+            }
+            if l.contains("serif") {
+                s -= 1;
+            }
+        }
+        s
+    };
+    let mut best: Option<(i32, &String)> = None;
+    for f in files {
+        let s = score(f);
+        if best.is_none_or(|(bs, _)| s > bs) {
+            best = Some((s, f));
+        }
+    }
+    best.map(|(_, f)| f.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_cjk_font;
+
+    #[test]
+    fn prefers_known_cjk_over_generic_latin() {
+        // fc-match 曾把无汉字的 Noto Sans 排在前——picker 必须跳过它
+        let files = [
+            "/usr/share/fonts/noto/NotoSans-Regular.ttf".to_string(),
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc".to_string(),
+        ];
+        assert_eq!(
+            pick_cjk_font(&files).as_deref(),
+            Some("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc")
+        );
+    }
+
+    #[test]
+    fn penalizes_heavy_weights_and_serif() {
+        let files = [
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Black.ttc".to_string(),
+            "/usr/share/fonts/noto-cjk/NotoSerifCJK-Regular.ttc".to_string(),
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc".to_string(),
+        ];
+        assert_eq!(
+            pick_cjk_font(&files).as_deref(),
+            Some("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_first_line_without_known_family() {
+        let files = ["/x/a.ttf".to_string(), "/x/b.ttf".to_string()];
+        assert_eq!(pick_cjk_font(&files).as_deref(), Some("/x/a.ttf"));
+        assert_eq!(pick_cjk_font(&[]), None);
+    }
 }
