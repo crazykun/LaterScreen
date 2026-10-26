@@ -1036,8 +1036,14 @@ impl eframe::App for PinApp {
         );
 
         if response.drag_started() {
-            // 抓取偏移用按下原点（越过拖动阈值前窗口静止，局部坐标可信）
-            if let (Some(outer), Some(origin)) = (
+            // Wayland：协议禁止客户端自设窗口坐标（OuterPosition 是 no-op，
+            // 手动拖拽完全失效），改走合成器交互式移动——StartDrag 带按下
+            // serial 由 niri 接管到松手；双击复制不受影响（未越过 egui 拖动
+            // 阈值不会触发本分支）。X11/Win/mac 保持手动拖拽：StartDrag 在
+            // X11 有「未激活窗口第一次拖不住」的坑（见 drag 字段注释）。
+            if lscreen_capture::is_wayland() {
+                ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+            } else if let (Some(outer), Some(origin)) = (
                 ctx.input(|i| i.viewport().outer_rect),
                 ctx.input(|i| i.pointer.press_origin()),
             ) {
