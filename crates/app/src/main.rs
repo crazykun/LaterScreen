@@ -1013,24 +1013,30 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
     )
 }
 
-/// Wayland 截图路径：交互式 portal 取选区 → 标注窗（复用 preview 标注流程）。
+/// Wayland 截图路径：交互式框选（合成器 portal，不可用退 slurp+grim）取选区
+/// → 标注窗（复用 preview 标注流程）。
 ///
-/// 合成器负责框选/选窗 UI 与坐标，回来的就是裁好的 RGBA；直接进带完整
+/// 合成器/兜底负责框选 UI 与坐标，回来的就是裁好的 RGBA；直接进带完整
 /// 工具栏的标注窗（与滚动截图预览、`annotate` 子命令同一套 SnipApp preview
-/// 路径）。用户在 portal 里取消 = 静默退出（返回 Ok，不报错）。
+/// 路径）。用户在框选 UI 里取消 = 静默退出（返回 Ok，不报错）。
 #[cfg(target_os = "linux")]
 fn run_gui_wayland() -> Result<(), String> {
     let shot = match lscreen_capture::capture_interactive() {
-        Ok(s) => s,
-        // 取消/未授权：不当错误弹窗，静默结束（与 X11 下 Esc 退出等价）
-        Err(_) => return Ok(()),
+        Ok(Some(s)) => s,
+        // 用户在框选 UI（portal / slurp）里取消：不当错误弹窗，静默结束
+        // （与 X11 下 Esc 退出等价）
+        Ok(None) => return Ok(()),
+        // portal 与兜底都不可用：如实报错退出，不再吞成「用户取消」
+        Err(e) => return Err(e.0),
     };
     if shot.width == 0 || shot.height == 0 {
         return Ok(());
     }
     let config = config::Config::load();
     let (vw, vh) = (
-        (shot.width as f32 * 0.6).clamp(640.0, 960.0),
+        // 宽度下限 ≥ toolbar::BAR_W(760)+8+窗口边距：工具栏单行放下——
+        // 窄窗会折成两行（设计如此），但这里窗口宽度自己可控，不该折
+        (shot.width as f32 * 0.6).clamp(800.0, 960.0),
         (shot.height as f32 * 0.5).clamp(420.0, 720.0),
     );
     let viewport = eframe::egui::ViewportBuilder::default()
