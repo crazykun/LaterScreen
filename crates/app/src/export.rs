@@ -407,16 +407,27 @@ fn clipd_spawn(payload: &[u8]) -> Result<(), String> {
         .write_all(payload)
         .map_err(|e| e.to_string())?;
     // stdin 已随上面的 take() 作用域结束关闭（EOF），子进程开始处理。
-    // 等确认字节：子进程拿到剪贴板前若失败会直接退出 → stdout EOF，
-    // 这里读到 0 字节即失败，不再出现「提示已复制但剪贴板是空的」。
-    let mut ack = [0u8; 1];
-    let got = child
+    // 等确认字节：子进程拿到剪贴板前若失败会直接退出 → stdout EOF。
+    // 守护线程读、主流程限时等——守护进程万一卡死（如子进程等待异常），
+    // GUI 复制按钮不能跟着无限挂起。
+    let mut out = child
         .stdout
         .take()
-        .ok_or_else(|| "无法读取守护进程确认".to_string())?
-        .read(&mut ack)
-        .map_err(|e| e.to_string())?;
-    if got == 0 || ack[0] != CLIPD_ACK {
+        .ok_or_else(|| "无法读取守护进程确认".to_string())?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut ack = [0u8; 1];
+        let r = out
+            .read_exact(&mut ack)
+            .map(|_| ack[0])
+            .map_err(|e| e.to_string());
+        let _ = tx.send(r);
+    });
+    let ack = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .map_err(|_| "剪贴板守护进程无响应（5s 超时）".to_string())?
+        .map_err(|_| "剪贴板守护进程启动失败（连接中断）".to_string())?;
+    if ack != CLIPD_ACK {
         let _ = child.wait(); // 已退出，顺手收割
         return Err("剪贴板守护进程启动失败（X 连接不可用？）".into());
     }
@@ -435,8 +446,19 @@ pub const CLIPD_ARG: &str = "__clipd";
 #[cfg(target_os = "linux")]
 const CLIPD_ACK: u8 = b'k';
 
-/// 守护进程入口：stdin 协议为一行头部 + 数据体。
+/// 守护进程 stdin 协议：一行头部 + 数据体。
 /// `txt\n<utf8>` 或 `img W H\n<raw rgba>`
+#[cfg(target_os = "linux")]
+enum Payload<'a> {
+    Text(String),
+    Img { w: usize, h: usize, body: &'a [u8] },
+}
+
+/// 守护进程入口：X11 剪贴板数据随所有者进程退出而消失，由本守护进程
+/// （arboard wait()）持有 X 侧；Wayland 会话下**同时**写 wl-copy——niri 的
+/// XWayland 桥不把 X 剪贴板回传给 Wayland 原生应用（实测 wl-paste 读不到），
+/// 只写 X 侧会出现「提示已复制、Wayland 应用粘出旧内容」。两侧各自持有，
+/// X11 客户端与 Wayland 客户端都能粘到；任一侧被覆盖即自行退出。
 #[cfg(target_os = "linux")]
 pub fn clipd_main() -> Result<(), String> {
     use arboard::SetExtLinux;
@@ -454,10 +476,6 @@ pub fn clipd_main() -> Result<(), String> {
     let body = &input[nl + 1..];
 
     // 先做完所有可失败的校验，再回执、再进入阻塞持有
-    enum Payload<'a> {
-        Text(String),
-        Img { w: usize, h: usize, body: &'a [u8] },
-    }
     let payload = if header == "txt" {
         Payload::Text(String::from_utf8_lossy(body).to_string())
     } else if let Some(dims) = header.strip_prefix("img ") {
@@ -477,7 +495,33 @@ pub fn clipd_main() -> Result<(), String> {
         return Err(format!("未知协议头: {header}"));
     };
 
-    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    // Wayland 侧（外部工具豁免，wl-clipboard 是 Wayland 桌面标配）：
+    // wl-copy 自守护（fork 后台），前台进程拿到数据即退出
+    let wl_res = if lscreen_capture::is_wayland() {
+        Some(wl_copy_write(&payload))
+    } else {
+        None
+    };
+    let wl_err = match &wl_res {
+        Some(Ok(())) => None,
+        Some(Err(e)) => Some(e.clone()),
+        None => None,
+    };
+    if matches!(wl_res, Some(Err(_))) {
+        eprintln!("lscreen clipd: wl-copy 失败（Wayland 原生应用可能粘到旧内容）: {wl_err:?}");
+    }
+
+    let cb = match arboard::Clipboard::new() {
+        Ok(cb) => Some(cb),
+        Err(e) => {
+            if wl_res.is_some_and(|r| r.is_ok()) {
+                // Wayland 侧已成立（纯 Wayland 环境无 X 也是合法状态），
+                // 不必因 X 不可用而报错
+                return Ok(());
+            }
+            return Err(format!("wl-copy 不可用且 X 剪贴板连接失败: {e}"));
+        }
+    };
 
     // set().wait() 会阻塞到剪贴板被其他应用覆盖，无法在成功后再回写，
     // 因此确认点放在最后一个可失败步骤（X 连接 + 协议校验）之后、阻塞持有之前。
@@ -488,9 +532,12 @@ pub fn clipd_main() -> Result<(), String> {
         out.flush().map_err(|e| e.to_string())?;
     }
 
-    match payload {
-        Payload::Text(text) => cb.set().wait().text(text).map_err(|e| e.to_string()),
-        Payload::Img { w, h, body } => cb
+    match (payload, cb) {
+        (_, None) => Ok(()), // 仅 Wayland 侧成立，X 侧无内容可持有
+        (Payload::Text(text), Some(mut cb)) => {
+            cb.set().wait().text(text).map_err(|e| e.to_string())
+        }
+        (Payload::Img { w, h, body }, Some(mut cb)) => cb
             .set()
             .wait()
             .image(arboard::ImageData {
@@ -499,6 +546,53 @@ pub fn clipd_main() -> Result<(), String> {
                 bytes: Cow::Borrowed(body),
             })
             .map_err(|e| e.to_string()),
+    }
+}
+
+/// Wayland 原生侧写入：图像转 PNG 管给 `wl-copy`（文本原样）。
+/// wl-copy 拿到完整 stdin 后 fork 到后台持有，前台进程随即退出——
+/// wait() 只收割前台进程，被收养的服务进程随覆盖自退，无僵尸。
+#[cfg(target_os = "linux")]
+fn wl_copy_write(p: &Payload<'_>) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut cmd = Command::new("wl-copy");
+    let mut buf: Vec<u8> = Vec::new();
+    match p {
+        Payload::Text(t) => buf.extend_from_slice(t.as_bytes()),
+        Payload::Img { w, h, body } => {
+            // wl-copy 按声明的 MIME 分发，图像走 PNG（纯 Rust 编码，已有依赖）
+            let img = image::RgbaImage::from_raw(*w as u32, *h as u32, body.to_vec())
+                .ok_or("图像尺寸与数据不符")?;
+            img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+                .map_err(|e| format!("PNG 编码失败: {e}"))?;
+            cmd.args(["--type", "image/png"]);
+        }
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("启动 wl-copy 失败（需要 wl-clipboard 包）: {e}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "无法写 wl-copy stdin".to_string())?
+        .write_all(&buf)
+        .map_err(|e| e.to_string())?;
+    // wl-copy 默认 fork：前台父进程在 fork 后立即退出，wait() 即返回；
+    // fork 出的服务进程持有选直到被覆盖，届时随 init 收养自退。
+    // 注意 stderr 不能用管道收——服务进程会继承写端导致 EOF 永不到来，
+    // wait_with_output 必卡死（ack 都发不出去，GUI 复制按钮直接挂起）。
+    let status = child
+        .wait()
+        .map_err(|e| format!("等待 wl-copy 失败: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("wl-copy 退出失败: {status}"))
     }
 }
 
