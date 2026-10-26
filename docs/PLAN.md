@@ -70,7 +70,7 @@ crates/
 | 功能 | 选型 | 备选/说明 |
 |---|---|---|
 | UI | egui (eframe 0.35) | 即时模式适合画布高频重绘；备选 winit+tiny-skia 纯软渲染（体积极限方案） |
-| 截屏 Linux | **自研：x11rb（X11，纯 Rust）** | Wayland 走 ashpd portal（M5，纯 Rust D-Bus）。弃用 xcap Linux 路径：它强制链接 pipewire C 库，违反"无动态库依赖"目标 |
+| 截屏 Linux | **自研：x11rb（X11，纯 Rust）** | Wayland 优先 ashpd portal（M5，纯 Rust D-Bus），niri 等无 portal 实现的合成器退 slurp+grim 子进程（外部工具豁免）。弃用 xcap Linux 路径：它强制链接 pipewire C 库，违反"无动态库依赖"目标 |
 | 截屏 Win/mac | xcap | 这两个平台走系统 API，无 C 编译依赖 |
 | 交互渲染 | egui Painter | — |
 | 导出渲染 | tiny-skia | 纯 Rust 2D 软渲染 |
@@ -254,6 +254,41 @@ crates/
       没有自绘覆盖层的实时放大镜/取色（Pick 取色模式无对应 portal 交互，
       仍走原降级路径）。`is_wayland()` 门控，X11 行为零改动（实测覆盖层仍
       跨屏 3840×1080）。真机 Wayland 待验（本机 Deepin 是 X11 会话）
+- [x] **真机 Wayland 首验（niri）+ 兜底阶梯**（✅ 2026-10-26）：开发机换到
+      CachyOS + niri 26.04 + Wayland（双 1080p，scale 1.0），首次在真
+      Wayland 会话点验，portal 路线整条不可用：① 交互式截图——portal-gnome
+      调 `InteractiveScreenshot` D-Bus 方法（仅 gnome-shell 提供），niri 未
+      实现（上游 niri#1983，open）；且 portal-gnome 失败后**不回包**，ashpd
+      请求永久挂死 → 表现为「按截图毫无反应」。② 非交互整屏——niri 自身
+      拒绝双屏（`Condition failed: outputs.len() == 1`）internal error，同样
+      不回包。托盘 ksni/SNI 正常（Quickshell watcher）；GlobalShortcuts 本机
+      portal-gnome/gtk 均无实现 → 按既定设计降级告警、菜单可用。改造：
+      portal 全部调用加守护超时（交互 90s / 非交互 12s，线程+recv_timeout，
+      超时线程随一次性截图进程回收）；`capture_interactive` 签名改
+      `Result<Option<Screenshot>>`，Ok(None)=用户取消（静默退出）与 Err=真
+      失败（如实报错）分离——原先一律吞成「取消」正是无响应假象的帮凶；
+      兜底阶梯：niri（`XDG_CURRENT_DESKTOP` 命中）直接跳过 portal，其余
+      合成器 portal 失败后退 **slurp+grim**（wlr-screencopy：选区由 slurp
+      在真实桌面完成、grim 只抓该区域，无坐标换算；整屏退 grim 全桌面
+      拼接）——外部工具子进程豁免，与 tesseract/arecord 同类，无动态库
+      链接。桩验证（假 grim/slurp 三条路径）：`shot` 整屏、`gui` 框选→
+      标注窗、框选取消静默退出，全通；真 grim/slurp 待 `pacman -S grim
+      slurp` 后点验。已知边界：录屏/滚动截图仍不支持 Wayland（需帧流）；
+      niri 全局热键无 GlobalShortcuts 后端（可用 niri binds spawn 代偿）
+- [x] **Wayland 剪贴板双写**（✅ 2026-10-26）：niri 的 XWayland 桥不把
+      X 剪贴板回传给 Wayland 原生应用（实测 wl-paste 读不到 X 侧内容），
+      而 arboard 仅启用 X11 后端（`default-features=false` 关掉了
+      wayland-data-control）→ 「已复制」后 Wayland 应用粘出旧内容（用户
+      主诉「点了对号不复制」的真因）。`__clipd` 守护进程在 Wayland 会话下
+      同时写 wl-copy（图像转 PNG 管道喂入；wl-clipboard 外部工具豁免）+
+      arboard X11 `wait()` 持有，两侧各自持有、被覆盖自退；任一侧成立即
+      ack，双侧全败才报错（纯 Wayland 无 X 合法）。坑：wl-copy fork 出的
+      服务进程会继承 stderr 管道，`wait_with_output` 等 EOF 必卡死（ack
+      发不出 → GUI 复制按钮挂起），必须 stderr=null + `wait()` 只收割
+      前台父进程；GUI 侧 ack 读取加 5s 超时兜底。真机验证：文本与图像
+      （2×2 PNG）经 `xclip`（X11）与 `wl-paste`（Wayland）双侧读回一致。
+      另：niri 是平铺合成器，标注窗会被平铺进列布局，需用户侧窗口规则
+      `match app-id="lscreen" open-floating true`（体验问题，非代码）
 - [x] **Wayland 全局热键**（✅ 2026-08-26）：X11 的 `global-hotkey` 在 Wayland
       整体失效（原先只告警降级、无热键）。改经 `org.freedesktop.portal`
       `.GlobalShortcuts`（ashpd `global_shortcuts` 特性）：`run_global_shortcuts`
