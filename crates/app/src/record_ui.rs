@@ -208,21 +208,13 @@ impl eframe::App for RecordApp {
                 );
 
                 // 头部其余区域（挖掉齿轮）拖动 = 移动窗口（_NET_WM_MOVERESIZE）。
-                // 关键：只在 drag_started（按下后判定为拖拽的那一帧）发一次——
-                // dragged_by 是持续状态，逐帧重发 StartDrag 会让 WM 的交互式
-                // 移动结束即被重启，窗口永远跟着鼠标停不下来
+                // 统一入口只在拖拽判定帧或收到区内新按下时发一次（逐帧重发
+                // 会让 WM 的交互式移动结束即被重启，窗口永远追着鼠标）
                 let drag_area =
                     Rect::from_min_size(hdr.min, Vec2::new((avail - 28.0).max(0.0), 26.0));
                 let drag_resp =
                     ui.interact(drag_area, egui::Id::new("rec-drag"), egui::Sense::drag());
-                // 先判 drag_started 再挂 hover 光标（Response 不可 Copy，
-                // on_hover_cursor 会消费它）
-                if drag_resp
-                    .clone()
-                    .drag_started_by(egui::PointerButton::Primary)
-                {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                }
+                crate::drag::start_drag(&ctx, &drag_resp);
                 drag_resp.on_hover_cursor(egui::CursorIcon::Grab);
 
                 // ---- 进度条：自绘圆角细条 ----

@@ -1114,8 +1114,9 @@ impl eframe::App for HistoryApp {
                     }
                 }
                 clear_resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                // 其余区域拖动 = 移窗。只在 drag_started 帧发一次 StartDrag，
-                // 否则 WM 交互式移动反复被重启，窗口停不下来（见 record_ui 同款坑）
+                // 其余区域拖动 = 移窗。统一入口只在拖拽判定帧或收到区内新
+                // 按下时发一次 StartDrag（逐帧重发会让 WM 交互式移动反复被
+                // 重启，窗口停不下来，见 record_ui 同款坑）
                 let drag_area = Rect::from_min_size(
                     ui.min_rect().left_top(),
                     // 右侧让出「清空」(52) + 间距(6) + X(28)
@@ -1126,12 +1127,7 @@ impl eframe::App for HistoryApp {
                     egui::Id::new("history-drag"),
                     egui::Sense::drag(),
                 );
-                if drag_resp
-                    .clone()
-                    .drag_started_by(egui::PointerButton::Primary)
-                {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                }
+                crate::drag::start_drag(&ctx, &drag_resp);
                 drag_resp.on_hover_cursor(egui::CursorIcon::Grab);
             });
 

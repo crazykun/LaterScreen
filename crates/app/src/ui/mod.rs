@@ -1058,6 +1058,10 @@ impl eframe::App for SnipApp {
         self.poll_upload(&ctx);
 
         let texture = self.texture(&ctx);
+        if self.preview && lscreen_capture::is_wayland() {
+            // Wayland 无边框标注窗：自绘标题栏（拖动 + 最小化/最大化/关闭）
+            toolbar::window_titlebar(self, ui, &ctx);
+        }
         if self.preview {
             canvas::show_scrolled(self, ui, &texture);
         } else {
@@ -1065,9 +1069,17 @@ impl eframe::App for SnipApp {
         }
 
         if matches!(self.stage, Stage::Editing) {
-            // Snip：完整标注工具栏；Record（录屏/滚动截图框选）：调整阶段的
-            // 精简条（提示 + 确认/取消），见 toolbar::show 的模式分流
-            toolbar::show(self, &ctx);
+            // Snip：完整标注工具栏。预览窗仅在 Wayland 停靠在窗口底部独占
+            // 一行、画布让位，不浮在图上（浮条会遮图片，真机反馈）；X11/
+            // Win/mac 的滚动标注窗保持原悬浮行为（窗体可经 WM 缩放宽，
+            // 窄于 BAR_W 会折行，固定行高的停靠会裁切）。Record（录屏/滚动
+            // 截图框选）：调整阶段的精简条（提示 + 确认/取消），见
+            // toolbar::show 的模式分流
+            if self.preview && lscreen_capture::is_wayland() {
+                toolbar::show_docked(self, ui, &ctx);
+            } else {
+                toolbar::show(self, &ctx);
+            }
         }
         canvas::show_text_editor(self, &ctx);
         self.show_results(&ctx);

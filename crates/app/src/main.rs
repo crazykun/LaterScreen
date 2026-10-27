@@ -11,6 +11,7 @@
 mod click_hl;
 mod config;
 mod countdown;
+mod drag;
 mod export;
 mod font;
 mod history;
@@ -1041,6 +1042,11 @@ fn run_gui_wayland() -> Result<(), String> {
     );
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_app_id("lscreen")
+        // Wayland 下 GNOME/KDE 等会画 SSD 标题栏（GTK 风格，与 lscreen 主题
+        // 脱节），改为无边框 + 窗口内自绘标题栏（ui::toolbar::window_titlebar：
+        // 拖动 + 最小化/最大化/关闭）；niri 本就不画装饰，此设置对各合成器
+        // 均无害
+        .with_decorations(false)
         .with_inner_size([vw, vh])
         .with_min_inner_size([640.0, 360.0])
         .with_title("lscreen 截图 - 标注");

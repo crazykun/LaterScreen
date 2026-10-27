@@ -1035,15 +1035,17 @@ impl eframe::App for PinApp {
             Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
         );
 
-        if response.drag_started() {
+        if lscreen_capture::is_wayland() {
             // Wayland：协议禁止客户端自设窗口坐标（OuterPosition 是 no-op，
             // 手动拖拽完全失效），改走合成器交互式移动——StartDrag 带按下
-            // serial 由 niri 接管到松手；双击复制不受影响（未越过 egui 拖动
-            // 阈值不会触发本分支）。X11/Win/mac 保持手动拖拽：StartDrag 在
-            // X11 有「未激活窗口第一次拖不住」的坑（见 drag 字段注释）。
-            if lscreen_capture::is_wayland() {
-                ctx.send_viewport_cmd(ViewportCommand::StartDrag);
-            } else if let (Some(outer), Some(origin)) = (
+            // serial 由合成器接管到松手；双击复制不受影响（未越过 egui 拖动
+            // 阈值不会触发本分支）。统一入口内含 mutter 吞 release 的
+            // 「交替失效」补发兜底，见 drag 模块注释。X11/Win/mac 保持手动
+            // 拖拽：StartDrag 在 X11 有「未激活窗口第一次拖不住」的坑（见
+            // drag 字段注释）。
+            crate::drag::start_drag(&ctx, &response);
+        } else if response.drag_started() {
+            if let (Some(outer), Some(origin)) = (
                 ctx.input(|i| i.viewport().outer_rect),
                 ctx.input(|i| i.pointer.press_origin()),
             ) {

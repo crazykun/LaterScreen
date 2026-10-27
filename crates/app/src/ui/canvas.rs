@@ -87,9 +87,19 @@ pub fn show_scrolled(app: &mut SnipApp, ui: &mut egui::Ui, texture: &TextureHand
     app.preview_zoom = new_zoom;
 
     let size = Vec2::new(app.shot.width as f32, app.shot.height as f32) * app.preview_zoom;
+    // Wayland 底部停靠工具栏（toolbar::show_docked）让位：画布高度 = 剩余高
+    // - 工具栏行高，图片任何缩放级别都不会被遮挡。X11/Win/mac 滚动标注窗
+    // 保持原悬浮行为（可缩放宽、会折行，见 ui() 分流注释）
+    let dock_reserve =
+        if matches!(app.stage, super::Stage::Editing) && lscreen_capture::is_wayland() {
+            super::toolbar::DOCKED_H
+        } else {
+            0.0
+        };
     egui::ScrollArea::both()
         .id_salt("preview-canvas")
         .auto_shrink([false, false])
+        .max_height((ui.available_height() - dock_reserve).max(120.0))
         .show_viewport(ui, |ui, _viewport| {
             let cursor = ui.cursor().min;
             // 缩放锚定：调整滚动偏移让指针（无指针时视口中心）下的

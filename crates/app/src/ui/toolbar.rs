@@ -66,18 +66,13 @@ pub fn show(app: &mut SnipApp, ctx: &egui::Context) {
     // 窄屏分两行，行数还会随折行增加；提前为工具栏预留高度，避免贴屏底被裁。
     // Record（录屏/滚动截图框选）的调整阶段恒为单行精简条，与宽屏同高
     let record_adjust = app.mode == super::Mode::Record;
-    let mut bar_height = if record_adjust || single_row(available_width) {
+    let bar_height = if record_adjust || single_row(available_width) {
         40.0
     } else if available_width < 320.0 {
         136.0
     } else {
         96.0
     };
-    // Wayland 标注窗顶部拖动条占位（见 window_drag_strip）：不预留会贴底被裁
-    let wayland_drag_strip = app.preview && lscreen_capture::is_wayland();
-    if wayland_drag_strip {
-        bar_height += DRAG_STRIP_H;
-    }
     // 预览模式（滚动长截图标注）：工具栏常驻窗口底部居中；
     // 窗口比工具栏窄时靠左钳住，保证第一批按钮可达（右侧溢出可拉宽窗口）
     let (x, y) = if app.preview {
@@ -107,12 +102,6 @@ pub fn show(app: &mut SnipApp, ctx: &egui::Context) {
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                if wayland_drag_strip {
-                    // 条与按钮行零间距（默认 8px 行距会让顶部显得臃肿）；
-                    // 窄屏折行的行距由 bar_contents 自行恢复
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    window_drag_strip(ui, ctx);
-                }
                 if record_adjust {
                     record_bar_contents(app, ui, ctx);
                 } else {
@@ -168,37 +157,181 @@ fn record_bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context
     });
 }
 
-/// Wayland 标注窗顶部拖动条高度
-const DRAG_STRIP_H: f32 = 6.0;
+/// Wayland 标注窗自绘标题栏高度（含 1px 底部分隔线）。
+pub(crate) const TITLEBAR_H: f32 = 30.0;
+/// 标题栏按钮列宽（贴合 GNOME 宽命中区习惯，但窄于系统默认 40+）。
+const TITLEBAR_BTN_W: f32 = 32.0;
+/// 预览窗底部停靠工具栏行高（与悬浮条按钮行同高 40）。画布侧同步扣减，
+/// 见 canvas::show_scrolled 的 dock_reserve。
+pub(crate) const DOCKED_H: f32 = 40.0;
+/// 停靠条左缘留白：首个工具图标不贴窗口边。
+const DOCKED_PAD_X: f32 = 8.0;
 
-/// Wayland 标注窗拖动条：niri 浮动窗没有标题栏可抓（egui 不画 CSD，
-/// 鼠标无从下手），在工具栏顶部给一条握把——按住拖动即 StartDrag，
-/// 由合成器接管移动（与贴图窗同一机制）。X11 预览窗有 WM 标题栏，
-/// 不渲染本条。
-fn window_drag_strip(ui: &mut egui::Ui, ctx: &egui::Context) {
-    let (rect, resp) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), DRAG_STRIP_H),
+/// Wayland 预览窗底部停靠工具栏：整行贴窗口底部独占，画布让位（show_scrolled
+/// 扣减同一常量），不悬浮在图上、永不遮挡内容。仅 Wayland 启用——X11/Win/
+/// mac 的滚动标注窗可经 WM 缩放宽（窄于 BAR_W 折行会裁切固定行高），保持原
+/// 悬浮行为。视觉与悬浮条同源（panel_fill + 顶部 1px 分隔线），按钮排布
+/// 复用 bar_contents。
+pub(crate) fn show_docked(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
+    let (rect, _) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), DOCKED_H), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, 0.0, ui.visuals().panel_fill);
+    p.line_segment(
+        [rect.left_top(), rect.right_top()],
+        Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+    );
+    // 垂直自居中：子区域高度锁成上一帧实测的按钮行高、顶对齐，偏移 =
+    // (行高 − 实测高) / 2。左缘留固定空白（首个工具图标不贴窗口边）。宽向
+    // 除固定左留白外不占位——任何动态占位都会压缩 available_width，跨过
+    // 单行折行阈值 BAR_W 后逐帧振荡折行/复原。静态布局一帧收敛，无逐帧
+    // 变化量
+    let id = egui::Id::new("docked_toolbar_row_h");
+    let row_h = ctx.data(|d| d.get_temp::<f32>(id)).unwrap_or(24.0);
+    let row_h = row_h.clamp(16.0, DOCKED_H);
+    let vpad = ((DOCKED_H - row_h) / 2.0).max(0.0);
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(Rect::from_min_size(
+                rect.left_top() + Vec2::new(DOCKED_PAD_X, vpad),
+                Vec2::new(rect.width() - DOCKED_PAD_X, row_h),
+            ))
+            .layout(egui::Layout::left_to_right(egui::Align::Min)),
+    );
+    bar_contents(app, &mut child, ctx);
+    let used = child.min_rect().height().clamp(16.0, DOCKED_H);
+    ctx.data_mut(|d| d.insert_temp(id, used));
+}
+
+/// Wayland 标注窗自绘标题栏：左侧品牌名，整条空白区可拖动（StartDrag 由
+/// 合成器接管移动，niri/GNOME 均真机验证），右侧最小化/最大化/关闭三键，
+/// 图标统一 10~12px 视觉尺寸。合成器 SSD 标题栏样式不可控（GNOME 画 GTK
+/// 风格，与工具栏视觉脱节），自绘才能与 lscreen 主题一致。关闭 = 取消会话，
+/// 与工具栏 ✕ 同一动作。
+pub(crate) fn window_titlebar(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
+    let bar = ui
+        .allocate_exact_size(Vec2::new(ui.available_width(), TITLEBAR_H), Sense::hover())
+        .0;
+    ui.painter().rect_filled(bar, 0.0, ui.visuals().panel_fill);
+    ui.painter().line_segment(
+        [bar.left_bottom(), bar.right_bottom()],
+        Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+    );
+
+    // 拖动区：按钮列之外的全部宽度
+    let drag_rect = Rect::from_min_size(
+        bar.left_top(),
+        Vec2::new(bar.width() - TITLEBAR_BTN_W * 3.0, TITLEBAR_H),
+    );
+    let drag = ui.interact(
+        drag_rect,
+        egui::Id::new("titlebar_drag"),
         Sense::click_and_drag(),
     );
-    let active = resp.hovered() || resp.dragged();
-    if resp.hovered() {
+    if drag.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
-    // 握把点阵：两行三列小圆点，弱色；悬停提亮一档提示可抓
-    let base = if active {
+    // 品牌标题：左缘留白；文字区域落在拖动区内，点住一样能拖
+    ui.painter().text(
+        Pos2::new(bar.left() + 12.0, bar.center().y),
+        egui::Align2::LEFT_CENTER,
+        "LaterScreen",
+        egui::TextStyle::Body.resolve(ui.style()),
+        ui.visuals().text_color(),
+    );
+    // 统一入口：内含 mutter 吞 release 导致「交替失效」的补发兜底
+    crate::drag::start_drag(ctx, &drag);
+
+    // 按钮列（右缘贴边，无间距）：min / max / close。直接在条矩形上
+    // interact，不走布局——后注册者优先命中，天然压住下方拖动区
+    let btn = |ui: &mut egui::Ui, i: usize| {
+        ui.interact(
+            Rect::from_min_size(
+                Pos2::new(bar.right() - TITLEBAR_BTN_W * (3.0 - i as f32), bar.top()),
+                Vec2::new(TITLEBAR_BTN_W, TITLEBAR_H),
+            ),
+            egui::Id::new(("titlebar_btn", i)),
+            Sense::click(),
+        )
+    };
+
+    // 最小化：10px 横线，略低于视觉中心
+    let resp = btn(ui, 0);
+    if resp.hovered() {
+        ui.painter().rect_filled(
+            resp.rect.shrink2(Vec2::new(1.0, 3.0)),
+            6.0,
+            ui.visuals().widgets.hovered.bg_fill,
+        );
+    }
+    let cy = resp.rect.center().y + 3.0;
+    let cx = resp.rect.center().x;
+    ui.painter().line_segment(
+        [Pos2::new(cx - 5.0, cy), Pos2::new(cx + 5.0, cy)],
+        Stroke::new(1.5, fg(ui, &resp)),
+    );
+    if resp.on_hover_text("最小化").clicked() {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+    }
+
+    // 最大化 / 还原
+    let resp = btn(ui, 1);
+    let maximized = ctx.input(|i| i.viewport().maximized) == Some(true);
+    if resp.hovered() {
+        ui.painter().rect_filled(
+            resp.rect.shrink2(Vec2::new(1.0, 3.0)),
+            6.0,
+            ui.visuals().widgets.hovered.bg_fill,
+        );
+    }
+    let r = resp.rect.shrink(10.0);
+    ui.painter().rect_stroke(
+        r,
+        0.0,
+        Stroke::new(1.5, fg(ui, &resp)),
+        egui::StrokeKind::Inside,
+    );
+    if maximized {
+        ui.painter().rect_stroke(
+            r.translate(Vec2::new(2.0, -2.0)),
+            0.0,
+            Stroke::new(1.5, fg(ui, &resp)),
+            egui::StrokeKind::Inside,
+        );
+    }
+    if resp
+        .on_hover_text(if maximized { "还原" } else { "最大化" })
+        .clicked()
+    {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+    }
+
+    // 关闭 = 取消会话：悬停品牌红，与工具栏取消按钮同款视觉
+    let resp = btn(ui, 2);
+    if resp.hovered() {
+        ui.painter().rect_filled(
+            resp.rect.shrink2(Vec2::new(1.0, 3.0)),
+            6.0,
+            ACCENT_FILL.gamma_multiply(0.18),
+        );
+    }
+    let color = if resp.hovered() {
+        ACCENT_FILL
+    } else {
+        fg(ui, &resp)
+    };
+    draw_close(ui.painter(), resp.rect.shrink(9.0), color);
+    if resp.on_hover_text("取消并关闭 (Esc)").clicked() {
+        app.request_close(ctx);
+    }
+}
+
+/// 标题栏按钮图标前景色：悬停时提亮，其余取常规交互色。
+fn fg(ui: &egui::Ui, resp: &egui::Response) -> Color32 {
+    if resp.hovered() {
         ui.visuals().widgets.hovered.fg_stroke.color
     } else {
-        ui.visuals().weak_text_color()
-    };
-    let c = rect.center();
-    for dx in [-6.0, 0.0, 6.0] {
-        for dy in [-1.5, 1.5] {
-            ui.painter()
-                .circle_filled(c + Vec2::new(dx, dy), 1.25, base.gamma_multiply(0.5));
-        }
-    }
-    if resp.drag_started() {
-        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        ui.style().interact(resp).fg_stroke.color
     }
 }
 
@@ -206,9 +339,6 @@ fn window_drag_strip(ui: &mut egui::Ui, ctx: &egui::Context) {
 /// 交付动作固定一行（动作全为图标，折行时仍可全部展示）。
 fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     ui.spacing_mut().item_spacing.x = 2.0;
-    // 恢复默认行距：外层为拖动条清零的 y 间距只该作用于「条↔按钮行」，
-    // 窄屏 horizontal_wrapped 折行仍需要正常行距
-    ui.spacing_mut().item_spacing.y = 8.0;
     if single_row(ui.available_width()) {
         ui.horizontal(|ui| {
             editing_controls(app, ui);
