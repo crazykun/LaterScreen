@@ -101,11 +101,15 @@ fn portal_screenshot_blocking(interactive: bool) -> Result<Option<Screenshot>> {
                 )));
             }
         };
-        let uri = response.uri().as_str();
-        let path = uri.strip_prefix("file://").unwrap_or(uri);
-        let data = std::fs::read(path)
-            .map_err(|e| CaptureError(format!("读取 portal 截图失败: {e}（{path}）")))?;
-        let _ = std::fs::remove_file(path); // portal 产物在临时目录，读后即清
+        let path = portal_uri_to_path(response.uri().as_str())?;
+        let data = std::fs::read(&path).map_err(|e| {
+            CaptureError(format!("读取 portal 截图失败: {e}（{}）", path.display()))
+        })?;
+        // portal 产物可能是持久文件（GNOME 存到 ~/Pictures/截图），只有临时
+        // 目录里的才读后即清，避免删掉用户截图原件。
+        if path.starts_with(std::env::temp_dir()) {
+            let _ = std::fs::remove_file(&path);
+        }
         let img = image::load_from_memory(&data)
             .map_err(|e| CaptureError(format!("portal 截图解码失败: {e}")))?
             .into_rgba8();
@@ -119,6 +123,53 @@ fn portal_screenshot_blocking(interactive: bool) -> Result<Option<Screenshot>> {
             is_primary: true,
         }))
     })
+}
+
+/// portal 回包的 file URI 转本地路径。URI 是百分号编码的（GNOME 把截图存
+/// 「~/Pictures/截图/截图 2026-….png」，空格与 CJK 均被编码），拿编码串当
+/// 路径读取必败（Ubuntu GNOME 51 真机复现）。只认空 authority 的 file:///
+/// （portal 截图仅此一种）；解码按字节进行，Unix 下 UTF-8 字节可直接成路径。
+fn portal_uri_to_path(uri: &str) -> Result<std::path::PathBuf> {
+    let rest = uri
+        .strip_prefix("file://")
+        .ok_or_else(|| CaptureError(format!("portal 截图 URI 非 file 协议: {uri}")))?;
+    // file:///home/… 去掉 scheme 后 rest 以 '/' 开头（空 authority + 绝对路径）；
+    // 以其它字符开头说明带非空 host（file://remote/…），portal 截图不会出现
+    if !rest.starts_with('/') {
+        return Err(CaptureError(format!(
+            "portal 截图 URI 带非空 host，暂不支持: {uri}"
+        )));
+    }
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes
+                .get(i + 1..i + 3)
+                .and_then(|h| std::str::from_utf8(h).ok())
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+                .ok_or_else(|| CaptureError(format!("URI 百分号编码非法: {uri}")))?;
+            out.push(hex);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Ok(std::path::PathBuf::from(
+            std::ffi::OsStr::from_bytes(&out).to_owned(),
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        String::from_utf8(out)
+            .map(std::path::PathBuf::from)
+            .map_err(|_| CaptureError("URI 解码结果不是 UTF-8".into()))
+    }
 }
 
 /// niri：交互式 Screenshot portal 无实现（上游 InteractiveScreenshot 未做，
@@ -1253,6 +1304,24 @@ mod tests {
         assert!(!is_niri_desktop("KDE"));
         assert!(!is_niri_desktop("hyprland"));
         assert!(!is_niri_desktop(""));
+    }
+
+    #[test]
+    fn portal_uri_percent_decode() {
+        // 真机案例：GNOME 截图落在「~/Pictures/截图/」且文件名含空格，portal
+        // 回包是百分号编码 URI；曾直接 strip 前缀当路径用致读取必败
+        let uri = "file:///home/jii/Pictures/%E6%88%AA%E5%9B%BE/%E6%88%AA%E5%9B%BE%202026-10-27%2017-14-33.png";
+        assert_eq!(
+            portal_uri_to_path(uri).unwrap(),
+            std::path::PathBuf::from("/home/jii/Pictures/截图/截图 2026-10-27 17-14-33.png")
+        );
+        assert_eq!(
+            portal_uri_to_path("file:///tmp/a%20b.png").unwrap(),
+            std::path::PathBuf::from("/tmp/a b.png")
+        );
+        assert!(portal_uri_to_path("https://example.com/a.png").is_err());
+        assert!(portal_uri_to_path("file://remote/home/a.png").is_err());
+        assert!(portal_uri_to_path("file:///tmp/bad%2z.png").is_err());
     }
 
     /// 真机冒烟（env 门控 + `--ignored` 手动跑）：对 `LSCREEN_TEST_WIN` 指定
