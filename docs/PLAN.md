@@ -290,6 +290,29 @@ crates/
       （2×2 PNG）经 `xclip`（X11）与 `wl-paste`（Wayland）双侧读回一致。
       另：niri 是平铺合成器，标注窗会被平铺进列布局，需用户侧窗口规则
       `match app-id="lscreen" open-floating true`（体验问题，非代码）
+- [x] **真机 Wayland 首验（GNOME/Ubuntu 26.10）+ 门户 URI 修复**（✅
+      2026-10-27）：开发机再换 Ubuntu 26.10 + GNOME Shell 51 + Wayland。
+      GlobalShortcuts portal（portal-gnome 有后端）真机注册成功，托盘热键
+      可用；交互式截图 portal（gnome-shell `InteractiveScreenshot`）真实
+      可用——niri 时代的 slurp+grim 兜底在 GNOME 反而不可用（mutter 无
+      zwlr_layer_shell_v1/wlr-screencopy，slurp 报 "compositor doesn't
+      support"），portal 是 GNOME 上唯一路径。真机暴露并修复：① portal
+      回包 file URI 是百分号编码（截图落 `~/Pictures/截图/`、文件名含空格
+      与 CJK），原 `strip_prefix("file://")` 不解码必 ENOENT——新增
+      `portal_uri_to_path` 手写解码 + 真机案例回归单测；portal 产物改为只
+      清 `std::env::temp_dir()` 下的临时文件（GNOME 回的是用户 Pictures
+      持久文件，原「读后即删」会删用户截图原件）。② mutter SSD 标题栏
+      （GTK 风格）与主题脱节：Wayland 标注窗改 `with_decorations(false)`
+      + 窗口内自绘标题栏（品牌名 + 全宽拖动区 + 最小化/最大化/关闭三键，
+      StartDrag 由合成器接管移动）。③ mutter 接管移动后吞 release，egui
+      误判按键仍按下、`drag_started` 隔次失效（拖一次好一次坏交替）：
+      统一 `drag::start_drag` 入口，兜底「拖拽态中收到拖动区内新左键按下」
+      即补发（事件单帧存在、不会逐帧重发；X11 `_NET_WM_MOVERESIZE` 同类
+      吞 release 问题顺手覆盖，正常路径行为不变）。④ 预览窗工具栏由悬浮
+      改底部停靠（浮条遮图）：仅 Wayland 启用，X11/Win/mac 的滚动标注窗
+      保持原悬浮（可经 WM 缩放宽，窄于 BAR_W 折行会裁切固定行高）。已知
+      边界：滚动截图/录屏仍不支持 Wayland（需帧流）；niri 侧 binds 代偿
+      失效，GNOME 下快捷键走 GlobalShortcuts portal 首次要系统授权弹窗
 - [x] **Wayland 全局热键**（✅ 2026-08-26）：X11 的 `global-hotkey` 在 Wayland
       整体失效（原先只告警降级、无热键）。改经 `org.freedesktop.portal`
       `.GlobalShortcuts`（ashpd `global_shortcuts` 特性）：`run_global_shortcuts`
