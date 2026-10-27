@@ -66,13 +66,18 @@ pub fn show(app: &mut SnipApp, ctx: &egui::Context) {
     // 窄屏分两行，行数还会随折行增加；提前为工具栏预留高度，避免贴屏底被裁。
     // Record（录屏/滚动截图框选）的调整阶段恒为单行精简条，与宽屏同高
     let record_adjust = app.mode == super::Mode::Record;
-    let bar_height = if record_adjust || single_row(available_width) {
+    let mut bar_height = if record_adjust || single_row(available_width) {
         40.0
     } else if available_width < 320.0 {
         136.0
     } else {
         96.0
     };
+    // Wayland 标注窗顶部拖动条占位（见 window_drag_strip）：不预留会贴底被裁
+    let wayland_drag_strip = app.preview && lscreen_capture::is_wayland();
+    if wayland_drag_strip {
+        bar_height += DRAG_STRIP_H;
+    }
     // 预览模式（滚动长截图标注）：工具栏常驻窗口底部居中；
     // 窗口比工具栏窄时靠左钳住，保证第一批按钮可达（右侧溢出可拉宽窗口）
     let (x, y) = if app.preview {
@@ -102,6 +107,12 @@ pub fn show(app: &mut SnipApp, ctx: &egui::Context) {
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
+                if wayland_drag_strip {
+                    // 条与按钮行零间距（默认 8px 行距会让顶部显得臃肿）；
+                    // 窄屏折行的行距由 bar_contents 自行恢复
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    window_drag_strip(ui, ctx);
+                }
                 if record_adjust {
                     record_bar_contents(app, ui, ctx);
                 } else {
@@ -157,10 +168,47 @@ fn record_bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context
     });
 }
 
+/// Wayland 标注窗顶部拖动条高度
+const DRAG_STRIP_H: f32 = 6.0;
+
+/// Wayland 标注窗拖动条：niri 浮动窗没有标题栏可抓（egui 不画 CSD，
+/// 鼠标无从下手），在工具栏顶部给一条握把——按住拖动即 StartDrag，
+/// 由合成器接管移动（与贴图窗同一机制）。X11 预览窗有 WM 标题栏，
+/// 不渲染本条。
+fn window_drag_strip(ui: &mut egui::Ui, ctx: &egui::Context) {
+    let (rect, resp) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), DRAG_STRIP_H),
+        Sense::click_and_drag(),
+    );
+    let active = resp.hovered() || resp.dragged();
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    }
+    // 握把点阵：两行三列小圆点，弱色；悬停提亮一档提示可抓
+    let base = if active {
+        ui.visuals().widgets.hovered.fg_stroke.color
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    let c = rect.center();
+    for dx in [-6.0, 0.0, 6.0] {
+        for dy in [-1.5, 1.5] {
+            ui.painter()
+                .circle_filled(c + Vec2::new(dx, dy), 1.25, base.gamma_multiply(0.5));
+        }
+    }
+    if resp.drag_started() {
+        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+}
+
 /// 排列编辑控件与交付动作。宽屏单行；窄屏两行——编辑控件自然折行，
 /// 交付动作固定一行（动作全为图标，折行时仍可全部展示）。
 fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     ui.spacing_mut().item_spacing.x = 2.0;
+    // 恢复默认行距：外层为拖动条清零的 y 间距只该作用于「条↔按钮行」，
+    // 窄屏 horizontal_wrapped 折行仍需要正常行距
+    ui.spacing_mut().item_spacing.y = 8.0;
     if single_row(ui.available_width()) {
         ui.horizontal(|ui| {
             editing_controls(app, ui);
