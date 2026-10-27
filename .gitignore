@@ -4,3 +4,4 @@
 !docs/**/*.png
 /dist
 !packaging/icon.png
+.workbuddy/*
