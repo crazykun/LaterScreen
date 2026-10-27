@@ -198,7 +198,7 @@ command = ["/usr/local/bin/uploader", "--token", "xxx"]
 
 | 平台 | 说明 |
 |---|---|
-| **Linux** | 交互模式需 X11 桌面；Wayland 下仅整屏截图可用（区域采帧 / 录屏仍需 X11），全局热键在 Wayland 不可用。OCR 优先系统 tesseract（中文需 `tesseract-ocr-chi-sim`），并以内置纯 Rust ocrs 兜底（仅拉丁字母，首次自动下载模型）。录屏音频（仅 MP4）运行时调系统工具：需 `ffmpeg` 与 `arecord` 或 `parec` 之一，缺失时**录制开始前**就报错，不会录完才发现没声音 |
+| **Linux** | X11 全功能。Wayland：截图 / 标注 / 取色 / 贴图 / 历史可用——交互式框选优先合成器原生 portal（KDE / GNOME），niri / sway 等无交互 portal 的合成器自动退 `grim`+`slurp`（需安装），剪贴板双侧写入（Wayland 原生应用需 `wl-clipboard`）；**录屏 / 滚动截图 / 区域录制仍需 X11**，全局热键依赖合成器 GlobalShortcuts（无实现时降级为托盘菜单，可用桌面快捷键绑 `lscreen gui` 代偿）。OCR 优先系统 tesseract（中文需 `tesseract-ocr-chi-sim`），并以内置纯 Rust ocrs 兜底（仅拉丁字母，首次自动下载模型）。录屏音频（仅 MP4）运行时调系统工具：需 `ffmpeg` 与 `arecord` 或 `parec` 之一，缺失时**录制开始前**就报错，不会录完才发现没声音 |
 | **Windows 10+** | 走系统 API，无外部依赖。OCR 用 WinRT 系统引擎，支持中文。录屏音频走 WASAPI 采集 + Media Foundation AAC，麦克风 / 系统声 / 混合均可 |
 | **macOS** | 走系统 API，无外部依赖。OCR 用 Vision，支持中文。录屏音频走 CoreAudio（麦克风）+ ScreenCaptureKit（系统声，需 macOS 13+ 与「屏幕录制」权限）+ AudioToolbox AAC；因引入 ScreenCaptureKit，产物最低系统要求 macOS 12.3 |
 
@@ -212,14 +212,14 @@ command = ["/usr/local/bin/uploader", "--token", "xxx"]
 ./scripts/package.sh x86_64-unknown-linux-gnu   # 指定目标
 ```
 
-交叉编译需装对应 gcc / g++（openh264 是 C++ 源）；rpm 需 `apt install rpm`；AppImage 需 [appimagetool](https://github.com/AppImage/appimagetool)。全平台出包（含 macOS、Windows MSVC）走 GitHub Actions：`git tag v0.11.6 && git push --tags`。
+交叉编译需装对应 gcc / g++（openh264 是 C++ 源）；rpm 需 `apt install rpm`；AppImage 需 [appimagetool](https://github.com/AppImage/appimagetool)。全平台出包（含 macOS、Windows MSVC）走 GitHub Actions：`git tag v0.12.0 && git push origin v0.12.0`。
 
 ## 🏗️ 架构
 
 ```
 crates/
   core/      图元模型、撤销栈、命中检测、tiny-skia 导出渲染、取色、二维码（无 UI 依赖）
-  capture/   截屏平台层（Linux: x11rb 纯 Rust；Win/mac: xcap 系统 API）
+  capture/   截屏平台层（Linux: x11rb 纯 Rust，Wayland 走 portal / slurp+grim；Win/mac: xcap 系统 API）
   app/       可执行文件：clap CLI + egui 覆盖层 + 托盘
   ocr/       OCR 引擎（系统引擎 + 内置 ocrs 兜底）
   record/    录屏编码（gifski / openh264；音频：Linux=arecord/parec+ffmpeg 子进程链，
