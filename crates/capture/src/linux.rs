@@ -1240,6 +1240,12 @@ pub struct ShortcutSpec {
 ///
 /// 时序坑：`bind_shortcuts` 会弹一次系统确认对话框（首次），用户确认后合成器
 /// 才把键位交给自己；这期间 Activated 不会来，属正常。
+///
+/// 注册阶段（连接、订阅、建会话、绑定）设有 8 秒超时，防止 portal 在登录后
+/// 偶发卡住导致热键永久静默失效；绑定成功后的 Activated 监听没有超时，按设计
+/// 持续到 portal 会话结束。
+const GLOBAL_SHORTCUTS_REGISTER_TIMEOUT: Duration = Duration::from_secs(8);
+
 pub fn run_global_shortcuts(
     specs: &[ShortcutSpec],
     mut on_activated: impl FnMut(&str),
@@ -1250,20 +1256,7 @@ pub fn run_global_shortcuts(
     async_io::block_on(async {
         use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
         use ashpd::desktop::CreateSessionOptions;
-        use futures_util::StreamExt;
-
-        let gs = GlobalShortcuts::new()
-            .await
-            .map_err(|e| CaptureError(format!("连接 GlobalShortcuts portal 失败: {e}")))?;
-        // 先订阅信号再 bind，避免 bind 到订阅之间的触发丢失
-        let mut activated = gs
-            .receive_activated()
-            .await
-            .map_err(|e| CaptureError(format!("订阅 Activated 失败: {e}")))?;
-        let session = gs
-            .create_session(CreateSessionOptions::default())
-            .await
-            .map_err(|e| CaptureError(format!("创建 GlobalShortcuts 会话失败: {e}")))?;
+        use futures_util::{FutureExt, StreamExt};
 
         let shortcuts: Vec<NewShortcut> = specs
             .iter()
@@ -1275,11 +1268,38 @@ pub fn run_global_shortcuts(
                 }
             })
             .collect();
-        gs.bind_shortcuts(&session, &shortcuts, None, Default::default())
-            .await
-            .map_err(|e| CaptureError(format!("绑定全局热键失败: {e}")))?
-            .response()
-            .map_err(|e| CaptureError(format!("绑定全局热键被拒: {e}")))?;
+
+        // 只给注册阶段加 deadline；绑定成功后的 Activated 流是预期的长期监听。
+        let registration = async {
+            let gs = GlobalShortcuts::new()
+                .await
+                .map_err(|e| CaptureError(format!("连接 GlobalShortcuts portal 失败: {e}")))?;
+            // 先订阅信号再 bind，避免 bind 到订阅之间的触发丢失
+            let activated = gs
+                .receive_activated()
+                .await
+                .map_err(|e| CaptureError(format!("订阅 Activated 失败: {e}")))?;
+            let session = gs
+                .create_session(CreateSessionOptions::default())
+                .await
+                .map_err(|e| CaptureError(format!("创建 GlobalShortcuts 会话失败: {e}")))?;
+            gs.bind_shortcuts(&session, &shortcuts, None, Default::default())
+                .await
+                .map_err(|e| CaptureError(format!("绑定全局热键失败: {e}")))?
+                .response()
+                .map_err(|e| CaptureError(format!("绑定全局热键被拒: {e}")))?;
+            Ok((gs, activated, session))
+        };
+        let timeout = async_io::Timer::after(GLOBAL_SHORTCUTS_REGISTER_TIMEOUT);
+        futures_util::pin_mut!(registration, timeout);
+        let (_gs, mut activated, _session) = futures_util::select_biased! {
+            result = registration.fuse() => result?,
+            _ = FutureExt::fuse(timeout) => {
+                return Err(CaptureError(format!(
+                    "GlobalShortcuts 注册超时（{GLOBAL_SHORTCUTS_REGISTER_TIMEOUT:?}）"
+                )));
+            }
+        };
 
         // 阻塞消费 Activated 流：session 与 activated 都在本作用域存活
         while let Some(ev) = activated.next().await {

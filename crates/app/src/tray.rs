@@ -972,15 +972,33 @@ mod linux_impl {
             if !specs.is_empty() {
                 let gs_tx = tx.clone();
                 std::thread::spawn(move || {
-                    let r = lscreen_capture::run_global_shortcuts(&specs, |id| {
-                        if let Some(a) = super::action_from_shortcut_id(id) {
-                            let _ = gs_tx.send(a);
-                        }
-                    });
-                    if let Err(e) = r {
+                    const MAX_ATTEMPTS: u8 = 2;
+                    for attempt in 1..=MAX_ATTEMPTS {
                         eprintln!(
-                            "lscreen tray: Wayland 全局热键不可用（合成器不支持 GlobalShortcuts？菜单仍可用）: {e}"
+                            "lscreen tray: 注册 Wayland 全局热键（第 {attempt}/{MAX_ATTEMPTS} 次）"
                         );
+                        let r = lscreen_capture::run_global_shortcuts(&specs, |id| {
+                            if let Some(a) = super::action_from_shortcut_id(id) {
+                                let _ = gs_tx.send(a);
+                            }
+                        });
+                        match r {
+                            Ok(()) => {
+                                eprintln!("lscreen tray: Wayland 全局热键监听已结束");
+                                break;
+                            }
+                            Err(e) if attempt < MAX_ATTEMPTS => {
+                                eprintln!(
+                                    "lscreen tray: Wayland 全局热键注册失败，将在 1 秒后重试: {e}"
+                                );
+                                std::thread::sleep(std::time::Duration::from_secs(1));
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "lscreen tray: Wayland 全局热键不可用，自动重试已耗尽（菜单仍可用）: {e}"
+                                );
+                            }
+                        }
                     }
                 });
             }
