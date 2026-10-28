@@ -2167,7 +2167,7 @@ fn run_scroll(
 
 /// 把拼接结果 PNG 经 stdin 交给独立的标注预览进程（见 run_annotate）。
 /// 子进程先读完 stdin 再开窗，write_all 阻塞到对端读走为止，无死锁。
-fn spawn_annotate_stdin(png: &[u8]) -> Result<(), String> {
+pub(crate) fn spawn_annotate_stdin(png: &[u8]) -> Result<(), String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -2218,14 +2218,27 @@ fn run_annotate(input: Option<PathBuf>) -> Result<(), String> {
     let rgba = img.into_raw();
     // 窗口尺寸与原先进程内预览同款：缩到 60%/50% 并夹到可用范围；宽度
     // 下限要容得下底部标注工具栏（预览模式约 560 逻辑点）
+    let min_vw = if lscreen_capture::is_wayland() {
+        800.0
+    } else {
+        640.0
+    };
     let (vw, vh) = (
-        (w as f32 * 0.6).clamp(640.0, 960.0),
+        (w as f32 * 0.6).clamp(min_vw, 960.0),
         (h as f32 * 0.5).clamp(420.0, 720.0),
     );
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_app_id("lscreen")
+        .with_decorations(!lscreen_capture::is_wayland())
         .with_inner_size([vw, vh])
-        .with_min_inner_size([640.0, 360.0])
+        .with_min_inner_size([
+            if lscreen_capture::is_wayland() {
+                800.0
+            } else {
+                640.0
+            },
+            360.0,
+        ])
         .with_title("lscreen 滚动截图 - 标注");
     let options = eframe::NativeOptions {
         viewport,

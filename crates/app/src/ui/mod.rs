@@ -16,6 +16,18 @@ use crate::export;
 use crate::history;
 use std::sync::{Arc, Mutex};
 
+/// 预览/标注窗（Wayland portal 截图、滚动长图收尾）里识别结果的宿主窗口
+/// 本身就是裁剪后的截图，egui 浮层永远画在宿主窗口表面内——「结果窗口
+/// 出不了截图框」。预览模式下结果改走独立系统窗口（egui viewport），
+/// 状态经 Arc<Mutex> 与宿主共享；普通覆盖层仍用内部浮层（可全屏移动）。
+struct ResultWindowState {
+    title: String,
+    items: Vec<String>,
+    /// 用户经 Esc / 系统 ✕ 关闭，宿主读到后撤掉面板
+    closed: bool,
+    copied_at: Option<std::time::Instant>,
+}
+
 /// 交互框选出的区域（`record --select` 用）：覆盖层写入，主流程读取。
 pub type SharedRegion = Arc<Mutex<Option<RectF>>>;
 
@@ -178,8 +190,12 @@ pub struct SnipApp {
     pub picked: Option<lscreen_core::Rgba>,
     /// 工具栏尺寸输入的未提交值：编辑中（聚焦/拖拽）暂存，结束时一次性应用
     pub size_edit_buf: Option<(f32, f32)>,
+    /// 结果面板（二维码/OCR 共用）：标题 + 结构化文本条目。
+    /// OCR 条目保留引擎提供的置信度，便于 UI 展示及后续插入文本图元。
     /// 结果面板（二维码/OCR 共用）：(标题, 文本条目)
-    pub results_panel: Option<(String, Vec<String>)>,
+    results_panel: Option<(String, Vec<String>)>,
+    /// 预览模式下结果独立窗口的共享状态（与 results_panel 同生命周期）
+    result_window: Option<Arc<Mutex<ResultWindowState>>>,
     /// 后台识别任务（OCR/QR 在线程中跑，避免 UI 假死）
     scan_job: Option<std::sync::mpsc::Receiver<ScanOutcome>>,
     /// 后台上传任务（M15）：Some = 上传中，按钮转「上传中…」禁用态防连点
@@ -299,6 +315,7 @@ impl SnipApp {
             picked: None,
             size_edit_buf: None,
             results_panel: None,
+            result_window: None,
             scan_job: None,
             upload_job: None,
             upload_filename: None,
@@ -869,7 +886,11 @@ impl SnipApp {
             self.toast(ctx, "识别进行中…");
             return;
         }
-        let engine = lscreen_ocr::default_engine(&[]);
+        // GUI 截图 OCR 面向中文桌面内容：显式请求简体中文 + 英文。
+        // 若 Linux 没有对应 Tesseract 语言包，必须明确提示安装，不能静默
+        // 回退到仅支持拉丁字母的 ocrs 后输出一堆伪文字。
+        let languages = ["chi_sim".to_string(), "eng".to_string()];
+        let engine = lscreen_ocr::default_engine(&languages);
         if !engine.available() {
             self.toast(ctx, engine.describe());
             return;
@@ -886,7 +907,13 @@ impl SnipApp {
         self.remember_selection();
         self.spawn_scan(ctx, move || match engine.recognize(&rgba, w, h) {
             Ok(out) if !out.is_empty() => {
-                ScanOutcome::Ok("文字识别结果".into(), vec![out.plain_text()])
+                let items = out
+                    .blocks
+                    .into_iter()
+                    .filter(|block| !block.text.trim().is_empty())
+                    .map(|block| block.text)
+                    .collect();
+                ScanOutcome::Ok("文字识别结果".into(), items)
             }
             Ok(_) => ScanOutcome::Empty("选区内未识别到文字".into()),
             Err(e) => ScanOutcome::Empty(format!("识别失败: {e}")),
@@ -934,8 +961,93 @@ impl SnipApp {
         const FLOAT_BTN: egui::Vec2 = egui::vec2(88.0, 26.0);
 
         let Some((title, items)) = self.results_panel.clone() else {
+            // 面板已撤（识别新结果前的清空、成码转二维码等）：独立窗口随之关闭
+            self.result_window = None;
             return;
         };
+        // 预览/标注窗的宿主就是裁剪后的截图：内部浮层永远出不了截图框。
+        // 改开独立系统窗口（viewport），用户可拖到截图框外任意位置；
+        // 后端不支持多 viewport 时 egui 自动降级回内嵌浮层。
+        if self.preview {
+            let shared = match &self.result_window {
+                Some(shared) => {
+                    let mut st = shared.lock().unwrap();
+                    st.title = title;
+                    st.items = items.clone();
+                    shared.clone()
+                }
+                None => {
+                    let shared = Arc::new(Mutex::new(ResultWindowState {
+                        title,
+                        items: items.clone(),
+                        closed: false,
+                        copied_at: None,
+                    }));
+                    self.result_window = Some(shared.clone());
+                    shared
+                }
+            };
+            if shared.lock().unwrap().closed {
+                self.results_panel = None;
+                self.result_window = None;
+                return;
+            }
+            let viewport_id = egui::ViewportId(egui::Id::new("result-window"));
+            let builder = egui::ViewportBuilder::default()
+                .with_title(shared.lock().unwrap().title.clone())
+                .with_inner_size(egui::vec2(460.0, 340.0))
+                .with_min_inner_size(egui::vec2(260.0, 160.0));
+            ctx.show_viewport_deferred(viewport_id, builder, move |ui, _class| {
+                let mut st = shared.lock().unwrap();
+                // 系统 ✕ / Esc → 通知宿主撤面板，viewport 不再被展示即关闭
+                if ui.input(|i| i.viewport().close_requested())
+                    || ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+                {
+                    st.closed = true;
+                    return;
+                }
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for (i, content) in st.items.iter().enumerate() {
+                            if i > 0 {
+                                ui.add_space(8.0);
+                            }
+                            ui.label(egui::RichText::new(truncate(content, 4000)).monospace());
+                        }
+                    });
+                ui.add_space(6.0);
+                let copied = st
+                    .copied_at
+                    .is_some_and(|t| t.elapsed().as_secs_f32() < 2.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if copied {
+                        ui.small("已复制");
+                    }
+                    let label = if st.items.len() > 1 {
+                        "复制全部"
+                    } else {
+                        "复制内容"
+                    };
+                    if ui.button(label).clicked() {
+                        let all = st.items.join("\n");
+                        match export::copy_text_to_clipboard(&all) {
+                            Ok(()) => {
+                                st.copied_at = Some(std::time::Instant::now());
+                                ui.ctx()
+                                    .request_repaint_after(std::time::Duration::from_secs(2));
+                            }
+                            Err(e) => {
+                                st.copied_at = None;
+                                ui.small(format!("复制失败: {e}"));
+                            }
+                        }
+                    }
+                });
+            });
+            return;
+        }
+
         let mut open = true;
         // 可拖动 + 可缩放：结果框默认落在选区中央，挡住的正是刚识别的那段原文。
         // 首帧居中用 default_pos + pivot 而非 anchor——anchor 会每帧把位置写回，
@@ -958,35 +1070,7 @@ impl SnipApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for (i, content) in items.iter().enumerate() {
-                            if i > 0 {
-                                ui.separator();
-                            }
-                            // 多条（QR 可一次识出多个码）才需要逐条复制，按钮放各条
-                            // 文本上方；单条由右下角悬浮按钮负责，不再重复
-                            ui.horizontal(|ui| {
-                                if multi {
-                                    ui.label(format!("#{}", i + 1));
-                                    if ui.button("复制").clicked() {
-                                        match export::copy_text_to_clipboard(content) {
-                                            Ok(()) => self.toast(ctx, "已复制"),
-                                            Err(e) => self.toast(ctx, format!("复制失败: {e}")),
-                                        }
-                                    }
-                                }
-                                // 识别 + 生成闭环（M13）：识别到的 URL 一键回贴成码
-                                if ui
-                                    .button("成码")
-                                    .on_hover_text("把这段文本生成二维码图片，插入标注层")
-                                    .clicked()
-                                {
-                                    let text = content.clone();
-                                    self.results_panel = None;
-                                    self.insert_qr(ctx, &text);
-                                }
-                            });
-                            // 上限放宽到 4000 字：窗口可拉伸后 600 字反倒成了瓶颈
-                            // （egui 会为不可见文本也做布局，故仍留上限防大段文本卡顿）。
-                            // 复制走的是原始 content，不受此显示上限影响
+                            // OCR/二维码内容只展示文本，统一复制按钮放在窗口右下角。
                             ui.label(egui::RichText::new(truncate(content, 4000)).monospace());
                             // 末条留出悬浮按钮的高度，避免尾行被按钮压住
                             if i + 1 == items.len() {
@@ -1089,7 +1173,7 @@ impl eframe::App for SnipApp {
 
 /// 后台识别任务的结果。
 enum ScanOutcome {
-    /// (面板标题, 条目)
+    /// (面板标题, 文本条目)
     Ok(String, Vec<String>),
     /// 无结果或失败，toast 提示
     Empty(String),

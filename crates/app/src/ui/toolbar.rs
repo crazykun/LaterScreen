@@ -158,12 +158,23 @@ fn record_bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context
 }
 
 /// Wayland 标注窗自绘标题栏高度（含 1px 底部分隔线）。
-pub(crate) const TITLEBAR_H: f32 = 30.0;
-/// 标题栏按钮列宽（贴合 GNOME 宽命中区习惯，但窄于系统默认 40+）。
-const TITLEBAR_BTN_W: f32 = 32.0;
+pub(crate) const TITLEBAR_H: f32 = 34.0;
+/// 标题栏按钮列宽：留出更宽的命中区，避免最小化/最大化/关闭挤在一起。
+const TITLEBAR_BTN_W: f32 = 36.0;
 /// 预览窗底部停靠工具栏行高（与悬浮条按钮行同高 40）。画布侧同步扣减，
 /// 见 canvas::show_scrolled 的 dock_reserve。
-pub(crate) const DOCKED_H: f32 = 40.0;
+/// 停靠条单行高度；宽屏时保持紧凑工具栏。
+pub(crate) const DOCKED_SINGLE_H: f32 = 40.0;
+/// 停靠条双行最大高度：窄窗口时编辑控件一行、交付动作一行。
+pub(crate) const DOCKED_H: f32 = 80.0;
+
+pub(crate) fn docked_height(available_width: f32) -> f32 {
+    if single_row((available_width - DOCKED_PAD_X).max(0.0)) {
+        DOCKED_SINGLE_H
+    } else {
+        DOCKED_H
+    }
+}
 /// 停靠条左缘留白：首个工具图标不贴窗口边。
 const DOCKED_PAD_X: f32 = 8.0;
 
@@ -173,23 +184,23 @@ const DOCKED_PAD_X: f32 = 8.0;
 /// 悬浮行为。视觉与悬浮条同源（panel_fill + 顶部 1px 分隔线），按钮排布
 /// 复用 bar_contents。
 pub(crate) fn show_docked(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
-    let (rect, _) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), DOCKED_H), Sense::hover());
+    let dock_h = docked_height(ui.available_width());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), dock_h), Sense::hover());
     let p = ui.painter();
     p.rect_filled(rect, 0.0, ui.visuals().panel_fill);
     p.line_segment(
         [rect.left_top(), rect.right_top()],
         Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
     );
-    // 垂直自居中：子区域高度锁成上一帧实测的按钮行高、顶对齐，偏移 =
-    // (行高 − 实测高) / 2。左缘留固定空白（首个工具图标不贴窗口边）。宽向
-    // 除固定左留白外不占位——任何动态占位都会压缩 available_width，跨过
-    // 单行折行阈值 BAR_W 后逐帧振荡折行/复原。静态布局一帧收敛，无逐帧
-    // 变化量
-    let id = egui::Id::new("docked_toolbar_row_h");
-    let row_h = ctx.data(|d| d.get_temp::<f32>(id)).unwrap_or(24.0);
-    let row_h = row_h.clamp(16.0, DOCKED_H);
-    let vpad = ((DOCKED_H - row_h) / 2.0).max(0.0);
+    // 窄窗口时 bar_contents 会变成两行；直接按当前宽度给足子区域高度，
+    // 不等待上一帧测量，避免第二行首帧落到窗口边界外。宽屏单行 24pt，
+    // 窄屏预留两行按钮高度 + 间距。
+    let row_h = if dock_h == DOCKED_SINGLE_H {
+        24.0
+    } else {
+        DOCKED_H - 16.0
+    };
+    let vpad = ((dock_h - row_h) / 2.0).max(0.0);
     let mut child = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(Rect::from_min_size(
@@ -199,8 +210,7 @@ pub(crate) fn show_docked(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Cont
             .layout(egui::Layout::left_to_right(egui::Align::Min)),
     );
     bar_contents(app, &mut child, ctx);
-    let used = child.min_rect().height().clamp(16.0, DOCKED_H);
-    ctx.data_mut(|d| d.insert_temp(id, used));
+    // child 的实际高度仅用于布局调试，不再把双行结果压回 40pt。
 }
 
 /// Wayland 标注窗自绘标题栏：左侧品牌名，整条空白区可拖动（StartDrag 由
@@ -264,11 +274,11 @@ pub(crate) fn window_titlebar(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::
             ui.visuals().widgets.hovered.bg_fill,
         );
     }
-    let cy = resp.rect.center().y + 3.0;
+    let cy = resp.rect.center().y + 4.0;
     let cx = resp.rect.center().x;
     ui.painter().line_segment(
-        [Pos2::new(cx - 5.0, cy), Pos2::new(cx + 5.0, cy)],
-        Stroke::new(1.5, fg(ui, &resp)),
+        [Pos2::new(cx - 6.0, cy), Pos2::new(cx + 6.0, cy)],
+        Stroke::new(1.8, fg(ui, &resp)),
     );
     if resp.on_hover_text("最小化").clicked() {
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
@@ -284,7 +294,7 @@ pub(crate) fn window_titlebar(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::
             ui.visuals().widgets.hovered.bg_fill,
         );
     }
-    let r = resp.rect.shrink(10.0);
+    let r = resp.rect.shrink(11.0);
     ui.painter().rect_stroke(
         r,
         0.0,

@@ -101,6 +101,7 @@ impl TextRecognizer for WinOcr {
                 blocks.push(TextBlock {
                     text,
                     confidence: None,
+                    bbox: None,
                 });
             }
         }

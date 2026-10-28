@@ -43,16 +43,45 @@ impl Tesseract {
         }
         None
     }
+
+    fn missing_languages(bin: &str, langs: &str) -> Vec<String> {
+        let wanted = langs.split('+').collect::<std::collections::HashSet<_>>();
+        let Ok(output) = Command::new(bin).arg("--list-langs").output() else {
+            return wanted.into_iter().map(str::to_string).collect();
+        };
+        let installed_text = String::from_utf8_lossy(&output.stdout);
+        let installed = installed_text
+            .lines()
+            .map(str::trim)
+            .collect::<std::collections::HashSet<_>>();
+        wanted
+            .difference(&installed)
+            .map(|lang| (*lang).to_string())
+            .collect()
+    }
 }
 
 impl TextRecognizer for Tesseract {
     fn available(&self) -> bool {
+        // 语言包缺失仍保留 tesseract 作为当前引擎，让 recognize/describe 给出准确安装提示，
+        // 而不是静默退回仅支持拉丁文字的 ocrs。
         Self::binary().is_some()
     }
 
     fn describe(&self) -> String {
         match Self::binary() {
-            Some(bin) => format!("tesseract ({bin}), 语言: {}", self.langs),
+            Some(bin) => {
+                let missing = Self::missing_languages(&bin, &self.langs);
+                if missing.is_empty() {
+                    format!("tesseract ({bin}), 语言: {}", self.langs)
+                } else {
+                    format!(
+                        "tesseract 缺少语言包: {}。安装: sudo apt install tesseract-ocr-{}",
+                        missing.join(", "),
+                        missing.join(" tesseract-ocr-")
+                    )
+                }
+            }
             None => "未找到 tesseract。安装: sudo apt install tesseract-ocr tesseract-ocr-chi-sim"
                 .into(),
         }
@@ -61,8 +90,22 @@ impl TextRecognizer for Tesseract {
     fn recognize(&self, rgba: &[u8], width: u32, height: u32) -> Result<OcrOutput> {
         let bin = Self::binary().ok_or_else(|| OcrError(self.describe()))?;
 
-        // 编码为 PNG 经 stdin 传入
-        let img = image::RgbaImage::from_raw(width, height, rgba.to_vec())
+        // 透明背景先合成白底并轻度灰度化，避免棋盘格/彩色底降低文字对比度。
+        // 不做激进二值化，保留抗锯齿边缘给 tesseract 自行处理。
+        let mut prepared = Vec::with_capacity(rgba.len());
+        for px in rgba.as_chunks::<4>().0 {
+            let alpha = f32::from(px[3]) / 255.0;
+            let gray =
+                (0.299 * f32::from(px[0]) + 0.587 * f32::from(px[1]) + 0.114 * f32::from(px[2]))
+                    * alpha
+                    + 255.0 * (1.0 - alpha);
+            let value = gray.round().clamp(0.0, 255.0) as u8;
+            prepared.extend_from_slice(&[value, value, value, 255]);
+        }
+        if prepared.len() != rgba.len() {
+            return Err(OcrError("无效的图像缓冲".into()));
+        }
+        let img = image::RgbaImage::from_raw(width, height, prepared)
             .ok_or_else(|| OcrError("无效的图像缓冲".into()))?;
         let mut png = Vec::new();
         img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
@@ -147,11 +190,15 @@ fn is_cjk(c: char) -> bool {
 /// 词置信度取行内均值。
 fn parse_tsv(tsv: &str) -> OcrOutput {
     let mut blocks: Vec<TextBlock> = Vec::new();
-    let mut cur_key = (u32::MAX, u32::MAX, u32::MAX);
+    let mut cur_key = (u32::MAX, u32::MAX, u32::MAX, u32::MAX);
     let mut cur_words: Vec<String> = Vec::new();
     let mut cur_confs: Vec<f32> = Vec::new();
+    let mut cur_bbox: Option<crate::BoundingBox> = None;
 
-    let flush = |words: &mut Vec<String>, confs: &mut Vec<f32>, blocks: &mut Vec<TextBlock>| {
+    let flush = |words: &mut Vec<String>,
+                 confs: &mut Vec<f32>,
+                 bbox: &mut Option<crate::BoundingBox>,
+                 blocks: &mut Vec<TextBlock>| {
         if words.is_empty() {
             return;
         }
@@ -161,9 +208,14 @@ fn parse_tsv(tsv: &str) -> OcrOutput {
         } else {
             Some(confs.iter().sum::<f32>() / confs.len() as f32 / 100.0)
         };
-        blocks.push(TextBlock { text, confidence });
+        blocks.push(TextBlock {
+            text,
+            confidence,
+            bbox: *bbox,
+        });
         words.clear();
         confs.clear();
+        *bbox = None;
     };
 
     for line in tsv.lines().skip(1) {
@@ -173,12 +225,13 @@ fn parse_tsv(tsv: &str) -> OcrOutput {
             continue;
         }
         let key = (
+            cols[1].parse().unwrap_or(0),
             cols[2].parse().unwrap_or(0),
             cols[3].parse().unwrap_or(0),
             cols[4].parse().unwrap_or(0),
         );
         if key != cur_key {
-            flush(&mut cur_words, &mut cur_confs, &mut blocks);
+            flush(&mut cur_words, &mut cur_confs, &mut cur_bbox, &mut blocks);
             cur_key = key;
         }
         let word = cols[11].trim();
@@ -191,8 +244,45 @@ fn parse_tsv(tsv: &str) -> OcrOutput {
                 cur_confs.push(c);
             }
         }
+        let parse_u32 = |value: &str| value.parse::<u32>().ok();
+        let bbox = [cols[6], cols[7], cols[8], cols[9]]
+            .map(parse_u32)
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .and_then(|v| {
+                let [x, y, width, height] = v.as_slice() else {
+                    return None;
+                };
+                (*width > 0 && *height > 0).then_some(crate::BoundingBox {
+                    x: *x,
+                    y: *y,
+                    width: *width,
+                    height: *height,
+                })
+            });
+        if let Some(b) = bbox {
+            cur_bbox = Some(match cur_bbox {
+                Some(old) => {
+                    let right = old
+                        .x
+                        .saturating_add(old.width)
+                        .max(b.x.saturating_add(b.width));
+                    let bottom = old
+                        .y
+                        .saturating_add(old.height)
+                        .max(b.y.saturating_add(b.height));
+                    crate::BoundingBox {
+                        x: old.x.min(b.x),
+                        y: old.y.min(b.y),
+                        width: right.saturating_sub(old.x.min(b.x)),
+                        height: bottom.saturating_sub(old.y.min(b.y)),
+                    }
+                }
+                None => b,
+            });
+        }
     }
-    flush(&mut cur_words, &mut cur_confs, &mut blocks);
+    flush(&mut cur_words, &mut cur_confs, &mut cur_bbox, &mut blocks);
     OcrOutput { blocks }
 }
 

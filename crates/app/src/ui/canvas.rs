@@ -92,7 +92,7 @@ pub fn show_scrolled(app: &mut SnipApp, ui: &mut egui::Ui, texture: &TextureHand
     // 保持原悬浮行为（可缩放宽、会折行，见 ui() 分流注释）
     let dock_reserve =
         if matches!(app.stage, super::Stage::Editing) && lscreen_capture::is_wayland() {
-            super::toolbar::DOCKED_H
+            super::toolbar::docked_height(ui.available_width())
         } else {
             0.0
         };
@@ -115,7 +115,6 @@ pub fn show_scrolled(app: &mut SnipApp, ui: &mut egui::Ui, texture: &TextureHand
             // 内容比视口窄时水平居中
             let extra = ((ui.available_width() - size.x) / 2.0).max(0.0);
             let rect = Rect::from_min_size(Pos2::new(cursor.x + extra, cursor.y), size);
-            ui.allocate_rect(rect, Sense::click_and_drag());
             show_in(app, ui, rect, texture);
         });
 }
@@ -126,7 +125,10 @@ fn show_in(app: &mut SnipApp, ui: &mut egui::Ui, rect: Rect, texture: &TextureHa
         scale: app.shot.width as f32 / rect.width().max(1.0),
     };
     app.last_view = view;
-    let response = ui.allocate_rect(rect, Sense::click_and_drag());
+    // 手柄和选区外框使用 Outside 绘制，交互区必须同步扩大，否则可见手柄
+    // 落在图片 response 外，egui 不会派发 drag_started。
+    let hit_pad = CORNER_GRAB_PT.max(EDGE_GRAB_PT);
+    let response = ui.allocate_rect(rect.expand(hit_pad), Sense::click_and_drag());
     let painter = ui.painter().clone();
 
     painter.image(texture.id(), rect, UV_FULL, Color32::WHITE);
@@ -581,7 +583,10 @@ fn editing(
     // ---- 绘制 ----
     dim_outside(painter, view, screen, app.region);
     let region_pt = view.rect_pt(app.region);
-    let clipped = painter.with_clip_rect(region_pt.expand(1.0));
+    // 标注图元允许在截图选区外暂存/拖动；否则 OCR 插入的文字一离开
+    // region 就会消失、也无法再次命中。最终交付仍由 export::crop_rgba(region)
+    // 决定，因此这里放开的是编辑可见范围，不改变保存/复制边界。
+    let clipped = painter.with_clip_rect(painter.clip_rect());
     // 拆字段借用：遍历 elements（不可变）同时更新 mosaic_cache（可变），
     // 免去每帧整体 clone
     let editing_text_id = app.text_edit.as_ref().map(|t| t.id);
@@ -617,20 +622,19 @@ fn editing(
     }
     draw_highlights(app, painter, view);
 
-    // 预览模式选区固定整图：画一圈淡边即可，不画 8 个拖拽手柄
-    if app.preview {
-        painter.rect_stroke(
-            region_pt,
-            0.0,
-            Stroke::new(1.0, Color32::from_black_alpha(90)),
-            StrokeKind::Inside,
-        );
-        return;
-    }
+    // 预览模式默认选区是整图，但仍绘制可抓取的边/角；用户可以在长图
+    // 标注前缩小交付范围，画布空白区域的拖动仍由预览平移逻辑处理。
     painter.rect_stroke(
         region_pt,
         0.0,
-        Stroke::new(1.5, ACCENT),
+        Stroke::new(
+            if app.preview { 1.0 } else { 1.5 },
+            if app.preview {
+                Color32::from_black_alpha(90)
+            } else {
+                ACCENT
+            },
+        ),
         StrokeKind::Outside,
     );
     // 8 个手柄：4 角 + 4 边中点（边中点提示整条边可拖）
@@ -660,9 +664,6 @@ fn editing(
 
 /// 命中选区角点：返回 (角点下标, 对角点)。预览模式选区固定整图，不可调。
 fn hit_corner(app: &SnipApp, view: View, pos_pt: Pos2) -> Option<(usize, P2)> {
-    if app.preview {
-        return None;
-    }
     let corners = app.region.corners();
     for (i, c) in corners.iter().enumerate() {
         if view.to_pt(*c).distance(pos_pt) <= CORNER_GRAB_PT {
@@ -675,9 +676,6 @@ fn hit_corner(app: &SnipApp, view: View, pos_pt: Pos2) -> Option<(usize, P2)> {
 /// 命中选区边（整条边可拖）：返回边下标（0=左 1=上 2=右 3=下）。
 /// 角点优先级更高，调用方需先测角点。预览模式不可调。
 fn hit_edge(app: &SnipApp, view: View, pos_pt: Pos2) -> Option<usize> {
-    if app.preview {
-        return None;
-    }
     let r = view.rect_pt(app.region);
     let tol = EDGE_GRAB_PT;
     let in_x = pos_pt.x >= r.min.x - tol && pos_pt.x <= r.max.x + tol;

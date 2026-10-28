@@ -75,6 +75,7 @@ impl Vision {
                     blocks.push(TextBlock {
                         text: s,
                         confidence: Some(text.confidence()),
+                        bbox: None,
                     });
                 }
             }

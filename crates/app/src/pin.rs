@@ -36,7 +36,9 @@ pub const BAR_H: f32 = 34.0;
 /// 窗口逻辑宽低于它时按此值钳制下限——**穿透开关是工具条上的图标**，
 /// 窗口被图片宽度拖到极窄（如 40px 小图）时若不保底，穿透按钮会被挤出
 /// 条带，穿透开后无处可点恢复（2026-09-29 用户反馈的真实死锁）。
-pub const MIN_TOOLBAR_W: f32 = 320.0;
+/// 窗口宽度下限 = 完整工具条宽（无上传 10 组 ≈326pt + 边距），窄图也要
+/// 放得下全部按钮（穿透可恢复的死锁防线），见 window_size_at/show_toolbar。
+pub const MIN_TOOLBAR_W: f32 = 360.0;
 /// 放大用最近邻（滚轮放大像素格清晰），缩小用线性
 fn texture_options() -> egui::TextureOptions {
     egui::TextureOptions {
@@ -161,6 +163,8 @@ enum ToolbarAction {
     ZoomReset,
     ZoomIn,
     Upload,
+    /// 在独立标注窗中打开当前贴图（同滚动截图预览链路）
+    Edit,
 }
 
 /// 用户点击穿透入口后的下一步。区域穿透可直接应用；整窗穿透在本贴图窗口
@@ -345,6 +349,30 @@ impl PinApp {
                 self.toast(ctx, format!("已保存 {}", p.display()));
             }
             Err(e) => self.toast(ctx, format!("保存失败: {e}")),
+        }
+    }
+
+    /// 编辑：把当前贴图内容交给独立标注窗（run_annotate，同滚动截图
+    /// 预览链路），可标注/OCR/重新贴图。贴图本体保持不动——标注窗的
+    /// 交付是另一份产物，不回写已存在的贴图。
+    fn do_edit(&mut self, ctx: &egui::Context) {
+        let Some(img) = image::RgbaImage::from_raw(self.w, self.h, self.rgba.clone()) else {
+            self.toast(ctx, "贴图数据异常");
+            return;
+        };
+        let mut png = Vec::new();
+        if let Err(e) = img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png) {
+            self.toast(ctx, format!("编码 PNG 失败: {e}"));
+            return;
+        }
+        match crate::spawn_annotate_stdin(&png) {
+            Ok(()) => {
+                self.toast(ctx, "已进入标注窗");
+                // 编辑是窗口接力：标注窗成功启动后关闭当前贴图，避免两个
+                // 相同内容的窗口同时留在桌面；启动失败则保留贴图不动。
+                self.do_close(ctx);
+            }
+            Err(e) => self.toast(ctx, e),
         }
     }
 
@@ -750,8 +778,9 @@ impl PinApp {
         }
 
         let new_size = self.base * new_zoom;
-        // 窗口 = 图像 + 底部条带
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(new_size + Vec2::new(0.0, BAR_H)));
+        // 窗口 = 图像 + 底部条带；宽度必须继续满足完整工具栏。
+        let window_size = window_size_at(new_size);
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(window_size));
         if let Some(a) = &mut self.zoom_anchor {
             a.at = now;
             let new_min = a.screen - Vec2::new(new_size.x * a.frac.x, new_size.y * a.frac.y);
@@ -774,12 +803,12 @@ impl PinApp {
         use crate::ui::toolbar::{
             action_button, draw_check, draw_close, draw_save, draw_upload, icon_button,
         };
-        // 图标总宽（与 MIN_TOOLBAR_W 的估值同源）：无上传 9 组 ≈300pt、
+        // 图标总宽（与 MIN_TOOLBAR_W 的估值同源）：无上传 10 组 ≈326pt、
         // 有上传再加 26pt。用于整排水平居中。
         let shown = if self.upload_cmd.is_some() {
-            326.0
+            352.0
         } else {
-            300.0
+            326.0
         };
         let pos = Pos2::new(bar.center().x - shown / 2.0, bar.center().y - 12.0);
         let mut action = None;
@@ -838,6 +867,11 @@ impl PinApp {
                     if action_button(ui, true, "放大（键盘 +）", draw_plus) {
                         action = Some(ToolbarAction::ZoomIn);
                     }
+                    // 编辑：交给独立标注窗（保存/复制/贴图回交在这里做）
+                    if action_button(ui, true, "返回编辑：在标注窗打开本贴图（可标注/OCR）", draw_edit)
+                    {
+                        action = Some(ToolbarAction::Edit);
+                    }
                     if action_button(ui, true, "保存为 PNG (Ctrl+S)", draw_save) {
                         action = Some(ToolbarAction::Save);
                     }
@@ -878,6 +912,7 @@ impl PinApp {
             Some(ToolbarAction::ZoomReset) => self.set_zoom(ctx, 1.0),
             Some(ToolbarAction::ZoomIn) => self.step_zoom(ctx, true),
             Some(ToolbarAction::Upload) => self.do_upload(ctx),
+            Some(ToolbarAction::Edit) => self.do_edit(ctx),
             _ => {}
         }
     }
@@ -981,7 +1016,10 @@ impl eframe::App for PinApp {
         // 上传结果轮询（线程完成时 request_repaint 唤醒本循环）
         self.poll_upload(&ctx);
 
-        let response = ui.allocate_rect(full, egui::Sense::click_and_drag());
+        // 图像区响应窗口拖动/双击复制；底部条带不属于本 Response，按钮
+        // 点击不会卷入拖动态（此前整窗 click_and_drag 在 Wayland 拖动一次
+        // 后，stale drag 会把工具栏点击当成继续移动，按钮全部点不了）
+        let response = ui.allocate_rect(image_rect, egui::Sense::click_and_drag());
         if let Some(tex) = &self.texture {
             ui.painter().image(
                 tex.id(),
@@ -1078,11 +1116,15 @@ impl eframe::App for PinApp {
                     if target != d.sent {
                         ctx.send_viewport_cmd(ViewportCommand::OuterPosition(target));
                         d.sent = target;
+                        // 移动可能伴随 WM 的 ConfigureNotify 重置输入形状，
+                        // 强制下一帧按最新 client 几何重发底部条带
+                        self.through_shape = None;
                     }
                 }
             }
             if response.drag_stopped() {
                 self.drag = None;
+                self.through_shape = None;
             }
         }
         if response.double_clicked() {
@@ -1213,7 +1255,35 @@ fn dashed_mirror_axis(p: &egui::Painter, r: Rect, c: Color32, vertical: bool) {
     }
 }
 
-/// 缩小图标：放大镜 + 圆内减号。
+/// 编辑图标：圆角方框内的一支铅笔，作为贴图编辑 Logo。
+fn draw_edit(p: &egui::Painter, r: Rect, c: Color32) {
+    let w = r.width();
+    let at = |fx: f32, fy: f32| Pos2::new(r.min.x + w * fx, r.min.y + w * fy);
+    // 外框扩大到绘图区边缘，内部留出清晰安全区。
+    let frame = r.shrink(0.5);
+    p.rect_stroke(frame, 3.0, Stroke::new(1.0, c), egui::StrokeKind::Inside);
+
+    let pencil_stroke = Stroke::new(2.4, c);
+    let tip = at(0.28, 0.70);
+    let top = at(0.72, 0.30);
+    let dx = top.x - tip.x;
+    let dy = top.y - tip.y;
+    let len = (dx * dx + dy * dy).sqrt().max(1.0);
+    let axis = Vec2::new(dx, dy) / len;
+    let normal = Vec2::new(-axis.y, axis.x);
+    let half = w * 0.105;
+    // 铅笔主体：粗平行线 + 闭合笔尖，明显区别于方框。
+    p.line_segment([tip + normal * half, top + normal * half], pencil_stroke);
+    p.line_segment([tip - normal * half, top - normal * half], pencil_stroke);
+    p.line_segment([tip + normal * half, tip - normal * half], pencil_stroke);
+    p.line_segment([top + normal * half, top - normal * half], pencil_stroke);
+    // 笔尖内的短线与笔帽，强化铅笔轮廓。
+    let lead = tip + axis * (w * 0.12);
+    p.line_segment([tip, lead], pencil_stroke);
+    let cap = top - axis * (w * 0.10);
+    p.line_segment([cap + normal * half, cap - normal * half], pencil_stroke);
+}
+
 fn draw_minus(p: &egui::Painter, r: Rect, c: Color32) {
     draw_glass(p, r, c, false);
 }

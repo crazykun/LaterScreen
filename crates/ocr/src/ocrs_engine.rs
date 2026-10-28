@@ -137,11 +137,11 @@ impl TextRecognizer for OcrsEngine {
             .into_iter()
             .flatten()
             .map(|line| line.to_string())
-            // 单字符行多为误检噪声，上游示例同此过滤
-            .filter(|t| t.trim().chars().count() > 1)
+            .filter(|t| !t.trim().is_empty())
             .map(|text| TextBlock {
                 text,
                 confidence: None,
+                bbox: None,
             })
             .collect();
         Ok(OcrOutput { blocks })

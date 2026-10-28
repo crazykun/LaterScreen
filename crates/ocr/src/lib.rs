@@ -25,12 +25,23 @@ impl std::error::Error for OcrError {}
 
 pub type Result<T> = std::result::Result<T, OcrError>;
 
+/// 相对于 OCR 输入图像左上角的物理像素包围框。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundingBox {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// 一个识别出的文本块。
 #[derive(Debug, Clone)]
 pub struct TextBlock {
     pub text: String,
     /// 置信度 0.0..=1.0；引擎不提供时为 None
     pub confidence: Option<f32>,
+    /// 引擎能提供时保留文字在输入图像中的位置。
+    pub bbox: Option<BoundingBox>,
 }
 
 /// 一次识别的完整输出。
