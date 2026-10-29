@@ -106,8 +106,10 @@ fn candidates() -> Vec<PathBuf> {
 }
 
 /// 从 `fc-list :lang=zh` 的文件列表里挑最合适的：已知中文字体家族优先；
-/// 过重的字重（Black/Bold/Heavy，标注正文观感差）与衬线（Serif）降一档；
-/// 同分取先出现者；无已知家族时任取第一个（列表本身已保证支持中文）。
+/// 过细（Thin/Light/DemiLight，浅色主题下笔画稀释显「发白」，用户多轮反馈）
+/// 与过重（Black/Bold/Heavy，标注正文观感差）都降档，Medium 加一档最稳；
+/// 衬线（Serif）降档；同分取先出现者；无已知家族时任取第一个（列表本身
+/// 已保证支持中文）。
 fn pick_cjk_font(files: &[String]) -> Option<String> {
     const KNOWN: [&str; 7] = [
         "cjk",
@@ -123,8 +125,19 @@ fn pick_cjk_font(files: &[String]) -> Option<String> {
         let mut s = 0;
         if KNOWN.iter().any(|k| l.contains(k)) {
             s += 2;
+            // fc-list 的输出顺序不可控：本机 Thin 排在 Regular 之前，同分时
+            // 「取先出现」会选中极细字重——浅色主题下整窗文字发白的元凶
+            if ["thin", "demilight", "extralight", "light"]
+                .iter()
+                .any(|k| l.contains(k))
+            {
+                s -= 3;
+            }
             if ["black", "bold", "heavy"].iter().any(|k| l.contains(k)) {
                 s -= 1;
+            }
+            if l.contains("medium") {
+                s += 1;
             }
             if l.contains("serif") {
                 s -= 1;
@@ -169,6 +182,38 @@ mod tests {
         assert_eq!(
             pick_cjk_font(&files).as_deref(),
             Some("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc")
+        );
+    }
+
+    #[test]
+    fn rejects_thin_and_prefers_medium() {
+        // 本机真机踩坑：fc-list :lang=zh 把 Thin 排在 Regular 之前，旧评分
+        // 同分取先出现 → 整个应用用极细字重渲染，浅色主题文字发白。
+        // Thin/Light 必须重罚，Medium 加分优先
+        let files = [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Thin.ttc".to_string(),
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc".to_string(),
+        ];
+        assert_eq!(
+            pick_cjk_font(&files).as_deref(),
+            Some("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")
+        );
+        let with_medium = [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc".to_string(),
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Medium.ttc".to_string(),
+        ];
+        assert_eq!(
+            pick_cjk_font(&with_medium).as_deref(),
+            Some("/usr/share/fonts/opentype/noto/NotoSansCJK-Medium.ttc")
+        );
+        let lights = [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Light.ttc".to_string(),
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-DemiLight.ttc".to_string(),
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc".to_string(),
+        ];
+        assert_eq!(
+            pick_cjk_font(&lights).as_deref(),
+            Some("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")
         );
     }
 

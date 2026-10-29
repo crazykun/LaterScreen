@@ -253,7 +253,20 @@ pub(crate) fn window_titlebar(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::
     crate::drag::start_drag(ctx, &drag);
 
     // 按钮列（右缘贴边，无间距）：min / max / close。直接在条矩形上
-    // interact，不走布局——后注册者优先命中，天然压住下方拖动区
+    // interact，不走布局——后注册者优先命中，天然压住下方拖动区。
+    // 字形与悬停几何与 window_chrome 同款（统一视觉盒），全应用标题栏一致
+    let hover_fill = |p: &egui::Painter, resp: &egui::Response, fill: Color32| {
+        if resp.hovered() {
+            p.rect_filled(
+                Rect::from_center_size(
+                    resp.rect.center(),
+                    Vec2::new(TITLEBAR_BTN_W - 4.0, TITLEBAR_H - 8.0),
+                ),
+                6.0,
+                fill,
+            );
+        }
+    };
     let btn = |ui: &mut egui::Ui, i: usize| {
         ui.interact(
             Rect::from_min_size(
@@ -265,44 +278,32 @@ pub(crate) fn window_titlebar(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::
         )
     };
 
-    // 最小化：10px 横线，略低于视觉中心
+    // 最小化：12px 横线，视觉中心略降 2px
     let resp = btn(ui, 0);
-    if resp.hovered() {
-        ui.painter().rect_filled(
-            resp.rect.shrink2(Vec2::new(1.0, 3.0)),
-            6.0,
-            ui.visuals().widgets.hovered.bg_fill,
-        );
-    }
-    let cy = resp.rect.center().y + 4.0;
-    let cx = resp.rect.center().x;
-    ui.painter().line_segment(
+    let p = ui.painter().clone();
+    hover_fill(&p, &resp, ui.visuals().widgets.hovered.bg_fill);
+    let (cx, cy) = (resp.rect.center().x, resp.rect.center().y + 2.0);
+    p.line_segment(
         [Pos2::new(cx - 6.0, cy), Pos2::new(cx + 6.0, cy)],
-        Stroke::new(1.8, fg(ui, &resp)),
+        Stroke::new(1.5, fg(ui, &resp)),
     );
     if resp.on_hover_text("最小化").clicked() {
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
     }
 
-    // 最大化 / 还原
+    // 最大化 / 还原：10px 方框
     let resp = btn(ui, 1);
+    hover_fill(&p, &resp, ui.visuals().widgets.hovered.bg_fill);
     let maximized = ctx.input(|i| i.viewport().maximized) == Some(true);
-    if resp.hovered() {
-        ui.painter().rect_filled(
-            resp.rect.shrink2(Vec2::new(1.0, 3.0)),
-            6.0,
-            ui.visuals().widgets.hovered.bg_fill,
-        );
-    }
-    let r = resp.rect.shrink(11.0);
-    ui.painter().rect_stroke(
+    let r = Rect::from_center_size(resp.rect.center(), Vec2::splat(10.0));
+    p.rect_stroke(
         r,
         0.0,
         Stroke::new(1.5, fg(ui, &resp)),
         egui::StrokeKind::Inside,
     );
     if maximized {
-        ui.painter().rect_stroke(
+        p.rect_stroke(
             r.translate(Vec2::new(2.0, -2.0)),
             0.0,
             Stroke::new(1.5, fg(ui, &resp)),
@@ -318,19 +319,17 @@ pub(crate) fn window_titlebar(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::
 
     // 关闭 = 取消会话：悬停品牌红，与工具栏取消按钮同款视觉
     let resp = btn(ui, 2);
-    if resp.hovered() {
-        ui.painter().rect_filled(
-            resp.rect.shrink2(Vec2::new(1.0, 3.0)),
-            6.0,
-            ACCENT_FILL.gamma_multiply(0.18),
-        );
-    }
+    hover_fill(&p, &resp, ACCENT_FILL.gamma_multiply(0.18));
     let color = if resp.hovered() {
         ACCENT_FILL
     } else {
         fg(ui, &resp)
     };
-    draw_close(ui.painter(), resp.rect.shrink(9.0), color);
+    draw_close(
+        &p,
+        Rect::from_center_size(resp.rect.center(), Vec2::splat(10.0)),
+        color,
+    );
     if resp.on_hover_text("取消并关闭 (Esc)").clicked() {
         app.request_close(ctx);
     }
@@ -343,6 +342,129 @@ fn fg(ui: &egui::Ui, resp: &egui::Response) -> Color32 {
     } else {
         ui.style().interact(resp).fg_stroke.color
     }
+}
+
+/// 通用自绘窗口标题栏（Wayland 无装饰窗口用）：winit 在 Wayland 走 libdecor
+/// 兜底样式，灰底方块按钮与主题脱节、浅色窗口上尤其突兀。这里以主题令牌
+/// 自绘（标题左、最小化/最大化/关闭右），拖动走合成器 StartDrag，与标注窗
+/// 标题栏同一套视觉。返回 true 表示用户点了关闭——关闭语义由调用方定
+/// （设置窗走未保存确认，结果窗口撤面板）。
+pub(crate) fn window_chrome(ui: &mut egui::Ui, id_seed: &str, title: &str) -> bool {
+    let ctx = ui.ctx().clone();
+    let mut close = false;
+    egui::Panel::top(egui::Id::new((id_seed, "chrome")))
+        .exact_size(TITLEBAR_H)
+        .frame(egui::Frame::NONE)
+        .show(ui, |ui| {
+            let bar = ui.max_rect();
+            let p = ui.painter().clone();
+            p.rect_filled(bar, 0.0, ui.visuals().panel_fill);
+            p.line_segment(
+                [bar.left_bottom(), bar.right_bottom()],
+                Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+            );
+
+            // 拖动区：按钮列之外的全部宽度
+            let drag_rect = Rect::from_min_size(
+                bar.left_top(),
+                Vec2::new((bar.width() - TITLEBAR_BTN_W * 3.0).max(0.0), TITLEBAR_H),
+            );
+            let drag = ui.interact(
+                drag_rect,
+                egui::Id::new((id_seed, "chrome-drag")),
+                Sense::click_and_drag(),
+            );
+            if drag.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            }
+            p.text(
+                Pos2::new(bar.left() + 12.0, bar.center().y),
+                egui::Align2::LEFT_CENTER,
+                title,
+                egui::TextStyle::Body.resolve(ui.style()),
+                ui.visuals().text_color(),
+            );
+            // 统一入口：内含 mutter 吞 release 的补发兜底
+            crate::drag::start_drag(ui.ctx(), &drag);
+
+            // 按钮列（右缘贴边）：min / max / close，后注册优先命中拖动区。
+            // 三个字形统一内接 10~12px 视觉盒、悬停高亮为居中圆角块——
+            // 不随按钮矩形拉伸，三键才协调
+            let hover_fill =
+                |p: &egui::Painter, resp: &egui::Response, fill: Color32, _ui: &egui::Ui| {
+                    if resp.hovered() {
+                        p.rect_filled(
+                            Rect::from_center_size(
+                                resp.rect.center(),
+                                Vec2::new(TITLEBAR_BTN_W - 4.0, TITLEBAR_H - 8.0),
+                            ),
+                            6.0,
+                            fill,
+                        );
+                    }
+                };
+            let btn = |ui: &mut egui::Ui, i: usize| {
+                ui.interact(
+                    Rect::from_min_size(
+                        Pos2::new(bar.right() - TITLEBAR_BTN_W * (3.0 - i as f32), bar.top()),
+                        Vec2::new(TITLEBAR_BTN_W, TITLEBAR_H),
+                    ),
+                    egui::Id::new((id_seed, "chrome-btn", i)),
+                    Sense::click(),
+                )
+            };
+
+            // 最小化：12px 横线，视觉中心略降 2px
+            let resp = btn(ui, 0);
+            hover_fill(&p, &resp, ui.visuals().widgets.hovered.bg_fill, ui);
+            let (cx, cy) = (resp.rect.center().x, resp.rect.center().y + 2.0);
+            p.line_segment(
+                [Pos2::new(cx - 6.0, cy), Pos2::new(cx + 6.0, cy)],
+                Stroke::new(1.5, fg(ui, &resp)),
+            );
+            if resp.on_hover_text("最小化").clicked() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
+
+            // 最大化 / 还原：10px 方框，与横线/X 同一视觉盒
+            let resp = btn(ui, 1);
+            hover_fill(&p, &resp, ui.visuals().widgets.hovered.bg_fill, ui);
+            let maximized = ctx.input(|i| i.viewport().maximized) == Some(true);
+            let r = Rect::from_center_size(resp.rect.center(), Vec2::splat(10.0));
+            p.rect_stroke(r, 0.0, Stroke::new(1.5, fg(ui, &resp)), StrokeKind::Inside);
+            if maximized {
+                p.rect_stroke(
+                    r.translate(Vec2::new(2.0, -2.0)),
+                    0.0,
+                    Stroke::new(1.5, fg(ui, &resp)),
+                    StrokeKind::Inside,
+                );
+            }
+            if resp
+                .on_hover_text(if maximized { "还原" } else { "最大化" })
+                .clicked()
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+            }
+
+            // 关闭：10px X（与方框同盒），悬停品牌红
+            let resp = btn(ui, 2);
+            hover_fill(&p, &resp, ACCENT_FILL.gamma_multiply(0.18), ui);
+            let color = if resp.hovered() {
+                ACCENT_FILL
+            } else {
+                fg(ui, &resp)
+            };
+            draw_close(
+                &p,
+                Rect::from_center_size(resp.rect.center(), Vec2::splat(10.0)),
+                color,
+            );
+            if resp.on_hover_text("关闭").clicked() {
+                close = true;
+            }
+        });
+    close
 }
 
 /// 排列编辑控件与交付动作。宽屏单行；窄屏两行——编辑控件自然折行，

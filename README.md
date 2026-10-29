@@ -32,7 +32,7 @@
 | 亮点 | 说明 |
 |---|---|
 | **一个文件，拷走即用** | 静态链接，当前约 14MB，不依赖任何系统库 |
-| **三平台同体验** | Linux（x64 / arm64 / armv7 / x86）、Windows 10+、macOS |
+| **三平台同体验** | Linux（X11 / **Wayland**，x64 / arm64 / armv7 / x86）、Windows 10+、macOS |
 | **GUI + CLI 双形态** | 有完整标注界面，每个功能也能纯命令行调用，可写进脚本 |
 | **不后台联网** | 只有你点「检查更新」时才发一次 HTTPS 请求（纯 Rust TLS） |
 
@@ -194,11 +194,24 @@ command = ["/usr/local/bin/uploader", "--token", "xxx"]
 
 约定只有三条：**产物路径经 stdin 传入**（不经 shell、不进 argv，无注入面）、**stdout 第一个非空行视为 URL**（自动复制并记入历史）、**非零退出把 stderr 提示给用户**。命令挂死 30 秒自动终止。
 
+## 🪟 Wayland 支持
+
+日常截图标注的主力功能在 Wayland 下开箱即用（KDE / GNOME / niri / sway 等主流合成器真机验证）：
+
+| 能力 | 状态 |
+|---|---|
+| 截图 / 标注 / 取色 / 贴图 / 历史 | ✅ 交互式框选优先合成器原生 portal（KDE / GNOME），niri / sway 等无交互 portal 的合成器自动退 `grim`+`slurp`（需安装） |
+| 剪贴板 | ✅ 双侧写入（X11 与 Wayland 应用都能粘出内容，需 `wl-clipboard`） |
+| 全局热键 | ⚠️ 需合成器实现 GlobalShortcuts（KDE / GNOME 支持）；无实现时降级为托盘菜单，可用桌面快捷方式绑 `lscreen gui` 代偿 |
+| 录屏 / 滚动截图 / 区域录制 | ❌ 仍需 X11 会话（启动时明确提示，不会静默失败） |
+
+> 标注窗与贴图窗在 Wayland 下使用自绘标题栏与合成器交互式拖动，跟随浅色 / 夜间主题。
+
 ## 🖥️ 运行环境
 
 | 平台 | 说明 |
 |---|---|
-| **Linux** | X11 全功能。Wayland：截图 / 标注 / 取色 / 贴图 / 历史可用——交互式框选优先合成器原生 portal（KDE / GNOME），niri / sway 等无交互 portal 的合成器自动退 `grim`+`slurp`（需安装），剪贴板双侧写入（Wayland 原生应用需 `wl-clipboard`）；**录屏 / 滚动截图 / 区域录制仍需 X11**，全局热键依赖合成器 GlobalShortcuts（无实现时降级为托盘菜单，可用桌面快捷键绑 `lscreen gui` 代偿）。OCR 优先系统 tesseract（中文需 `tesseract-ocr-chi-sim`），并以内置纯 Rust ocrs 兜底（仅拉丁字母，首次自动下载模型）。录屏音频（仅 MP4）运行时调系统工具：需 `ffmpeg` 与 `arecord` 或 `parec` 之一，缺失时**录制开始前**就报错，不会录完才发现没声音 |
+| **Linux** | X11 全功能；Wayland 支持范围见上节。OCR 优先系统 tesseract（中文需 `tesseract-ocr-chi-sim`），并以内置纯 Rust ocrs 兜底（仅拉丁字母，首次自动下载模型）。录屏音频（仅 MP4）运行时调系统工具：需 `ffmpeg` 与 `arecord` 或 `parec` 之一，缺失时**录制开始前**就报错，不会录完才发现没声音 |
 | **Windows 10+** | 走系统 API，无外部依赖。OCR 用 WinRT 系统引擎，支持中文。录屏音频走 WASAPI 采集 + Media Foundation AAC，麦克风 / 系统声 / 混合均可 |
 | **macOS** | 走系统 API，无外部依赖。OCR 用 Vision，支持中文。录屏音频走 CoreAudio（麦克风）+ ScreenCaptureKit（系统声，需 macOS 13+ 与「屏幕录制」权限）+ AudioToolbox AAC；因引入 ScreenCaptureKit，产物最低系统要求 macOS 12.3 |
 

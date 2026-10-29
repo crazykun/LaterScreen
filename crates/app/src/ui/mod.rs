@@ -721,7 +721,7 @@ impl SnipApp {
             return;
         }
         let wants_keyboard = ctx.egui_wants_keyboard_input();
-        let (undo, redo_y, redo_sz, save, copy, pin, del, enter, esc, rgb, hex, cmyk) = ctx
+        let (undo, redo_y, redo_sz, save, copy, pin, del, enter, esc, rgb, hex, cmyk, space) = ctx
             .input_mut(|i| {
                 (
                     i.consume_key(Modifiers::COMMAND, Key::Z),
@@ -744,6 +744,8 @@ impl SnipApp {
                     i.consume_key(Modifiers::COMMAND, Key::R),
                     i.consume_key(Modifiers::COMMAND, Key::H),
                     i.consume_key(Modifiers::COMMAND, Key::K),
+                    // 空格 = 复制交付，与 Enter 同语义（贴图同款习惯）
+                    !wants_keyboard && i.consume_key(Modifiers::NONE, Key::Space),
                 )
             });
 
@@ -767,9 +769,9 @@ impl SnipApp {
         }
         if matches!(self.stage, Stage::Editing) {
             if self.mode == Mode::Record {
-                // 录屏/滚动截图的选区调整阶段：Enter/复制语义 = 确认交付，
+                // 录屏/滚动截图的选区调整阶段：Enter/空格/复制语义 = 确认交付，
                 // 保存/贴图/撤销等标注动作全部不适用（精简工具栏也不展示）
-                if copy || enter {
+                if copy || enter || space {
                     self.deliver_region(ctx);
                 }
             } else {
@@ -779,7 +781,7 @@ impl SnipApp {
                 if pin {
                     self.pin_and_exit(ctx);
                 }
-                if copy || enter {
+                if copy || enter || space {
                     self.copy_and_exit(ctx);
                 }
                 if del {
@@ -789,7 +791,7 @@ impl SnipApp {
                     }
                 }
             }
-        } else if matches!(self.stage, Stage::Selecting) && (enter || copy) {
+        } else if matches!(self.stage, Stage::Selecting) && (enter || copy || space) {
             // 初始选区已就位：Enter/Ctrl+C 一步出图——Snip 复制退出，Record 交付区域
             if let Some(sel) = self.sel_window.clone() {
                 self.region = sel.rect;
@@ -995,17 +997,67 @@ impl SnipApp {
             let viewport_id = egui::ViewportId(egui::Id::new("result-window"));
             let builder = egui::ViewportBuilder::default()
                 .with_title(shared.lock().unwrap().title.clone())
+                // Wayland 关掉 libdecor 兜底装饰，用主题化自绘标题栏
+                .with_decorations(!lscreen_capture::is_wayland())
                 .with_inner_size(egui::vec2(460.0, 340.0))
                 .with_min_inner_size(egui::vec2(260.0, 160.0));
             ctx.show_viewport_deferred(viewport_id, builder, move |ui, _class| {
                 let mut st = shared.lock().unwrap();
-                // 系统 ✕ / Esc → 通知宿主撤面板，viewport 不再被展示即关闭
+                // 系统 ✕ / Esc → 通知宿主撤面板，viewport 不再被展示即关闭；
+                // 同时直接发 Close：延迟 viewport 靠宿主重绘兜底会在宿主空闲时
+                // 「点了 ✕ 迟迟不关」，必须当场结束自己
                 if ui.input(|i| i.viewport().close_requested())
                     || ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
                 {
                     st.closed = true;
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                     return;
                 }
+                // 自绘标题栏（仅 Wayland）：✕ = 关闭结果窗口
+                if lscreen_capture::is_wayland() {
+                    let title = st.title.clone();
+                    if crate::ui::toolbar::window_chrome(ui, "ocr-result", &title) {
+                        st.closed = true;
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        return;
+                    }
+                }
+                // 复制按钮放底部面板：ScrollArea 撑满剩余高度会把跟在后面的
+                // 按钮挤出窗口外（用户反馈「复制按钮没了」），面板保留空间
+                egui::Panel::bottom(egui::Id::new("result-copy-bar"))
+                    .exact_size(44.0)
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| {
+                        let copied = st
+                            .copied_at
+                            .is_some_and(|t| t.elapsed().as_secs_f32() < 2.0);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add_space(10.0);
+                            if copied {
+                                ui.small("已复制");
+                            }
+                            let label = if st.items.len() > 1 {
+                                "复制全部"
+                            } else {
+                                "复制内容"
+                            };
+                            if ui.button(label).clicked() {
+                                let all = st.items.join("\n");
+                                match export::copy_text_to_clipboard(&all) {
+                                    Ok(()) => {
+                                        st.copied_at = Some(std::time::Instant::now());
+                                        ui.ctx().request_repaint_after(
+                                            std::time::Duration::from_secs(2),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        st.copied_at = None;
+                                        ui.small(format!("复制失败: {e}"));
+                                    }
+                                }
+                            }
+                        });
+                    });
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -1016,34 +1068,6 @@ impl SnipApp {
                             ui.label(egui::RichText::new(truncate(content, 4000)).monospace());
                         }
                     });
-                ui.add_space(6.0);
-                let copied = st
-                    .copied_at
-                    .is_some_and(|t| t.elapsed().as_secs_f32() < 2.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if copied {
-                        ui.small("已复制");
-                    }
-                    let label = if st.items.len() > 1 {
-                        "复制全部"
-                    } else {
-                        "复制内容"
-                    };
-                    if ui.button(label).clicked() {
-                        let all = st.items.join("\n");
-                        match export::copy_text_to_clipboard(&all) {
-                            Ok(()) => {
-                                st.copied_at = Some(std::time::Instant::now());
-                                ui.ctx()
-                                    .request_repaint_after(std::time::Duration::from_secs(2));
-                            }
-                            Err(e) => {
-                                st.copied_at = None;
-                                ui.small(format!("复制失败: {e}"));
-                            }
-                        }
-                    }
-                });
             });
             return;
         }

@@ -32,6 +32,9 @@ pub const FIELD_H: f32 = 32.0;
 // ---------------------------------------------------------------- 暗色令牌
 
 const DARK_BG: egui::Color32 = egui::Color32::from_rgb(0x14, 0x14, 0x18);
+/// 卡片填充：比窗口底「抬起一层」，否则卡片与窗口同色只剩 1px 描边，
+/// 夜间下边框线形同虚设（用户反馈「少了一个边框线」）
+const DARK_CARD: egui::Color32 = egui::Color32::from_rgb(0x1b, 0x1b, 0x22);
 const DARK_STROKE: egui::Color32 = egui::Color32::from_rgb(0x3d, 0x3d, 0x4c);
 const DARK_TEXT: egui::Color32 = egui::Color32::from_rgb(0xec, 0xec, 0xf1);
 const DARK_MUTED: egui::Color32 = egui::Color32::from_rgb(0x9a, 0x9a, 0xa5);
@@ -42,9 +45,11 @@ const DARK_FOOTER: egui::Color32 = egui::Color32::from_rgb(0x11, 0x11, 0x15);
 // ---------------------------------------------------------------- 浅色令牌
 
 const LIGHT_BG: egui::Color32 = egui::Color32::from_rgb(0xf4, 0xf4, 0xf7);
+/// 卡片填充（浅色）：纯白卡片浮在浅灰窗口上，与描边一起构成卡片轮廓
+const LIGHT_CARD: egui::Color32 = egui::Color32::from_rgb(0xff, 0xff, 0xff);
 const LIGHT_STROKE: egui::Color32 = egui::Color32::from_rgb(0xdc, 0xdc, 0xe3);
 const LIGHT_TEXT: egui::Color32 = egui::Color32::from_rgb(0x24, 0x24, 0x2b);
-const LIGHT_MUTED: egui::Color32 = egui::Color32::from_rgb(0x6b, 0x6b, 0x76);
+const LIGHT_MUTED: egui::Color32 = egui::Color32::from_rgb(0x55, 0x55, 0x5f);
 const LIGHT_FIELD: egui::Color32 = egui::Color32::from_rgb(0xeb, 0xeb, 0xf0);
 const LIGHT_FOOTER: egui::Color32 = egui::Color32::from_rgb(0xea, 0xea, 0xef);
 
@@ -127,6 +132,16 @@ pub fn footer_fill(v: &egui::Visuals) -> egui::Color32 {
     }
 }
 
+/// 卡片填充：比窗口底抬起一层 + 描边构成清晰卡片轮廓（浅色 = 白卡片，
+/// 夜间 = 比窗口底亮一档）。卡片填充若与窗口同色，1px 描边在夜间形同虚设。
+pub fn card_fill(v: &egui::Visuals) -> egui::Color32 {
+    if v.dark_mode {
+        DARK_CARD
+    } else {
+        LIGHT_CARD
+    }
+}
+
 /// 安装/切换主题样式。幂等：两套样式都写入，`ThemePreference` 决定生效者。
 pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
     for (theme, dark) in [(egui::Theme::Dark, true), (egui::Theme::Light, false)] {
@@ -196,6 +211,21 @@ pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
         v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, stroke);
         style.spacing.button_padding = egui::vec2(12.0, 6.0);
         style.spacing.interact_size.y = FIELD_H;
+        // 字号：egui 默认正文 12.5px 下中文笔画被灰度 AA 稀释，观感「细、发白」
+        // （用户多轮反馈）。字号是比颜色更有效的杠杆——提 1px 笔画实厚显著增加。
+        // 小字同步提档，保持层级比例
+        for name in [
+            egui::TextStyle::Body,
+            egui::TextStyle::Button,
+            egui::TextStyle::Monospace,
+        ] {
+            style
+                .text_styles
+                .insert(name, egui::FontId::proportional(13.5));
+        }
+        style
+            .text_styles
+            .insert(egui::TextStyle::Small, egui::FontId::proportional(11.5));
         ctx.set_style_of(theme, std::sync::Arc::new(style));
     }
     ctx.set_theme(match mode {

@@ -890,7 +890,7 @@ impl PinApp {
                         action = Some(ToolbarAction::Close);
                     }
                     // 最常用动作放最右：对号 = 复制并关闭（仅复制走双击/Ctrl+C）
-                    if action_button(ui, true, "复制并关闭 (双击/Ctrl+C 仅复制)", draw_check) {
+                    if action_button(ui, true, "复制并关闭 (空格 同款；Ctrl+C/双击 仅复制)", draw_check) {
                         action = Some(ToolbarAction::CopyAndClose);
                     }
                 });
@@ -986,10 +986,13 @@ impl eframe::App for PinApp {
                 })
             })
         };
-        let (zin, zout, zreset) = (
+        let (zin, zout, zreset, space_copy) = (
             key_hit(Key::Plus) || key_hit(Key::Equals),
             key_hit(Key::Minus),
             key_hit(Key::Num0),
+            // 空格 = 复制（与双击/Ctrl+C 同语义，不关窗）：贴图最常用的
+            // 单手动作，走裸事件扫描与缩放键同款（不区分修饰符）
+            key_hit(Key::Space),
         );
         // 确认窗显示时 Esc/Delete 只取消本次开启；穿透中则先退出穿透
         // （窗口若仍持键盘焦点；区域穿透下点条带即拿回焦点，整窗穿透
@@ -1137,6 +1140,12 @@ impl eframe::App for PinApp {
 
         if copy_k {
             self.do_copy(&ctx);
+        }
+        // 空格 = 复制并关闭：贴图一键交付（与绿色对号同语义）；
+        // Ctrl+C/双击保持仅复制，不关窗
+        if space_copy {
+            self.do_copy(&ctx);
+            self.do_close(&ctx);
         }
         if save_k {
             self.do_save(&ctx);

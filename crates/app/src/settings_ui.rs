@@ -45,7 +45,7 @@ fn accent_border(ui: &egui::Ui) -> egui::Color32 {
 /// 分区卡片：标题左侧一条强调色小竖条 + 圆角深色面板。
 fn card<R>(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::Frame::NONE
-        .fill(ui.visuals().panel_fill)
+        .fill(theme::card_fill(ui.visuals()))
         .stroke(egui::Stroke::new(
             1.0,
             ui.visuals().widgets.noninteractive.bg_stroke.color,
@@ -489,6 +489,12 @@ impl eframe::App for SettingsApp {
         let ctx = ui.ctx().clone();
         // 热键捕获必须最先处理：吃掉所有按键事件（含 Esc，防止录制中关窗）
         self.capture_hotkey(&ctx);
+        // Wayland 自绘标题栏：✕ 走与底部「关闭」相同的未保存确认流程
+        if lscreen_capture::is_wayland()
+            && crate::ui::toolbar::window_chrome(ui, "settings", "LaterScreen 设置")
+        {
+            self.request_close(&ctx);
+        }
         // 系统标题栏关闭会在本帧标记 close_requested；有修改时必须立即取消，
         // 等用户在确认框作出选择；无修改时不发 CancelClose，让 eframe 正常退出。
         if ctx.input(|i| i.viewport().close_requested()) && self.unsaved.is_dirty(&self.cfg) {
@@ -766,7 +772,9 @@ impl SettingsApp {
                     .on_hover_text("托盘「历史」窗口保留的最近截图/贴图/录屏条数（1-50）");
                     ui.end_row();
                 });
-            ui.small(
+            // 模板预览提示：不用 small()——小字号在灰度 AA 下笔画稀释严重，
+            // 正文字号 + 弱色足够区分层级（用户反馈「发白」的重灾区）
+            ui.label(
                 egui::RichText::new(format!(
                     "示例  {}.png",
                     config::render_template(&self.cfg.filename_template, (2026, 8, 19, 10, 15, 20))
@@ -1073,9 +1081,11 @@ impl SettingsApp {
     }
 }
 
-/// Grid 左列的弱色标签。
-fn row_label(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text).color(muted(ui)));
+/// Grid 左列的标签。表单标签是主 UI 文本而非次要信息：小号中文在 Wayland
+/// 灰度抗锯齿下笔画被稀释（nominal 弱色实测核心只剩 #909098），再用弱色
+/// 只会更显「发白」（用户反馈），必须用主文字色。
+fn row_label(ui: &mut egui::Ui, label: &str) {
+    ui.label(egui::RichText::new(label).color(text(ui)));
 }
 
 /// 通用加高输入框：高度取 `theme::FIELD_H`，与下拉框/数字框（interact_size
