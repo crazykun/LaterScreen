@@ -6,6 +6,13 @@ on:
     tags: ["**"]
   workflow_dispatch:
 
+# 一次 push 同时含分支+tag 会触发两个并行实例：各自 clone 后先后 --mirror
+# 推送，后跑的拿着过期引用被远端拒绝（v0.13.0 实测）。并发组串行化 +
+# --force 幂等覆盖（GitHub 是唯一事实源，镜像永远以它为准）
+concurrency:
+  group: mirror-to-cnb
+  cancel-in-progress: true
+
 jobs:
   mirror:
     runs-on: ubuntu-latest
@@ -18,4 +25,4 @@ jobs:
           set -e
           git clone --bare "https://github.com/${GITHUB_REPOSITORY}.git" repo.git
           cd repo.git
-          git push --mirror "https://${CNB_USER}:${CNB_TOKEN}@cnb.cool/ailater/LaterScreen.git"
+          git push --mirror --force "https://${CNB_USER}:${CNB_TOKEN}@cnb.cool/ailater/LaterScreen.git"
