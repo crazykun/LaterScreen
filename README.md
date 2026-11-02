@@ -6,7 +6,7 @@
 [![Release](https://img.shields.io/github/v/release/crazykun/LaterScreen)](https://github.com/crazykun/LaterScreen/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**跨平台截图标注工具 · Rust 编写 · 单文件 ≤ 20MB · 无动态库依赖**
+**跨平台截图标注工具 · Rust 编写 · 单文件 ≤ 30MB · 无动态库依赖**
 
 截图 · 标注 · 取色 · 二维码 · OCR · GIF/MP4 录屏 · 贴图 · 滚动截图
 

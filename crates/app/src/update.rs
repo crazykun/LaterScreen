@@ -12,7 +12,7 @@
 //! 硬约束是「单文件、无动态库依赖」。Linux 侧任何走系统 TLS 的方案都会
 //! 拖进 OpenSSL（动态库），故用纯 Rust 的 rustls；`ureq` 是同步 API，
 //! 比 async runtime 轻（无需 tokio/async-io 全家桶）。代价是几百 KB 体积，
-//! 在 20MB 预算内（当前产物约 13MB）。
+//! 在 30MB 预算内（当前产物约 13MB）。
 //!
 //! ## 失败语义
 //!

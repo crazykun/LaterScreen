@@ -38,7 +38,7 @@ cargo clippy --workspace --all-targets -- -D warnings
   两者都设成品牌红就是「红底红字 = 选中文字看不见」。改色后跑
   `cargo test -p lscreen theme`（对比度回归单测，含 WCAG 相对亮度实现）。
 - **撤销/重做是全量快照**（`Vec<Vec<Element>>`），非命令模式；图片本体不进快照。
-- **体积硬约束**：发布产物 ≤ 20MB、单文件、无动态库依赖。workspace release profile 已做 `opt-level="z"` + fat LTO + strip + `panic="abort"`（无 unwind，勿依赖 catch_unwind）。新增依赖前先评估体积/链接影响。
+- **体积预算**：发布产物 ≤ 30MB（2026-11 自 20MB 上调，为中文本地 OCR 引擎让出余量）、单文件、无动态库依赖。**上调预算必须单独提交并在提交信息与 PLAN 历程写明用途与增量，禁止随功能顺手涨**。不可妥协的是「单文件 + 无动态库」，体积数字只是其代理指标。workspace release profile 已做 `opt-level="z"` + fat LTO + strip + `panic="abort"`（无 unwind，勿依赖 catch_unwind）。新增依赖前先评估体积/链接影响。
 - 字体运行时从系统加载（`app/src/font.rs`，fc-match/平台字体目录），不捆绑字体文件。
 - egui/eframe 锁 0.35，勿随意升级（上游 API 变动快：0.35 已无 TopBottomPanel，面板用 Panel/手动分域；eframe::App 的入口方法是 `fn ui(&mut self, ui, frame)`）。
 - **托盘（M8）**：Linux ksni（纯 Rust SNI/D-Bus 直连，blocking+async-io 特性）；Win/mac tray-icon + winit 事件泵（winit 版本必须与 eframe 依赖一致）。**zbus 钉 =5.18.0**（5.19 上游打包缺陷自身编译失败），勿升。托盘动作全部 spawn 独立子进程（注意子命令名不能省——裸启动会递归驻留托盘）。

@@ -9,7 +9,7 @@
 # LNK2038：cc crate 读 CARGO_CFG_TARGET_FEATURE，见到 crt-static 会自动
 # 把 /MD 换成 /MT，与 Rust 侧一致。
 #
-# 代价：exe 体积增大约 1-2MB（预算 20MB 内），且 CRT 安全更新不再随系统
+# 代价：exe 体积增大约 1-2MB（预算 30MB 内），且 CRT 安全更新不再随系统
 # 走——对一个本地截图工具可接受，换来的是「下载即能跑」。
 
 [target.x86_64-pc-windows-msvc]
