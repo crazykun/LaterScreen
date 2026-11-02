@@ -224,6 +224,38 @@ LSCREEN_TEST_AUDIO=1 LSCREEN_TEST_AUDIO_KEEP=1 \
 
 ---
 
+## 本地 PP-OCR（M19，三平台）
+
+M19 的普通测试只跑纯算法、选择策略、下载状态机与本地 HTTP fixture，不访问公网、不下载模型、不触碰真实用户缓存。真实模型测试显式开启，并把模型放在独立测试目录。全工作区旧测试仍可能探测本机 tesseract 或手动更新接口，不能把 M19 的隔离保证泛化到所有测试。
+
+```bash
+# 事先准备三个固定模型文件（来源与 SHA-256 见 OCR_MODELS.md）
+# 指定目录只读，不自动下载；缺模型/字体时显式失败。
+export PATH="$HOME/.cargo/bin:$PATH"
+LSCREEN_TEST_PPOCR=1 \
+LSCREEN_PPOCR_TEST_MODELS=/path/to/test-models \
+  cargo test -p lscreen-ocr --test ppocr_e2e -- --ignored --nocapture
+# 接受 LSCREEN_TEST_E2E=1；可加 LSCREEN_TEST_FONT=/path/to/cjk-font.ttf
+# 可选 LSCREEN_PPOCR_FIXTURE_DIR=/path/to/fixtures 导出小字号深浅/彩色测试图。
+
+# 显式测试真实 HTTPS 下载：使用独立临时目录，完成后清理，不修改用户缓存。
+LSCREEN_TEST_MODEL_DOWNLOAD=1 \
+  cargo test -p lscreen-ocr --lib real_model_download_smoke_uses_only_temporary_cache -- --ignored --nocapture
+```
+
+检查：中英文多行与独立两栏不错误合并、透明底文字、白色/透明空图无虚假结果、超过 40 字符的长行保留首中尾、贴边文本 bbox 在原图内，以及实际约 22–24px 字高的深浅底/彩色文字。耗时打印到 stderr，首次调用包含模型完整性校验与加载，不以单次速度作为平台性能承诺。
+
+设置面板人工验收（用独立测试配置/缓存，不删除实际用户模型）：
+
+1. `lscreen config` → OCR：只列当前平台可用引擎；无配置默认为自动。切换未保存触发 dirty，放弃恢复，保存后下次 CLI/GUI 识别使用新配置。
+2. 在空缓存中自动 OCR 不下载 PP-OCR；点击「下载 PP-OCR 模型」后显示汇总进度，界面仍响应。完成后自动模式优先；本地刷新不联网。
+3. 离线/目录不可写时显示错误并允许重试；中断下载不将 `.part` 当成完整模型。同尺寸坏文件在加载时明确校验失败，「校验 / 修复」可重新下载。
+4. 显式选择 ppocr 的首次识别允许下载，失败不得静默切回其他引擎；有效显式 `LSCREEN_OCR_ENGINE` 优先且在设置中提示。
+5. 浅色/深色下控件可读，窄窗自动换行，OCR 结果仍只展示文本与统一复制按钮。
+6. 以真实截图覆盖小号中文、深色主题与彩色文字；Win/mac 真机另行执行相同模型测试，不能用 Linux 成绩代替。
+
+---
+
 ## 验证记录规则
 
 1. 脚本项失败：贴完整 panic 输出开 issue，标注系统版本/设备（如 Win11

@@ -151,6 +151,11 @@ pub struct SettingsApp {
     hotkey_spill: String,
     /// 更新检测状态机（手动触发，见 `update` 模块）
     update: crate::update::UpdateCheck,
+    /// OCR 模型探测/下载独立于可保存配置，不参与 dirty 比较。
+    ocr_models: crate::ocr_models::OcrModels,
+    ocr_models_dir: Option<std::path::PathBuf>,
+    /// 只读启动环境，不在设置窗口修改全局环境变量。
+    ocr_engine_env: Option<String>,
 }
 
 impl SettingsApp {
@@ -168,6 +173,8 @@ impl SettingsApp {
                 crate::font::setup_egui_fonts(&cc.egui_ctx, bytes);
             }
         }
+        let mut ocr_models = crate::ocr_models::OcrModels::default();
+        ocr_models.check(&cc.egui_ctx);
         Self {
             cfg,
             unsaved,
@@ -176,6 +183,10 @@ impl SettingsApp {
             record_hint: None,
             hotkey_spill: String::new(),
             update: crate::update::UpdateCheck::default(),
+            ocr_models,
+            ocr_models_dir: lscreen_ocr::paddle::models_dir(),
+            ocr_engine_env: std::env::var_os("LSCREEN_OCR_ENGINE")
+                .map(|value| value.to_string_lossy().into_owned()),
         }
     }
 
@@ -487,6 +498,7 @@ impl eframe::App for SettingsApp {
     /// 绘制配置面板并统一处理保存快捷键和三种关闭入口的未保存保护。
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.ocr_models.poll(&ctx);
         // 热键捕获必须最先处理：吃掉所有按键事件（含 Esc，防止录制中关窗）
         self.capture_hotkey(&ctx);
         // Wayland 自绘标题栏：✕ 走与底部「关闭」相同的未保存确认流程
@@ -906,6 +918,8 @@ impl SettingsApp {
             );
         });
 
+        card(ui, "文字识别", |ui| self.ocr_settings(ui));
+
         card(ui, "全局热键", |ui| {
             egui::Grid::new("hotkeys-grid")
                 .num_columns(2)
@@ -974,6 +988,143 @@ impl SettingsApp {
         ui.add_space(6.0);
         self.update_row(ui);
         ui.add_space(6.0);
+    }
+
+    /// 引擎配置与模型下载分离：前者需要保存，后者成功后立即可供 auto 使用。
+    fn ocr_settings(&mut self, ui: &mut egui::Ui) {
+        egui::Grid::new("ocr-grid")
+            .num_columns(2)
+            .spacing([12.0, 10.0])
+            .show(ui, |ui| {
+                row_label(ui, "引擎");
+                let current = config::OCR_ENGINE_NAMES
+                    .iter()
+                    .find(|(id, _)| *id == self.cfg.ocr.engine)
+                    .map(|(_, label)| *label)
+                    .unwrap_or("自动");
+                egui::ComboBox::from_id_salt("ocr-engine")
+                    .selected_text(current)
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for (id, label) in config::OCR_ENGINE_NAMES {
+                            ui.selectable_value(&mut self.cfg.ocr.engine, id.to_string(), *label);
+                        }
+                    });
+                ui.end_row();
+            });
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(
+                "自动模式不会下载 PP-OCR 模型；已下载的 PP-OCR 优先，否则使用系统引擎或 ocrs 兜底。",
+            )
+            .color(muted(ui)),
+        );
+        ui.label(
+            egui::RichText::new(
+                "显式选择 PP-OCR 并保存后，首次识别会下载约 15.6 MB 模型（也可点击下方按钮预先下载）。",
+            )
+            .color(muted(ui)),
+        );
+        ui.label(
+            egui::RichText::new(
+                "模型就绪后在本机离线识别，不上传图像；ocrs 仅支持拉丁文字，首次使用也可能下载自身模型。",
+            )
+            .color(muted(ui)),
+        );
+        ui.label(
+            egui::RichText::new(
+                "下载无需保存，完成后即可供自动模式使用；切换引擎需点击「保存」，下次识别即生效。",
+            )
+            .color(muted(ui)),
+        );
+        if let Some(value) = &self.ocr_engine_env {
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "检测到 LSCREEN_OCR_ENGINE={value:?}：有效的显式环境变量优先于配置，空值/auto 不覆盖配置。\
+                     本窗口不修改环境变量；若要解除覆盖，请修改启动环境后重新启动相应进程。"
+                ))
+                .color(accent_text(ui)),
+            );
+        }
+        ui.add_space(8.0);
+        let busy = self.ocr_models.in_flight();
+        let checking = self.ocr_models.checking();
+        let failed = matches!(self.ocr_models.result(), Some(Err(_)));
+        ui.horizontal_wrapped(|ui| {
+            let button_label = if checking {
+                "检查本地模型中…"
+            } else if busy {
+                "下载与校验中…"
+            } else if failed {
+                "重试下载 PP-OCR 模型"
+            } else if self.ocr_models.present() {
+                "校验 / 修复 PP-OCR 模型"
+            } else {
+                "下载 PP-OCR 模型（约 15.6 MB）"
+            };
+            if ui
+                .add_enabled(!busy, egui::Button::new(button_label))
+                .clicked()
+            {
+                self.ocr_models.start(ui.ctx());
+            }
+            if ui
+                .add_enabled(!busy, egui::Button::new("刷新本地状态"))
+                .on_hover_text("只检查模型文件，不联网；可用于手工放入模型或其它进程下载后的刷新")
+                .clicked()
+            {
+                self.ocr_models.check(ui.ctx());
+            }
+        });
+        if busy && !checking {
+            let progress = self.ocr_models.progress();
+            let label = if progress.total == 0 {
+                "准备下载 / 校验模型…".into()
+            } else {
+                format!(
+                    "{:.1} / {:.1} MB（三个文件合计）",
+                    progress.done as f64 / 1_000_000.0,
+                    progress.total as f64 / 1_000_000.0,
+                )
+            };
+            ui.add(
+                egui::ProgressBar::new(progress.fraction())
+                    .text(label)
+                    .animate(false)
+                    .desired_width(ui.available_width()),
+            );
+            ui.label(egui::RichText::new("下载期间请保持设置窗口打开。").color(muted(ui)));
+        } else if !checking {
+            match self.ocr_models.result() {
+                Some(Err(e)) => {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "模型操作失败：{e}。可检查网络和目录权限后重试。"
+                        ))
+                        .color(accent_text(ui)),
+                    );
+                }
+                _ if self.ocr_models.present() => {
+                    ui.label(
+                        egui::RichText::new(
+                            "PP-OCR 模型文件已齐备；自动模式优先，首次识别会校验完整性。",
+                        )
+                        .color(muted(ui)),
+                    );
+                }
+                _ => {
+                    ui.label(egui::RichText::new("尚无完整的 PP-OCR 模型。").color(muted(ui)));
+                }
+            }
+        }
+        if let Some(path) = &self.ocr_models_dir {
+            ui.label(
+                egui::RichText::new(format!("模型目录  {}", path.display()))
+                    .color(muted(ui))
+                    .size(11.0),
+            );
+        }
     }
 
     /// 「检查更新」区：结果横幅 + 当前版本 + 按钮 + 结果文案。
@@ -1101,6 +1252,25 @@ fn egui_to_rgba(c: egui::Color32) -> lscreen_core::Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ocr_engine_config_change_is_dirty_until_saved_or_discarded() {
+        let original = Config::default();
+        let mut edited = original.clone();
+        let mut guard = UnsavedChanges::new(&original);
+        edited.ocr.engine = "ppocr".into();
+
+        assert!(guard.is_dirty(&edited));
+        assert_eq!(guard.request_close(&edited), CloseDecision::ConfirmDiscard);
+        guard.discard_into(&mut edited);
+        assert_eq!(edited.ocr.engine, "auto");
+        assert!(!guard.is_dirty(&edited));
+
+        edited.ocr.engine = "ppocr".into();
+        guard.mark_saved(&edited);
+        assert!(!guard.is_dirty(&edited));
+        assert_eq!(guard.request_close(&edited), CloseDecision::CloseNow);
+    }
 
     #[test]
     fn changed_config_requires_confirmation_and_can_continue_editing() {

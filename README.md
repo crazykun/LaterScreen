@@ -31,10 +31,10 @@
 
 | 亮点 | 说明 |
 |---|---|
-| **一个文件，拷走即用** | 静态链接，当前约 14MB，不依赖任何系统库 |
+| **一个文件，拷走即用** | 单文件发布，体积预算 ≤30MB；可选 OCR 模型独立下载，不捆绑进程序 |
 | **三平台同体验** | Linux（X11 / **Wayland**，x64 / arm64 / armv7 / x86）、Windows 10+、macOS |
 | **GUI + CLI 双形态** | 有完整标注界面，每个功能也能纯命令行调用，可写进脚本 |
-| **不后台联网** | 只有你点「检查更新」时才发一次 HTTPS 请求（纯 Rust TLS） |
+| **不后台联网** | 托盘不主动联网；检查更新、显式下载 OCR 模型或所选引擎首次准备模型时才联网，OCR 图像不上传 |
 
 ## 🚀 快速上手
 
@@ -168,7 +168,7 @@ cargo test --workspace                # 单元测试，无需显示器
 
 零配置可用，**不生成文件**。改配置用 `lscreen config` 打开面板，保存后运行中的托盘 1 秒内自动热加载。
 
-面板可调：保存目录、文件名模板、窗口主题（自动 / 浅色 / 夜间）、默认工具与颜色、初始选区（最前窗口 / 上次选区 / 全屏 / 无）、录制格式与音频、录制点击高亮、历史条数，以及七个全局热键。
+面板可调：保存目录、文件名模板、窗口主题（自动 / 浅色 / 夜间）、默认工具与颜色、初始选区（最前窗口 / 上次选区 / 全屏 / 无）、录制格式与音频、录制点击高亮、历史条数、OCR 引擎，以及七个全局热键。
 
 > 「上次选区」在显示器布局变化后会自动作废回退。自动主题由 egui 跟随操作系统配色。
 > 面板底部「检查更新」是**手动**的：查询 GitHub 上有没有新版本，有则在顶部提示并可直达下载页。
@@ -182,6 +182,23 @@ cargo test --workspace                # 单元测试，无需显示器
 | macOS | `~/Library/Application Support/lscreen/config.toml` | `~/Library/Caches/lscreen/history/` |
 
 历史副本刻意放**缓存目录**而非配置目录：它是可随时删掉的派生数据，直接删整个目录即可，不影响配置。
+
+### 本地中文 OCR（可选）
+
+打开 `lscreen config` → **OCR** →「下载 PP-OCR 模型」。约 **15.6MB** 的检测模型、识别模型与字典下载并校验后，**自动模式优先使用**，不需要 Python、Ollama、GPU 或系统 tesseract；识别在本机完成，不上传图片。
+
+```toml
+[ocr]
+engine = "auto"  # auto / ppocr / ocrs；Linux 另可选 tesseract，Win/mac 可选 system
+```
+
+- 默认 `auto` 不下载 PP-OCR 模型；模型缺失时继续使用原来的系统 OCR / tesseract / ocrs 链路。ocrs 仅支持拉丁文字，原有首次使用下载行为不变。
+- 显式选择 `ppocr` 并保存后，首次识别允许自动下载；也可先点下载按钮查看进度。下载与切换引擎分别生效，切换需要保存配置。
+- 缓存优先使用绝对路径 `XDG_CACHE_HOME/lscreen/ppocr/v1/`，否则为 `~/.cache/lscreen/ppocr/v1/`（Windows 用 HOME 或 USERPROFILE）。损坏或不完整时可在设置中「校验 / 修复」，不会把错误静默换成另一个引擎的结果。
+- 有效的显式 `LSCREEN_OCR_ENGINE=ppocr|paddle|ocrs|tesseract|system` 优先于配置；空值、`auto`、未知值或不支持的平台选项不覆盖配置。
+- 面向正立屏幕印刷体；旋转文字、复杂版式、过长整页和很小的字建议分区识别。超长文本行明确提示分段，不静默截断。
+
+模型来源、许可和离线安装见 [OCR_MODELS.md](docs/OCR_MODELS.md)，验证步骤见 [VERIFY.md](docs/VERIFY.md#本地-pp-ocrm19三平台)。
 
 ### 上传 hook（可选）
 
@@ -211,9 +228,9 @@ command = ["/usr/local/bin/uploader", "--token", "xxx"]
 
 | 平台 | 说明 |
 |---|---|
-| **Linux** | X11 全功能；Wayland 支持范围见上节。OCR 优先系统 tesseract（中文需 `tesseract-ocr-chi-sim`），并以内置纯 Rust ocrs 兜底（仅拉丁字母，首次自动下载模型）。录屏音频（仅 MP4）运行时调系统工具：需 `ffmpeg` 与 `arecord` 或 `parec` 之一，缺失时**录制开始前**就报错，不会录完才发现没声音 |
-| **Windows 10+** | 走系统 API，无外部依赖。OCR 用 WinRT 系统引擎，支持中文。录屏音频走 WASAPI 采集 + Media Foundation AAC，麦克风 / 系统声 / 混合均可 |
-| **macOS** | 走系统 API，无外部依赖。OCR 用 Vision，支持中文。录屏音频走 CoreAudio（麦克风）+ ScreenCaptureKit（系统声，需 macOS 13+ 与「屏幕录制」权限）+ AudioToolbox AAC；因引入 ScreenCaptureKit，产物最低系统要求 macOS 12.3 |
+| **Linux** | X11 全功能；Wayland 支持范围见上节。OCR 自动优先已下载的 PP-OCR，否则使用系统 tesseract（中文需 `tesseract-ocr-chi-sim`），并以内置纯 Rust ocrs 兜底（仅拉丁字母，首次自动下载模型）。录屏音频（仅 MP4）运行时调系统工具：需 `ffmpeg` 与 `arecord` 或 `parec` 之一，缺失时**录制开始前**就报错，不会录完才发现没声音 |
+| **Windows 10+** | 走系统 API，无外部依赖。OCR 自动优先已下载的 PP-OCR，否则用 WinRT 系统引擎，支持中文。录屏音频走 WASAPI 采集 + Media Foundation AAC，麦克风 / 系统声 / 混合均可 |
+| **macOS** | 走系统 API，无外部依赖。OCR 自动优先已下载的 PP-OCR，否则用 Vision，支持中文。录屏音频走 CoreAudio（麦克风）+ ScreenCaptureKit（系统声，需 macOS 13+ 与「屏幕录制」权限）+ AudioToolbox AAC；因引入 ScreenCaptureKit，产物最低系统要求 macOS 12.3 |
 
 ## 🚢 打包发布
 

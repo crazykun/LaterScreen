@@ -888,15 +888,6 @@ impl SnipApp {
             self.toast(ctx, "识别进行中…");
             return;
         }
-        // GUI 截图 OCR 面向中文桌面内容：显式请求简体中文 + 英文。
-        // 若 Linux 没有对应 Tesseract 语言包，必须明确提示安装，不能静默
-        // 回退到仅支持拉丁字母的 ocrs 后输出一堆伪文字。
-        let languages = ["chi_sim".to_string(), "eng".to_string()];
-        let engine = lscreen_ocr::default_engine(&languages);
-        if !engine.available() {
-            self.toast(ctx, engine.describe());
-            return;
-        }
         let Some((rgba, w, h)) = export::crop_rgba(
             &self.shot.rgba,
             self.shot.width,
@@ -907,18 +898,27 @@ impl SnipApp {
             return;
         };
         self.remember_selection();
-        self.spawn_scan(ctx, move || match engine.recognize(&rgba, w, h) {
-            Ok(out) if !out.is_empty() => {
-                let items = out
-                    .blocks
-                    .into_iter()
-                    .filter(|block| !block.text.trim().is_empty())
-                    .map(|block| block.text)
-                    .collect();
-                ScanOutcome::Ok("文字识别结果".into(), items)
+        self.spawn_scan(ctx, move || {
+            // 已打开的标注窗也读取最新保存值；构造/探测（含 tesseract 子进程）、
+            // 首次模型下载与推理全部留在 worker，不能阻塞 UI 线程。
+            let cfg = crate::config::Config::load();
+            let engine = lscreen_ocr::screenshot_engine(Some(&cfg.ocr.engine));
+            if !engine.available() {
+                return ScanOutcome::Empty(engine.describe());
             }
-            Ok(_) => ScanOutcome::Empty("选区内未识别到文字".into()),
-            Err(e) => ScanOutcome::Empty(format!("识别失败: {e}")),
+            match engine.recognize(&rgba, w, h) {
+                Ok(out) if !out.is_empty() => {
+                    let items = out
+                        .blocks
+                        .into_iter()
+                        .filter(|block| !block.text.trim().is_empty())
+                        .map(|block| block.text)
+                        .collect();
+                    ScanOutcome::Ok("文字识别结果".into(), items)
+                }
+                Ok(_) => ScanOutcome::Empty("选区内未识别到文字".into()),
+                Err(e) => ScanOutcome::Empty(format!("识别失败: {e}")),
+            }
         });
     }
 

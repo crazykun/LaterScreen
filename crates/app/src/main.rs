@@ -19,6 +19,7 @@ mod history;
 mod instance;
 #[cfg(target_os = "macos")]
 mod mac_fnkey_tap;
+mod ocr_models;
 mod pin;
 mod record_ui;
 mod selcache;
@@ -1249,7 +1250,8 @@ fn run_ocr(
     input: Option<PathBuf>,
     languages: Vec<String>,
 ) -> Result<(), String> {
-    let engine = lscreen_ocr::default_engine(&languages);
+    let cfg = config::Config::load();
+    let engine = lscreen_ocr::default_engine(&languages, Some(&cfg.ocr.engine));
     if !engine.available() {
         return Err(engine.describe());
     }

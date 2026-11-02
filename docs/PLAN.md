@@ -1073,6 +1073,14 @@ record/Cargo.toml 未按平台门控，Win/mac 同样编译 vendored 源，
 保留系统 OCR / tesseract / ocrs，新增不依赖 Python、GPU 或常驻模型服务的本地中英文引擎。用户在设置中下载固定模型组合（15,629,724 字节），自动模式随后优先使用；不是动态库/可执行插件，模型与主程序分别管理。
 
 - **预算决策（2026-11-02）**：发布体积上限 20→30MiB，单文件/动态依赖白名单不变。spike（同 release profile）空程序 281,264 字节、tract 关闭默认 features 后 10,095,272 字节，增量 9,814,008 字节 ≈9.36MiB；不能直接相加推断最终 fat LTO 产物，最终构建另验。历史 milestone/release notes 保留当时的数字。
+- **分层**：`ocr/src/paddle.rs` 推理与纯算法，`paddle_models.rs` 缓存/下载/校验；app 只持配置和后台任务状态，core 无新依赖。tract 钉 0.23.9，关闭 transformers feature；ureq+rustls 与 app 共用，SHA-256 固定模型组合，加载前校验。
+- **优先级**：有效显式环境变量 > 有效配置 > 已下载 PP-OCR > 系统引擎/tesseract > ocrs。auto 不下载 PP-OCR，自动选定后模型被删/损坏也只报错；显式 ppocr 才允许首次识别下载。保留原 system/ocrs 显式失败不回退、tesseract 二进制不可用走 auto 的兼容行为。
+- **缓存/下载**：绝对 `XDG_CACHE_HOME` 优先，否则 HOME/USERPROFILE 下 `.cache/lscreen/ppocr/v1`。设置中显式下载与进度、校验/修复入口；固定大小与 SHA-256、限量读取、超时、唯一 `.part`、失败清理、校验成功再 rename。UI 不每帧读盘或哈希，不上传截图。
+- **推理范围**：正立屏幕文字；det 960×960 等比补边、阈值/平均置信度筛选、连通域+轴对齐 unclip 近似；不宣称替代完整文档版面分析。rec 高 48，宽按 320/640/1280/2560/4096 分档、按宽分组复用一个计划，避免固定 320 的 40 时间步截断长行；超宽明确提示分段。BGR 通道、归一化后零补边，固定模型末端已含 Sigmoid/Softmax，不猜测重算。最多 64MP 输入和 512 个候选区，错误不返回半截结果。
+- **接线**：`[ocr].engine` 默认 auto，设置只展示当前平台可用引擎，改引擎需保存，下载不改配置；CLI/GUI 同一选择函数，GUI 在工作线程加载最新配置/探测/识别，结果窗与复制交互不变。托盘不加载模型。
+- **验证**：纯单测覆盖预处理/CTC/几何/输入边界/优先级/配置/下载状态与本地 HTTP 异常；`ppocr_e2e` ignored+env 门控，独立模型目录、系统字体生成测试图，无隐式联网。操作见 [VERIFY.md](VERIFY.md)，来源/许可见 [OCR_MODELS.md](OCR_MODELS.md)。真实模型/整包/跨平台结果以实际验收记录为准。
+- **2026-11-02 Linux 验收**：全工作区 212 passed / 11 ignored，fmt/clippy 通过；真实模型 5 项通过（多行、两栏、透明/空图、长行首中尾、边界、小字号深浅/彩色），HTTPS 真实下载+SHA 校验通过。release 为 24,222,216 字节（23.10MiB），动态依赖符合现有 CI 白名单。CLI auto 识别 960×180 中英文图约 1.01s，峰值 RSS 110,172KiB（OCR 工作进程，非托盘常驻内存）；长行仍有 o/0 混淆，测试不是逐字准确率保证。GUI 人工验收未完成（本会话 Computer Use 不可用）；Win/mac 交叉检查因本机缺 lib.exe / Apple C 工具链在 ring 构建阶段受阻，未视为通过，仍需原生 CI/真机验证。
+- **不在本期**：VLM/Ollama、任意插件执行、v5/server 模型、旋转识别、托盘进程级模型预载、下载取消或断点续传。v5 原始模型在 spike 的固定 shape 推断报符号维冲突，不等同于该版本永远不可用。
 
 ### M17 真机验证台账（v1.0 前置验收）
 

@@ -8,6 +8,12 @@ license.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
 ocrs = "0.12"
 rten = { version = "0.24", default-features = false, features = ["rten_format"] }
+# PP-OCR（M19）：ONNX 推理 + 模型按需下载。tract 纯 Rust 无动态库；
+# default-features=false 砍掉 transformers 特性（spike 实测 -0.34MB）。
+# ureq 与 app 同版本同特性集（json 由 app 开启），单二进制零重复。
+tract-onnx = { version = "=0.23.9", default-features = false }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+sha2 = "0.10"
 
 # 平台系统 OCR 仅在对应目标编译，Linux 产物零新增依赖
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -29,6 +35,8 @@ objc2-vision = { version = "0.3", features = [
     "VNObservation",
 ] }
 
-# M17 真机验证测试用（生成中英文测试图）；dev 依赖不进产物
-[target.'cfg(any(windows, target_os = "macos"))'.dev-dependencies]
+# M17 真机验证测试用（生成中英文测试图）；M19 起 ppocr e2e 三平台都要渲染
+# 文字图，放开为全平台 dev 依赖（纯 Rust，不进产物）
+[dev-dependencies]
 ab_glyph = "0.2"
+tempfile = "3"

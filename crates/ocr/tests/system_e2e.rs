@@ -2,7 +2,8 @@
 //! 识别。测试图用 ab_glyph + 系统 CJK 字体现场渲染（仓库约定不提交图片
 //! 文件），黑字白底 64px，是系统引擎最擅长的输入形态。
 //! `LSCREEN_TEST_E2E=1 cargo test -p lscreen-ocr --test system_e2e -- --ignored`
-//! 步骤与预期见 docs/VERIFY.md。
+//! 步骤与预期见 docs/VERIFY.md。可用 `LSCREEN_TEST_FONT=/path/to/font.ttf`
+//! 指定本机字体；指定后读取失败或缺字直接报错，不静默换字体。
 
 #![cfg(any(windows, target_os = "macos"))]
 
@@ -29,21 +30,35 @@ fn font_candidates() -> &'static [&'static str] {
 }
 
 fn load_font() -> FontVec {
+    const TEXT: &str = "你好世界 屏幕截图测试Hello World 123456";
+    let explicit = std::env::var_os("LSCREEN_TEST_FONT");
+    let candidates: Vec<std::path::PathBuf> = match explicit {
+        Some(path) => vec![path.into()],
+        None => font_candidates()
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect(),
+    };
     let mut err = String::new();
-    for path in font_candidates() {
-        let Ok(bytes) = std::fs::read(path) else {
-            continue;
-        };
-        // ttc 取第 0 个字面；ttf 的 try_from_vec 失败时也按索引 0 再试一次
-        if let Ok(f) = FontVec::try_from_vec(bytes.clone()) {
-            return f;
-        }
-        match FontVec::try_from_vec_and_index(bytes, 0) {
-            Ok(f) => return f,
-            Err(e) => err.push_str(&format!("{path}: {e}; ")),
+    for path in candidates {
+        let result = std::fs::read(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| FontVec::try_from_vec_and_index(bytes, 0).map_err(|e| e.to_string()));
+        match result {
+            Ok(font)
+                if TEXT
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .all(|c| font.glyph_id(c).0 != 0) =>
+            {
+                eprintln!("系统 OCR 测试字体: {}", path.display());
+                return font;
+            }
+            Ok(_) => err.push_str(&format!("{}: 不含测试所需中英文字形; ", path.display())),
+            Err(e) => err.push_str(&format!("{}: {e}; ", path.display())),
         }
     }
-    panic!("未找到可用系统 CJK 字体（{err}）");
+    panic!("未找到可用系统 CJK 字体；可设置 LSCREEN_TEST_FONT=/path/to/font.ttf（{err}）");
 }
 
 /// 渲染两行测试文本（中文 + 英文数字），白底黑字，返回 (RGBA, w, h)
@@ -91,15 +106,25 @@ fn system_engine_zh_en() {
     if std::env::var("LSCREEN_TEST_E2E").ok().as_deref() != Some("1") {
         return;
     }
-    // 显式选系统引擎（WinRT / Vision），避免落到兜底引擎掩盖问题
-    std::env::set_var("LSCREEN_OCR_ENGINE", "system");
-    let engine = lscreen_ocr::default_engine(&["chi_sim".to_string(), "eng".to_string()]);
+    // 配置显式选系统引擎，不修改并行测试进程的全局环境。
+    // env 仍应优先：若调用者设了其他引擎，明确失败并提示清除，而非测错后端。
+    if let Ok(env) = std::env::var("LSCREEN_OCR_ENGINE") {
+        assert!(
+            !matches!(env.trim(), "ppocr" | "paddle" | "ocrs"),
+            "system_e2e 需要系统引擎；请清除 LSCREEN_OCR_ENGINE={env:?} 后重试"
+        );
+    }
+    let engine =
+        lscreen_ocr::default_engine(&["chi_sim".to_string(), "eng".to_string()], Some("system"));
     assert!(engine.available(), "系统引擎不可用: {}", engine.describe());
 
     let (rgba, w, h) = render_test_image();
-    let out = engine.recognize(&rgba, w, h).expect("识别失败");
+    let start = std::time::Instant::now();
+    let result = engine.recognize(&rgba, w, h);
+    eprintln!("系统 OCR 推理耗时（含首轮初始化）: {:?}", start.elapsed());
+    let out = result.expect("识别失败");
     let text = out.plain_text();
-    println!("识别结果: {text:?}");
+    eprintln!("识别结果: {text:?}");
 
     let lower = text.to_lowercase();
     assert!(lower.contains("hello"), "英文未识别出: {text:?}");

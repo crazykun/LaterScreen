@@ -43,6 +43,47 @@ pub struct UploadConfig {
     pub command: Vec<String>,
 }
 
+/// OCR 引擎偏好（M19）；未知/当前平台不支持的值归一化为自动，
+/// 不影响同一配置文件里的其它设置。实际环境变量优先级由 OCR crate 处理。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct OcrConfig {
+    #[serde(deserialize_with = "deserialize_ocr_engine")]
+    pub engine: String,
+}
+
+impl Default for OcrConfig {
+    fn default() -> Self {
+        Self {
+            engine: "auto".into(),
+        }
+    }
+}
+
+/// 仅列出当前平台实现的引擎；不在 UI 线程探测系统进程或加载模型。
+pub const OCR_ENGINE_NAMES: &[(&str, &str)] = &[
+    ("auto", "自动（已下载的 PP-OCR 优先）"),
+    ("ppocr", "PP-OCR（中文 / 英文，本地）"),
+    ("ocrs", "ocrs（仅拉丁文字）"),
+    #[cfg(target_os = "linux")]
+    ("tesseract", "Tesseract（系统安装）"),
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    ("system", "系统 OCR"),
+];
+
+pub fn normalize_ocr_engine(value: &str) -> &'static str {
+    OCR_ENGINE_NAMES
+        .iter()
+        .find(|(id, _)| value.trim().eq_ignore_ascii_case(id))
+        .map(|(id, _)| *id)
+        .unwrap_or("auto")
+}
+
+fn deserialize_ocr_engine<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let value = String::deserialize(d)?;
+    Ok(normalize_ocr_engine(&value).into())
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(default)]
 pub struct Config {
@@ -89,6 +130,8 @@ pub struct Config {
     pub hotkey_record: String,
     pub hotkey_scroll: String,
     pub hotkey_history: String,
+    /// 文字识别引擎（M19）：缺省自动，不主动下载 PP-OCR 模型。
+    pub ocr: OcrConfig,
     /// 外部上传命令（M15）：缺省空 = 无上传能力，UI 不显示上传入口
     pub upload: UploadConfig,
 }
@@ -117,6 +160,7 @@ impl Default for Config {
             hotkey_record: String::new(),
             hotkey_scroll: String::new(),
             hotkey_history: String::new(),
+            ocr: OcrConfig::default(),
             upload: UploadConfig::default(),
         }
     }
@@ -454,6 +498,56 @@ mod tests {
         let text = toml::to_string_pretty(&c).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(c, back);
+    }
+
+    #[test]
+    fn ocr_defaults_to_auto_for_old_and_partial_configs() {
+        assert_eq!(Config::default().ocr.engine, "auto");
+        assert_eq!(cfg("save_dir = \"/tmp\"\n").ocr.engine, "auto");
+        assert_eq!(cfg("[ocr]\n").ocr.engine, "auto");
+        assert_eq!(cfg("[ocr]\nfuture = true\n").ocr.engine, "auto");
+    }
+
+    #[test]
+    fn ocr_engines_roundtrip_and_participate_in_config_equality() {
+        for (engine, _) in OCR_ENGINE_NAMES {
+            let mut original = Config::default();
+            original.ocr.engine = engine.to_string();
+            let text = toml::to_string_pretty(&original).unwrap();
+            assert!(text.contains("[ocr]"));
+            assert_eq!(cfg(&text), original);
+            assert_eq!(original == Config::default(), *engine == "auto");
+        }
+    }
+
+    #[test]
+    fn ocr_unknown_engine_normalizes_without_resetting_other_settings() {
+        for engine in ["", "unknown", "ollama", "paddle"] {
+            let c = cfg(&format!("history_max = 23\n[ocr]\nengine = {engine:?}\n"));
+            assert_eq!(c.ocr.engine, "auto");
+            assert_eq!(c.history_max, 23);
+        }
+        assert_eq!(cfg("[ocr]\nengine = \" PPocr \"\n").ocr.engine, "ppocr");
+    }
+
+    #[test]
+    fn ocr_platform_options_and_normalization_agree() {
+        for engine in ["auto", "ppocr", "ocrs"] {
+            assert!(OCR_ENGINE_NAMES.iter().any(|(id, _)| *id == engine));
+            assert_eq!(normalize_ocr_engine(engine), engine);
+        }
+        assert_eq!(
+            OCR_ENGINE_NAMES.iter().any(|(id, _)| *id == "tesseract"),
+            cfg!(target_os = "linux")
+        );
+        assert_eq!(
+            OCR_ENGINE_NAMES.iter().any(|(id, _)| *id == "system"),
+            cfg!(any(target_os = "windows", target_os = "macos"))
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(cfg("[ocr]\nengine = \"system\"\n").ocr.engine, "auto");
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        assert_eq!(cfg("[ocr]\nengine = \"tesseract\"\n").ocr.engine, "auto");
     }
 
     #[test]
