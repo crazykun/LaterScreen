@@ -9,21 +9,28 @@
 //! 强调色 [ACCENT] 是**唯一**允许在业务代码里出现的品牌色——但只作填充
 //! （按钮底/竖条/徽章，配白字）；**当文字或描边用时必须走 [`accent_ink`]
 //! / [`accent_line`]**，两者的深浅是跟着主题走的（见函数注释）。原因见
-//! [`accent_ink`]：品牌红作前景色在浅色下只有 3.6:1，达不到可读线。
+//! [`accent_ink`]：品牌蓝的绝对亮度同样落在中间地带，本尊当文字在浅色下
+//! 只有 2.85:1，离可读线差得比红色还远。
 //!
 //! 选中态（[`egui::Visuals::selection`]）是全框架共享的一个令牌：文本选区
 //! 底色 + 选中文字色、`Button::selectable` 的选中底与文字、滑块 trailing
 //! fill、TextEdit 聚焦框描边全都读它。因此它必须同时满足「底色与输入域
-//! 可区分」和「文字压在底色上可读」——单一品牌红做不到（红底红字 = 选中
-//! 文字完全看不见，v0.11.2 及之前的实际表现）。现在按主题各配一组
-//! 「浅底 + 深色字」/「深底 + 浅色字」，对比度门槛由下方单测锁住。
+//! 可区分」和「文字压在底色上可读」——单一品牌色做不到（同色底+同色字 =
+//! 选中文字完全看不见，v0.11.2 及之前用品牌红时的实际表现）。现在按主题
+//! 各配一组「浅底 + 深色字」/「深底 + 浅色字」，对比度门槛由下方单测锁住。
 
 use crate::config::ThemeMode;
 use eframe::egui;
 
-/// **装饰用**品牌红：按钮填充、卡片竖条、徽章底、Toast 描边——一律配白字。
-/// 与默认标注色 `#e53935` 一致（改这里之前先看 [`accent_ink`] 的对比度约束）。
-pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(0xe5, 0x39, 0x35);
+/// 品牌色：与截图选区/覆盖层同源的 LaterScreen 蓝 `#2196f3`（v0.14 起由
+/// 品牌红迁移而来——同一套 UI 里红强调色与红选区边框互相打架，观感杂乱）。
+/// **装饰用**：按钮填充、卡片竖条、徽章底、Toast 描边——一律配白字。
+/// 与默认标注色一致（改这里之前先看 [`accent_ink`] 的对比度约束）。
+pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x21, 0x96, 0xf3);
+
+/// [`ACCENT`] 的 `#RRGGBB` 写法：默认标注色（`config.default_color`）也用
+/// 它，避免「UI 是蓝的、画出来的标注是红的」这种两边各写一个字面量的漂移。
+pub const ACCENT_HEX: &str = "#2196f3";
 
 /// 表单控件统一高度：输入框（`input_field` min_size）与下拉框/数字框
 /// （`spacing.interact_size.y` 下限）共用同一来源，保证同 Grid 内等高。
@@ -55,45 +62,45 @@ const LIGHT_FOOTER: egui::Color32 = egui::Color32::from_rgb(0xea, 0xea, 0xef);
 
 // ---------------------------------------------------------------- 选中态
 
-/// 选中底色：浅色下是品牌红的**浅化**版（红调仍在、但不与输入域糊成一片），
-/// 深色下是压暗的红。
-const LIGHT_SELECT_BG: egui::Color32 = egui::Color32::from_rgb(0xff, 0xcf, 0xc7);
-/// 选中文字色：压在选中底上的**深红**（不是品牌红——品牌红在浅底上只有
-/// 约 2.5:1，等于红底红字）
-const LIGHT_SELECT_INK: egui::Color32 = egui::Color32::from_rgb(0x7f, 0x15, 0x12);
-const DARK_SELECT_BG: egui::Color32 = egui::Color32::from_rgb(0x6b, 0x26, 0x22);
-/// 深色下反向：底色压暗、文字提亮（浅粉）
-const DARK_SELECT_INK: egui::Color32 = egui::Color32::from_rgb(0xff, 0xd9, 0xd5);
+/// 选中底色：浅色下是品牌蓝的**浅化**版（蓝调仍在、但不与输入域糊成一片），
+/// 深色下是压暗的蓝。
+const LIGHT_SELECT_BG: egui::Color32 = egui::Color32::from_rgb(0xbb, 0xde, 0xfb);
+/// 选中文字色：压在选中底上的**深蓝**（不是品牌蓝——品牌蓝在浅底上只有
+/// 约 2.0:1，等于蓝底蓝字）
+const LIGHT_SELECT_INK: egui::Color32 = egui::Color32::from_rgb(0x0d, 0x47, 0xa1);
+const DARK_SELECT_BG: egui::Color32 = egui::Color32::from_rgb(0x14, 0x40, 0x6b);
+/// 深色下反向：底色压暗、文字提亮（浅蓝）
+const DARK_SELECT_INK: egui::Color32 = egui::Color32::from_rgb(0x9e, 0xcb, 0xff);
 
-// ---------------------------------------------------------------- 品牌红前景化
+// ---------------------------------------------------------------- 品牌色前景化
 
-/// 品牌红作**文字/图标前景**时的主题化替代色。
+/// 品牌色作**文字/图标前景**时的主题化替代色。
 ///
-/// 品牌红 `#e53935` 的绝对亮度落在中间地带：浅色主题下只有 3.6:1
-/// （面板）/ 3.5:1（输入域），深色下 4.4:1 / 3.9:1——都不到 WCAG AA 的
-/// 4.5:1，小字号的录屏提示/热键文案尤其吃力。因此作前景时按主题换深浅：
-/// 浅色压深（`#c62828`，面板 5.1:1）、深色提亮（`#ff7b74`，面板 7.3:1）。
-/// 色相不变，仍是同一个品牌红。
+/// 品牌蓝 `#2196f3` 作前景：浅色主题下只有 2.85:1（面板）/ 2.65:1（输入域），
+/// 深色下 5.88:1 / 5.44:1——浅色侧离 WCAG AA 的 4.5:1 差得很远（比当年的
+/// 品牌蓝更差——蓝色亮度比红色更高）。因此作前景时按主题换深浅：浅色压深
+/// （`#1565c0`，面板 5.23:1）、深色提亮（`#64b5f6`，面板 8.30:1）。
+/// 色相不变，仍是同一个品牌蓝。
 pub fn accent_ink(v: &egui::Visuals) -> egui::Color32 {
     if v.dark_mode {
-        egui::Color32::from_rgb(0xff, 0x7b, 0x74)
+        egui::Color32::from_rgb(0x64, 0xb5, 0xf6)
     } else {
-        egui::Color32::from_rgb(0xc6, 0x28, 0x28)
+        egui::Color32::from_rgb(0x15, 0x65, 0xc0)
     }
 }
 
-/// 品牌红作**描边**（输入框聚焦框、热键录入态边框）时的主题化替代色。
+/// 品牌色作**描边**（输入框聚焦框、热键录入态边框）时的主题化替代色。
 /// 与 [`accent_ink`] 同源但可单独调：描边细，需要比文字更高的对比度才
 /// 看得清，故两端都比 ink 再推一档。
 pub fn accent_line(v: &egui::Visuals) -> egui::Color32 {
     if v.dark_mode {
-        egui::Color32::from_rgb(0xff, 0x8a, 0x80)
+        egui::Color32::from_rgb(0x90, 0xca, 0xf9)
     } else {
-        egui::Color32::from_rgb(0xb7, 0x1c, 0x1c)
+        egui::Color32::from_rgb(0x0d, 0x47, 0xa1)
     }
 }
 
-/// 品牌红填充上的文字色：两主题都是纯白。
+/// 品牌色填充上的文字色：两主题都是纯白。
 pub const ACCENT_ON_TEXT: egui::Color32 = egui::Color32::WHITE;
 
 /// **完成/交付**绿（「复制到剪贴板并退出」主按钮的实心底），配 [`SUCCESS_ON_TEXT`]。
@@ -106,14 +113,15 @@ pub const SUCCESS_FILL: egui::Color32 = egui::Color32::from_rgb(0x2e, 0x7d, 0x32
 /// 交付绿填充上的文字/图标色：两主题都是纯白（同上，不随主题变化）。
 pub const SUCCESS_ON_TEXT: egui::Color32 = egui::Color32::WHITE;
 
-/// **要放白字**的品牌红填充（按钮/徽章实心底）：比 [`ACCENT`] 深一档。
-/// 品牌红本尊配白字只有 4.2:1，不到正文 AA 门槛；深一档后 5.0:1，仍是
-/// 同一色系（Material Red 700）。装饰性填充（卡片竖条、图标、Toast 描边）
-/// 用 [`ACCENT`] 即可——那里不承载文字，不需要为可读性压深。
-pub const ACCENT_FILL: egui::Color32 = egui::Color32::from_rgb(0xd3, 0x2f, 0x2f);
+/// **要放白字**的品牌蓝填充（按钮/徽章实心底）：比 [`ACCENT`] 深一档。
+/// 品牌蓝本尊配白字只有 3.12:1，离 AA 差得远（中间亮度的色承载白字都要
+/// 压深一档）；深一档到 `#1976d2` 后 4.60:1，仍是同一色系（Material Blue
+/// 700）。装饰性填充（卡片竖条、图标、Toast 描边）用 [`ACCENT`] 即可——
+/// 那里不承载文字，不需要为可读性压深。
+pub const ACCENT_FILL: egui::Color32 = egui::Color32::from_rgb(0x19, 0x76, 0xd2);
 
 /// Toast /浮层提示的底色：比面板再"抬起"一层（浅色更白、深色更亮），
-/// 配 `text_color()` 主文字。此前两主题都是黑底白字 + 品牌红描边，浅色
+/// 配 `text_color()` 主文字。此前两主题都是黑底白字 + 品牌色描边，浅色
 /// 主题下就是「白面板上糊一块黑」，与全窗格调冲突（用户反馈太丑）。
 pub fn toast_fill(v: &egui::Visuals) -> egui::Color32 {
     if v.dark_mode {
@@ -180,12 +188,12 @@ pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
         v.menu_corner_radius = egui::CornerRadius::same(8);
         // 选中态：底色 + 压在底色上的文字色，两者必须成对（详见模块头注释
         // 与 `selection_is_readable` 单测）。**不要**只改其中之一——曾经的
-        // 事故就是两者都是品牌红，选中文字彻底看不见
+        // 事故就是两者都是同一个品牌色，选中文字彻底看不见
         v.selection.bg_fill = sel_bg;
         // TextEdit 聚焦框也取 selection.stroke：用选中文字色而非底色，
-        // 保证细描边在输入域底色上可见（默认淡蓝与品牌红主题不搭）
+        // 保证细描边在输入域底色上可见（默认 egui 淡蓝与品牌色不搭）
         v.selection.stroke = egui::Stroke::new(1.5, sel_ink);
-        // 超链接/可点文字：走主题化的品牌红前景色（品牌红本尊在浅色下不达标）
+        // 超链接/可点文字：走主题化的品牌色前景（品牌蓝本尊在浅色下不达标）
         v.hyperlink_color = sel_ink;
         // 文字令牌：text_color()/weak_text_color() 即业务代码的取色入口
         v.override_text_color = Some(text);
@@ -209,6 +217,14 @@ pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
         v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, stroke);
         v.widgets.inactive.weak_bg_fill = field;
         v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, stroke);
+        // 下拉框打开/按下时与 TextEdit 聚焦使用同一组 selection 令牌：
+        // 输入框保留 field 底色、只强调描边；ComboBox 也不再突然跳到
+        // egui 默认的灰色 active/open 外观，避免两个“选中”语义看起来不一致。
+        for w in [&mut v.widgets.active, &mut v.widgets.open] {
+            w.weak_bg_fill = sel_bg;
+            w.bg_stroke = egui::Stroke::new(1.5, sel_ink);
+            w.fg_stroke.color = sel_ink;
+        }
         style.spacing.button_padding = egui::vec2(12.0, 6.0);
         style.spacing.interact_size.y = FIELD_H;
         // 字号：egui 默认正文 12.5px 下中文笔画被灰度 AA 稀释，观感「细、发白」
@@ -309,7 +325,7 @@ mod tests {
         // 一层，并要求「主文字在其上可读」+「描边可见」。
         //
         // 注意：**不**要求底色与面板拉开对比度——浅色下只能是「比面板更白」，
-        // 纯白对 #f4f4f7 也只有 1.10，靠更强的投影与品牌红描边区分层次
+        // 纯白对 #f4f4f7 也只有 1.10，靠更强的投影与品牌色描边区分层次
         // （真靠底色对比去凑，就得把面板压暗，反而破坏整体格调）。深色侧
         // 反过来有 1.22，顺带校验一下别退化了。
         let ctx = egui::Context::default();
@@ -348,9 +364,9 @@ mod tests {
 
     #[test]
     fn selection_is_readable() {
-        // 回归（用户主诉「选中底色是红色，但字体看不见」）：v0.11.2 及之前
-        // selection.bg_fill 与 selection.stroke.color 都是品牌红 ACCENT，
-        // 选中文字 = 红字压红底，对比度 1.0。选中态是全框架共享令牌（文本
+        // 回归（用户主诉「选中底色是强调色，但字体看不见」）：v0.11.2 及之前
+        // selection.bg_fill 与 selection.stroke.color 都是同一个品牌色，
+        // 选中文字 = 同色字压同色底，对比度 1.0。选中态是全框架共享令牌（文本
         // 选区、Button::selectable、滑块 trailing fill、TextEdit 聚焦框），
         // 所以底色与文字色必须成对校验，二者缺一不可
         let ctx = egui::Context::default();
@@ -392,10 +408,10 @@ mod tests {
 
     #[test]
     fn accent_foreground_is_readable() {
-        // 品牌红 ACCENT 的绝对亮度在中间地带：作前景（文字/描边）时两主题
-        // 都不达 AA（浅色面板 3.85、深色面板 4.35）。accent_ink/accent_line
-        // 是它的主题化替身，这里锁住「替身达标」这一契约——业务代码里凡是
-        // 把品牌红当文字/描边用的地方都应改走它们
+        // 品牌色 ACCENT 的绝对亮度在中间地带：作前景（文字/描边）时两主题
+        // 都不达 AA（品牌蓝浅色面板 2.85、深色面板 5.88）。accent_ink/
+        // accent_line 是它的主题化替身，这里锁住「替身达标」这一契约——业务
+        // 代码里凡是把品牌色当文字/描边用的地方都应改走它们
         let dark = egui::Visuals::dark();
         let light = egui::Visuals::light();
         for (v, panel, field) in [
@@ -411,23 +427,44 @@ mod tests {
             let r = contrast(line, field);
             assert!(r >= AA, "accent_line 在输入域上仅 {r:.2}（需 ≥ {AA}）");
         }
-        // 顺带钉住「品牌红本尊不适合当文字」这一事实，防止有人把它改回去
+        // 品牌色与覆盖层选区、默认标注色同源：三者各写一个 hex 字面量极易
+        // 漂移（UI 蓝、画出来红），这里钉住常量层面的一致
+        assert_eq!(
+            ACCENT_HEX,
+            format!("#{:02x}{:02x}{:02x}", ACCENT.r(), ACCENT.g(), ACCENT.b())
+        );
+        assert_eq!(
+            crate::config::parse_hex_color(ACCENT_HEX),
+            Some(lscreen_core::Rgba([
+                ACCENT.r(),
+                ACCENT.g(),
+                ACCENT.b(),
+                0xff
+            ])),
+            "默认标注色字面量必须与 theme::ACCENT 同值"
+        );
+        assert_eq!(
+            lscreen_core::Rgba::RED,
+            lscreen_core::Rgba([ACCENT.r(), ACCENT.g(), ACCENT.b(), 0xff]),
+            "core 的默认色必须与 app 品牌色同源"
+        );
+        // 顺带钉住「品牌色本尊不适合当文字」这一事实，防止有人把它改回去
         assert!(
             contrast(ACCENT, LIGHT_BG) < AA,
-            "若品牌红在浅色下已达标，accent_ink 可简化为 ACCENT（届时同步改注释）"
+            "若品牌色在浅色下已达标，accent_ink 可简化为 ACCENT（届时同步改注释）"
         );
     }
 
     #[test]
     fn accent_fill_carries_white_text() {
-        // 承载白字的实心填充（保存按钮等）必须达标：品牌红本尊配白字只有
-        // 4.23（差 0.27 到 AA），故按钮统一用深一档的 ACCENT_FILL
+        // 承载白字的实心填充（保存按钮等）必须达标：品牌蓝本尊配白字只有
+        // 3.12（离 AA 差 1.38），故按钮统一用深一档的 ACCENT_FILL
         let r = contrast(ACCENT_ON_TEXT, ACCENT_FILL);
         assert!(r >= AA, "白字在 ACCENT_FILL 上仅 {r:.2}（需 ≥ {AA}）");
-        // 顺带钉住「品牌红本尊配白字不达标」这一事实，防止有人改回 ACCENT
+        // 顺带钉住「品牌色本尊配白字不达标」这一事实，防止有人改回 ACCENT
         assert!(
             contrast(ACCENT_ON_TEXT, ACCENT) < AA,
-            "若品牌红配白字已达标，ACCENT_FILL 可简化为 ACCENT（届时同步改注释）"
+            "若品牌色配白字已达标，ACCENT_FILL 可简化为 ACCENT（届时同步改注释）"
         );
     }
 

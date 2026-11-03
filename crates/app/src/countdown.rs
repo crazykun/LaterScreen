@@ -112,9 +112,9 @@ impl eframe::App for CountdownApp {
                 // 按钮钉在底部（bottom_up：先添加的在最下），数字区在
                 // 剩余空间垂直居中，上下留白由布局自动均分
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                    // 取消按钮：实心品牌红 + 白字（settings 主按钮同款令牌）。
-                    // 不能用「红压暗 15%」的淡底——浅色主题下 accent_ink 深红字
-                    // 压暗红底只有 ~2.6:1；ACCENT_FILL+白字两主题都 ≥ AA
+                    // 取消按钮：实心品牌色 + 白字（settings 主按钮同款令牌）。
+                    // 不能用「强调色压暗 15%」的淡底——浅色主题下 accent_ink 深色字
+                    // 压暗底只有 ~2.6:1；ACCENT_FILL+白字两主题都 ≥ AA
                     // （theme::accent_fill_carries_white_text 单测锁定）
                     let btn = egui::Button::new(
                         egui::RichText::new("取消 (Esc)").color(theme::ACCENT_ON_TEXT),

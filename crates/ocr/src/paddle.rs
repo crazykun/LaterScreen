@@ -16,7 +16,9 @@ use crate::{BoundingBox, OcrError, OcrOutput, Result, TextBlock, TextRecognizer}
 
 #[path = "paddle_models.rs"]
 mod models;
-pub use models::{download_models, models_dir, models_present};
+pub use models::{
+    download_models, file_states, models_dir, models_present, verify_installed_models,
+};
 use models::{DET_FILE, DICT_FILE, REC_FILE};
 
 const DET_SIZE: u32 = 960;

@@ -688,8 +688,9 @@ fn run_settings() -> Result<(), String> {
         // Wayland 下 winit 的 libdecor 兜底装饰（灰底方块三键）与主题脱节，
         // 关掉改用自绘标题栏；X11/Win/mac 保留原生装饰
         .with_decorations(!lscreen_capture::is_wayland())
-        .with_inner_size([480.0, 640.0])
-        .with_min_inner_size([420.0, 520.0])
+        // 左侧 tab 导航布局需要横向空间：148 导航栏 + ≥460 内容区
+        .with_inner_size([720.0, 560.0])
+        .with_min_inner_size([640.0, 460.0])
         .with_resizable(true);
     let options = eframe::NativeOptions {
         viewport,

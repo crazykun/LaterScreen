@@ -51,7 +51,7 @@ const LOGO: &[u8] = include_bytes!("../../../packaging/icon.png");
 // 与配置面板（app/src/settings_ui.rs）同一套色板，保证两个窗口视觉一致。
 
 /// 品牌强调色
-const ACCENT: Color32 = Color32::from_rgb(0xe5, 0x39, 0x35);
+const ACCENT: Color32 = Color32::from_rgb(0x21, 0x96, 0xf3);
 /// 窗口底色
 const BG: Color32 = Color32::from_rgb(0x14, 0x14, 0x18);
 /// 控件描边

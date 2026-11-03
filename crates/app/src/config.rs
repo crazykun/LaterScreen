@@ -143,7 +143,7 @@ impl Default for Config {
             filename_template: DEFAULT_TEMPLATE.to_string(),
             theme: ThemeMode::default(),
             default_tool: "select".to_string(),
-            default_color: "#e53935".to_string(),
+            default_color: crate::theme::ACCENT_HEX.to_string(),
             default_width: 3.0,
             default_selection: "window".to_string(),
             copy_auto_exit: true,
@@ -645,10 +645,11 @@ mod tests {
         assert_eq!(tool_from_name("Rect"), Some(Tool::Rect));
         assert_eq!(tool_from_name(" select "), Some(Tool::Select));
         assert_eq!(tool_from_name("nope"), None);
-        let c = parse_hex_color("#E53935").unwrap();
-        assert_eq!(hex_color(c), "#e53935");
         assert!(parse_hex_color("#12345").is_none());
         assert!(parse_hex_color("red").is_none());
+        // 默认标注色与 theme::ACCENT / 覆盖层选区同源（v0.14 由品牌红迁移到
+        // 品牌蓝）：三者不同步就会出现「UI 是蓝的、画出来是红的」
+        assert_eq!(Config::default().default_color, crate::theme::ACCENT_HEX);
     }
 
     #[test]

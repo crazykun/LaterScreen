@@ -1,6 +1,8 @@
 //! UI 层：全屏覆盖层应用。状态机：Selecting（框选区域）→ Editing（标注）。
 
 mod canvas;
+#[cfg(test)]
+pub(crate) mod preview;
 pub(crate) mod toolbar;
 
 use std::collections::HashMap;

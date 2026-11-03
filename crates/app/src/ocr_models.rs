@@ -26,10 +26,32 @@ impl Progress {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum JobKind {
+    /// 轻量检查：三个文件按固定字节数判定存在性，不联网不哈希
     Check,
+    /// 下载缺失文件（已完好的文件跳过），完成后立即可供自动模式使用
     Download,
+    /// 全量完整性校验：逐文件 SHA-256 + 字节数，只报通过/失败
+    Verify,
+}
+
+impl JobKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Check => "check",
+            Self::Download => "download",
+            Self::Verify => "verify",
+        }
+    }
+}
+
+/// 一次后台任务的终态；`poll` 在状态转入 Done 的那一帧返回一次。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JobFinished {
+    pub kind: &'static str,
+    pub ok: bool,
+    pub present: bool,
 }
 
 #[derive(Default)]
@@ -41,7 +63,10 @@ enum State {
         progress: Arc<Mutex<Progress>>,
         rx: mpsc::Receiver<Result<bool, String>>,
     },
-    Done(Result<(), String>),
+    Done {
+        kind: JobKind,
+        outcome: Result<bool, String>,
+    },
 }
 
 #[derive(Default)]
@@ -66,6 +91,14 @@ impl OcrModels {
         )
     }
 
+    /// 进行中任务的来源标签（"check"/"download"/"verify"）；空闲为 None。
+    pub fn active_kind(&self) -> Option<&'static str> {
+        match &self.state {
+            State::Working { kind, .. } => Some(kind.label()),
+            _ => None,
+        }
+    }
+
     pub fn present(&self) -> bool {
         self.present
     }
@@ -74,9 +107,10 @@ impl OcrModels {
         self.progress
     }
 
-    pub fn result(&self) -> Option<&Result<(), String>> {
+    /// 最近一次任务的来源与结果；`None` = 打开窗口后还没有跑过任何任务。
+    pub fn result(&self) -> Option<(&'static str, &Result<bool, String>)> {
         match &self.state {
-            State::Done(result) => Some(result),
+            State::Done { kind, outcome } => Some((kind.label(), outcome)),
             _ => None,
         }
     }
@@ -89,9 +123,20 @@ impl OcrModels {
     }
 
     /// 显式授权下载，不隐式保存/切换引擎；完整性由核心下载 helper 保证。
+    /// 已完好的文件会在下载器内跳过，因此这也是「修复」路径（重下校验
+    /// 不通过的文件）。
     pub fn start(&mut self, ctx: &egui::Context) {
         self.start_with(ctx, JobKind::Download, |progress| {
             lscreen_ocr::paddle::download_models(progress)
+                .map(|()| true)
+                .map_err(|e| e.to_string())
+        });
+    }
+
+    /// 全量 SHA-256 完整性校验，不联网；给出明确的通过/失败结论。
+    pub fn verify(&mut self, ctx: &egui::Context) {
+        self.start_with(ctx, JobKind::Verify, |_| {
+            lscreen_ocr::paddle::verify_installed_models()
                 .map(|()| true)
                 .map_err(|e| e.to_string())
         });
@@ -126,16 +171,21 @@ impl OcrModels {
                 ui_ctx.request_repaint();
             });
         if let Err(e) = spawned {
-            self.state = State::Done(Err(format!("无法启动模型工作线程：{e}")));
+            self.state = State::Done {
+                kind,
+                outcome: Err(format!("无法启动模型工作线程：{e}")),
+            };
         }
         ctx.request_repaint();
     }
 
     /// 每帧只读取内存；等待时用低频心跳兜底异常退出（无结果就不会主动重绘）。
-    pub fn poll(&mut self, ctx: &egui::Context) {
-        let State::Working { progress, rx, .. } = &self.state else {
-            return;
+    /// 状态转入 Done 的那一帧返回一次终态，调用方用它给 toast 反馈。
+    pub fn poll(&mut self, ctx: &egui::Context) -> Option<JobFinished> {
+        let State::Working { kind, progress, rx } = &self.state else {
+            return None;
         };
+        let kind = *kind;
         // 先收终态、再读进度：收到结果后 worker 不再写槽，确保最后一帧
         // 不会在「读旧进度 → worker 完成 → 收到结果」的竞态里停在旧数值。
         let outcome = rx.try_recv();
@@ -145,16 +195,44 @@ impl OcrModels {
         match outcome {
             Ok(Ok(present)) => {
                 self.present = present;
-                self.state = State::Done(Ok(()));
+                self.state = State::Done {
+                    kind,
+                    outcome: Ok(present),
+                };
+                Some(JobFinished {
+                    kind: kind.label(),
+                    ok: true,
+                    present,
+                })
             }
             Ok(Err(e)) => {
                 self.present = false;
-                self.state = State::Done(Err(e));
+                self.state = State::Done {
+                    kind,
+                    outcome: Err(e),
+                };
+                Some(JobFinished {
+                    kind: kind.label(),
+                    ok: false,
+                    present: false,
+                })
             }
             Err(mpsc::TryRecvError::Disconnected) => {
-                self.state = State::Done(Err("模型工作线程已退出，可重试".into()));
+                self.present = false;
+                self.state = State::Done {
+                    kind,
+                    outcome: Err("模型工作线程已退出，可重试".into()),
+                };
+                Some(JobFinished {
+                    kind: kind.label(),
+                    ok: false,
+                    present: false,
+                })
             }
-            Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(POLL_INTERVAL),
+            Err(mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(POLL_INTERVAL);
+                None
+            }
         }
     }
 }
@@ -164,13 +242,17 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn wait_for_completion(models: &mut OcrModels, ctx: &egui::Context) {
+    fn wait_for_completion(models: &mut OcrModels, ctx: &egui::Context) -> Option<JobFinished> {
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut finished = None;
         while models.in_flight() {
-            models.poll(ctx);
+            if let Some(done) = models.poll(ctx) {
+                finished = Some(done);
+            }
             assert!(std::time::Instant::now() < deadline, "模型任务未结束");
             std::thread::sleep(Duration::from_millis(1));
         }
+        finished
     }
 
     #[test]
@@ -185,12 +267,16 @@ mod tests {
         assert!(models.checking());
         wait_for_completion(&mut models, &ctx);
         assert!(models.present());
-        assert_eq!(models.result(), Some(&Ok(())));
+        assert_eq!(
+            models.result(),
+            Some(("check", &Ok(true))),
+            "检查来源与结果要一起可见"
+        );
 
         models.start_with(&ctx, JobKind::Check, |_| Ok(false));
         wait_for_completion(&mut models, &ctx);
         assert!(!models.present());
-        assert_eq!(models.result(), Some(&Ok(())));
+        assert_eq!(models.result(), Some(("check", &Ok(false))));
     }
 
     #[test]
@@ -225,7 +311,7 @@ mod tests {
         finish_tx.send(()).unwrap();
         wait_for_completion(&mut models, &ctx);
         assert!(models.present());
-        assert_eq!(models.result(), Some(&Ok(())));
+        assert_eq!(models.result(), Some(("download", &Ok(true))));
         assert_eq!(
             models.progress(),
             Progress {
@@ -266,13 +352,54 @@ mod tests {
         });
         wait_for_completion(&mut models, &ctx);
         assert!(!models.present());
-        assert_eq!(models.result(), Some(&Err("模拟下载失败".into())));
+        assert_eq!(
+            models.result(),
+            Some(("download", &Err("模拟下载失败".into())))
+        );
         models.start_with(&ctx, JobKind::Download, |_| Ok(true));
         assert!(models.result().is_none());
         assert_eq!(models.progress(), Progress::default());
         wait_for_completion(&mut models, &ctx);
         assert!(models.present());
-        assert_eq!(models.result(), Some(&Ok(())));
+        assert_eq!(models.result(), Some(("download", &Ok(true))));
+    }
+
+    #[test]
+    fn verify_reports_explicit_result_once() {
+        let ctx = egui::Context::default();
+        let mut models = OcrModels::default();
+        models.start_with(&ctx, JobKind::Verify, |_| Ok(true));
+        assert!(!models.checking());
+        // 终态只在转入 Done 的那一帧返回一次，之后稳定可查
+        let finished = wait_for_completion(&mut models, &ctx);
+        assert_eq!(
+            finished,
+            Some(JobFinished {
+                kind: "verify",
+                ok: true,
+                present: true
+            })
+        );
+        assert_eq!(models.poll(&ctx), None, "完成事件不能重复发");
+        assert!(models.present());
+        assert_eq!(models.result(), Some(("verify", &Ok(true))));
+
+        // 校验失败：present 置否，来源仍是 verify，便于 UI 给「修复」引导
+        models.start_with(&ctx, JobKind::Verify, |_| Err("SHA-256 校验失败".into()));
+        let finished = wait_for_completion(&mut models, &ctx);
+        assert_eq!(
+            finished,
+            Some(JobFinished {
+                kind: "verify",
+                ok: false,
+                present: false
+            })
+        );
+        assert!(!models.present());
+        assert_eq!(
+            models.result(),
+            Some(("verify", &Err("SHA-256 校验失败".into())))
+        );
     }
 
     #[test]
@@ -293,6 +420,7 @@ mod tests {
         assert!(models
             .result()
             .unwrap()
+            .1
             .as_ref()
             .unwrap_err()
             .contains("退出"));

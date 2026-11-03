@@ -3,7 +3,7 @@
 //! 保存即写 config.toml；托盘进程监视 mtime 自动热加载（无需重启）。
 //! 校验失败（模板/热键/颜色/工具名非法）只提示不落盘。
 //!
-//! 视觉：双主题（暗/浅，见 [`crate::theme`]，品牌红强调 + 卡片分域），
+//! 视觉：双主题（暗/浅，见 [`crate::theme`]，品牌色强调 + 卡片分域），
 //! 颜色一律从 `ui.visuals()` 取令牌，仅作用于本窗口的 egui Context。
 
 use crate::config::{self, Config};
@@ -29,15 +29,137 @@ fn field(ui: &egui::Ui) -> egui::Color32 {
 fn line(ui: &egui::Ui) -> egui::Color32 {
     ui.visuals().widgets.noninteractive.bg_stroke.color
 }
-/// 品牌红作**文字**用（录屏提示/热键文案等）：走主题化前景色，别直接用
-/// `theme::ACCENT`——品牌红当文字在浅色下只有 3.6:1，见 theme::accent_ink
+/// 品牌色作**文字**用（录屏提示/热键文案等）：走主题化前景色，别直接用
+/// `theme::ACCENT`——品牌蓝当文字在浅色下只有 2.85:1，见 theme::accent_ink
 fn accent_text(ui: &egui::Ui) -> egui::Color32 {
     theme::accent_ink(ui.visuals())
 }
-/// 品牌红作**描边**用（聚焦/录入态边框）：比 ink 再推一档，见
+/// 品牌色作**描边**用（聚焦/录入态边框）：比 ink 再推一档，见
 /// `theme::accent_line`
 fn accent_border(ui: &egui::Ui) -> egui::Color32 {
     theme::accent_line(ui.visuals())
+}
+
+// ---------------------------------------------------------------- 页签导航
+
+/// 左侧导航页签：按功能域归组（原单页卡片拆分），内容见 `ui()` 的 match。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum SettingsTab {
+    #[default]
+    General,
+    Screenshot,
+    Record,
+    Ocr,
+    Hotkeys,
+    About,
+}
+
+impl SettingsTab {
+    /// 导航顺序即展示顺序；label/icon 一一对应，新增变体时两处同步补
+    /// （label 的 match 不带通配分支，漏加会编译失败）。
+    const ALL: [Self; 6] = [
+        Self::General,
+        Self::Screenshot,
+        Self::Record,
+        Self::Ocr,
+        Self::Hotkeys,
+        Self::About,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::General => "通用",
+            Self::Screenshot => "截图",
+            Self::Record => "录屏",
+            Self::Ocr => "文字识别",
+            Self::Hotkeys => "热键",
+            Self::About => "关于",
+        }
+    }
+
+    /// 线稿图标与工具栏同一套约定（比例坐标，任意尺寸可画）。
+    fn icon(self) -> fn(&egui::Painter, egui::Rect, egui::Color32) {
+        match self {
+            Self::General => crate::ui::toolbar::draw_sliders,
+            Self::Screenshot => crate::ui::toolbar::draw_viewfinder,
+            Self::Record => crate::ui::toolbar::draw_video,
+            Self::Ocr => crate::ui::toolbar::draw_ocr,
+            Self::Hotkeys => crate::ui::toolbar::draw_keyboard,
+            Self::About => crate::ui::toolbar::draw_info,
+        }
+    }
+
+    /// 滚轮向下 = 下一页；到末页钳住（回卷会让人迷失方位）。
+    fn next(self) -> Self {
+        let i = Self::ALL.iter().position(|&t| t == self).unwrap_or(0);
+        Self::ALL[(i + 1).min(Self::ALL.len() - 1)]
+    }
+
+    /// 滚轮向上 = 上一页；首页钳住。
+    fn prev(self) -> Self {
+        let i = Self::ALL.iter().position(|&t| t == self).unwrap_or(0);
+        Self::ALL[i.saturating_sub(1)]
+    }
+}
+
+/// 滚轮翻页的累积判定：跨触控板的平滑小增量也要攒够阈值才翻页，
+/// 否则轻扫一下连跳数页。返回 Some(+1/-1) = 下一页/上一页。
+/// 正 `delta` = 滚轮向下 = 下一页（与 egui 滚动语义一致）。
+fn scroll_flip(accum: &mut f32, delta: f32, threshold: f32) -> Option<i32> {
+    *accum += delta;
+    if *accum >= threshold {
+        *accum = 0.0;
+        Some(1)
+    } else if *accum <= -threshold {
+        *accum = 0.0;
+        Some(-1)
+    } else {
+        None
+    }
+}
+
+/// 导航项：图标 + 文字整行可点。选中/悬停底走 egui 的 selection 令牌
+/// （`interact_selectable` 与 toolbar::icon_button 同款——选中即
+/// `selection.bg_fill` + 配对前景色，对比度由 theme::selection_is_readable
+/// 测试锁定，这里不需要新令牌）。
+fn nav_item(
+    ui: &mut egui::Ui,
+    selected: bool,
+    label: &str,
+    icon: fn(&egui::Painter, egui::Rect, egui::Color32),
+) -> egui::Response {
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), egui::Sense::click());
+    let vis = ui.style().interact_selectable(&resp, selected);
+    if selected || resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(6), vis.bg_fill);
+    }
+    if selected {
+        // 左侧品牌色指示条：浅色主题下选中底（淡粉）与卡片底的对比偏弱，
+        // 指示条让「当前在哪一页」不依赖底色也能读出来
+        ui.painter().rect_filled(
+            egui::Rect::from_center_size(
+                egui::pos2(rect.left() + 2.0, rect.center().y),
+                egui::vec2(3.0, rect.height() * 0.55),
+            ),
+            egui::CornerRadius::same(2),
+            theme::accent_line(ui.visuals()),
+        );
+    }
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 24.0, rect.center().y),
+        egui::Vec2::splat(16.0),
+    );
+    icon(ui.painter(), icon_rect, vis.fg_stroke.color);
+    ui.painter().text(
+        egui::pos2(rect.left() + 40.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(13.5),
+        vis.fg_stroke.color,
+    );
+    resp
 }
 
 // ---------------------------------------------------------------- 卡片容器
@@ -140,6 +262,8 @@ impl UnsavedChanges {
 
 pub struct SettingsApp {
     cfg: Config,
+    /// 当前显示的页签（微信式左侧导航）；不持久化，每次打开默认「通用」。
+    active_tab: SettingsTab,
     /// 最近一次成功落盘的配置与关闭确认状态，用于统一保护所有未保存编辑。
     unsaved: UnsavedChanges,
     toast: Option<(String, f64)>,
@@ -156,6 +280,14 @@ pub struct SettingsApp {
     ocr_models_dir: Option<std::path::PathBuf>,
     /// 只读启动环境，不在设置窗口修改全局环境变量。
     ocr_engine_env: Option<String>,
+    /// 进行中的系统目录选择对话框（后台线程 → mpsc 回传）。
+    /// None = 没有打开；Some(rx) = 等待用户选择/取消。
+    dir_pick: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
+    /// 滚轮翻页的累积增量（见 `scroll_flip`）。
+    scroll_accum: f32,
+    /// 当前页内容是否超高需要滚动（上一帧的判定）：可滚动时滚轮让位给
+    /// 页面滚动，不翻页。
+    page_scrollable: bool,
 }
 
 impl SettingsApp {
@@ -177,6 +309,7 @@ impl SettingsApp {
         ocr_models.check(&cc.egui_ctx);
         Self {
             cfg,
+            active_tab: SettingsTab::default(),
             unsaved,
             toast: None,
             recording: None,
@@ -187,11 +320,34 @@ impl SettingsApp {
             ocr_models_dir: lscreen_ocr::paddle::models_dir(),
             ocr_engine_env: std::env::var_os("LSCREEN_OCR_ENGINE")
                 .map(|value| value.to_string_lossy().into_owned()),
+            dir_pick: None,
+            scroll_accum: 0.0,
+            page_scrollable: false,
         }
     }
 
     fn toast(&mut self, ctx: &egui::Context, msg: impl Into<String>) {
         self.toast = Some((msg.into(), ctx.input(|i| i.time) + 2.5));
+    }
+
+    /// 打开系统文件夹选择器（后台线程）。Win/mac 走原生对话框（模态自持
+    /// 消息泵），Linux 走 XDG portal（D-Bus，rfd 0.17 的 pollster 阻塞执行
+    /// 器）——都不能堵 egui UI 线程，结果经 mpsc 回帧循环；对话框开着时
+    /// 重复点击被忽略。
+    fn browse_dir(&mut self, ctx: &egui::Context) {
+        if self.dir_pick.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.dir_pick = Some(rx);
+        let ui_ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let picked = rfd::FileDialog::new()
+                .set_title("选择保存目录")
+                .pick_folder();
+            let _ = tx.send(picked);
+            ui_ctx.request_repaint();
+        });
     }
 
     /// 保存：先全部校验再落盘，非法字段就地提示。
@@ -267,14 +423,53 @@ impl SettingsApp {
             return;
         }
 
-        let response =
-            egui::Modal::new(egui::Id::new("settings-discard-confirmation")).show(ctx, |ui| {
-                ui.set_min_width(320.0);
-                ui.strong("放弃未保存的修改？");
+        // 视觉与页面同语言：卡片标题条 + 弱化说明 + 底部栏同款按钮（等高、
+        // 圆角 8、强调实心底/幽灵双形态）。安全动作「继续编辑」放最右：确认弹窗
+        // 的默认位置给无损选项，误触回车/Esc 都不会丢修改。
+        // 弹窗边框不再用 egui 默认 popup 样式（与主题脱节）：底色/描边/
+        // 圆角全部取自主题令牌，配一层柔和投影与加深的半透明遮罩
+        let style = ctx.style_of(ctx.theme());
+        let frame = egui::Frame::NONE
+            .fill(theme::card_fill(&style.visuals))
+            .stroke(egui::Stroke::new(
+                1.0,
+                style.visuals.widgets.noninteractive.bg_stroke.color,
+            ))
+            .corner_radius(12)
+            .inner_margin(egui::Margin::same(20))
+            .shadow(egui::epaint::Shadow {
+                offset: [0, 10],
+                blur: 28,
+                spread: 0,
+                color: egui::Color32::from_black_alpha(110),
+            });
+        let response = egui::Modal::new(egui::Id::new("settings-discard-confirmation"))
+            .frame(frame)
+            .backdrop_color(egui::Color32::from_black_alpha(120))
+            .show(ctx, |ui| {
+                ui.set_min_width(360.0);
+                ui.horizontal(|ui| {
+                    let (bar, _) =
+                        ui.allocate_exact_size(egui::vec2(3.0, 16.0), egui::Sense::hover());
+                    ui.painter()
+                        .rect_filled(bar, egui::CornerRadius::same(2), theme::ACCENT);
+                    ui.strong(egui::RichText::new("放弃未保存的修改？").size(15.0));
+                });
                 ui.add_space(8.0);
-                ui.label("当前修改尚未保存，关闭后将无法恢复。");
-                ui.add_space(12.0);
+                ui.label(
+                    egui::RichText::new("当前修改尚未保存，关闭后将无法恢复。").color(muted(ui)),
+                );
+                ui.add_space(16.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let continue_editing = ui
+                        .add(
+                            egui::Button::new(egui::RichText::new("继续编辑").color(text(ui)))
+                                .corner_radius(8)
+                                .min_size(egui::vec2(96.0, 34.0))
+                                .stroke(egui::Stroke::new(1.0, line(ui))),
+                        )
+                        .clicked();
+                    ui.add_space(8.0);
                     let discard = ui
                         .add(
                             egui::Button::new(
@@ -283,10 +478,11 @@ impl SettingsApp {
                                     .strong(),
                             )
                             .fill(theme::ACCENT_FILL)
-                            .corner_radius(6),
+                            .corner_radius(8)
+                            .min_size(egui::vec2(96.0, 34.0)),
                         )
+                        .on_hover_text("恢复到上次保存的配置并关闭")
                         .clicked();
-                    let continue_editing = ui.button("继续编辑").clicked();
                     (discard, continue_editing)
                 })
                 .inner
@@ -498,7 +694,33 @@ impl eframe::App for SettingsApp {
     /// 绘制配置面板并统一处理保存快捷键和三种关闭入口的未保存保护。
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.ocr_models.poll(&ctx);
+        // 模型任务完成时给一次明确 toast：此前「校验」跑完没有任何可见
+        // 反馈（只有两行灰字回到点击前的样子），用户看不出结果
+        if let Some(done) = self.ocr_models.poll(&ctx) {
+            let msg = match (done.kind, done.ok) {
+                ("check", true) if done.present => "检查完成：PP-OCR 模型已就绪",
+                ("check", true) => "检查完成：本机未安装 PP-OCR 模型",
+                ("download", true) => "下载完成：PP-OCR 模型已就绪",
+                ("verify", true) => "校验通过：模型文件完整",
+                ("check", false) => "模型检查未通过",
+                ("download", false) => "模型下载失败",
+                _ => "模型校验未通过",
+            };
+            self.toast(&ctx, msg);
+        }
+        // 两个后台状态机都在帧级收尾：切走「关于」页后，进行中的更新检查
+        // 也要被 poll（结果留在槽里等下次进页会显示，但状态要先落定）
+        self.update.poll();
+        // 目录选择对话框回填：路径直接落进未保存的编辑副本（走常规保存流程）
+        if let Some(rx) = self.dir_pick.as_ref() {
+            if let Ok(picked) = rx.try_recv() {
+                self.dir_pick = None;
+                if let Some(path) = picked {
+                    self.cfg.save_dir = path.to_string_lossy().into_owned();
+                    self.toast(&ctx, format!("已选择目录：{}", path.display()));
+                }
+            }
+        }
         // 热键捕获必须最先处理：吃掉所有按键事件（含 Esc，防止录制中关窗）
         self.capture_hotkey(&ctx);
         // Wayland 自绘标题栏：✕ 走与底部「关闭」相同的未保存确认流程
@@ -530,6 +752,22 @@ impl eframe::App for SettingsApp {
             }
         }
 
+        // 滚轮翻页（微信式）：页面内容不超高时，滚轮切换上/下一页；超高
+        // 时滚轮让位给页面滚动（可滚动性用上一帧的判定，滞后一帧无感）。
+        // 确认弹窗开着时不翻页——背后的页签变来变去很怪
+        if !self.page_scrollable && !self.unsaved.confirming_discard() {
+            let delta = ctx.input(|i| i.smooth_scroll_delta()).y;
+            if let Some(dir) = scroll_flip(&mut self.scroll_accum, delta, 48.0) {
+                self.active_tab = if dir > 0 {
+                    self.active_tab.next()
+                } else {
+                    self.active_tab.prev()
+                };
+            }
+        } else {
+            self.scroll_accum = 0.0;
+        }
+
         let dirty = self.unsaved.is_dirty(&self.cfg);
 
         // 底部按钮条（固定高度，勿动：见上一版 Panel 高度自增 bug 的复盘注释）
@@ -544,17 +782,25 @@ impl eframe::App for SettingsApp {
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // 主按钮：品牌红底白字（两主题通用）
-                    let save_btn = egui::Button::new(
-                        egui::RichText::new("保存")
-                            .color(theme::ACCENT_ON_TEXT)
-                            .strong(),
-                    )
-                    // 承载白字的实心底：用深一档的品牌红（品牌红本尊配白字
-                    // 4.23:1，差一点到 AA），见 theme::ACCENT_FILL
-                    .fill(theme::ACCENT_FILL)
-                    .corner_radius(8)
-                    .min_size(egui::vec2(96.0, 34.0));
+                    // 主按钮双形态：有待保存修改时品牌蓝实心底白字（品牌色只作
+                    // 填充，配白字见 theme::ACCENT_FILL）；无修改时中性幽灵
+                    // ——暗淡的强调色底曾被误读为「危险/异常」，灰幽灵让
+                    // 「可保存 ↔ 不可保存」的状态变化一眼可见
+                    let save_btn = if dirty {
+                        egui::Button::new(
+                            egui::RichText::new("保存")
+                                .color(theme::ACCENT_ON_TEXT)
+                                .strong(),
+                        )
+                        .fill(theme::ACCENT_FILL)
+                        .corner_radius(8)
+                        .min_size(egui::vec2(96.0, 34.0))
+                    } else {
+                        egui::Button::new(egui::RichText::new("保存").color(muted(ui)))
+                            .corner_radius(8)
+                            .min_size(egui::vec2(96.0, 34.0))
+                            .stroke(egui::Stroke::new(1.0, line(ui)))
+                    };
                     let save_response = ui.add_enabled(dirty, save_btn).on_hover_text(if dirty {
                         "保存修改（Ctrl/Cmd+S）"
                     } else {
@@ -564,12 +810,24 @@ impl eframe::App for SettingsApp {
                         self.save(&ctx);
                     }
                     ui.add_space(8.0);
-                    // 次按钮：幽灵描边
-                    let close_btn = egui::Button::new(egui::RichText::new("关闭").color(muted(ui)))
-                        .corner_radius(8)
-                        .min_size(egui::vec2(80.0, 34.0))
-                        .stroke(egui::Stroke::new(1.0, line(ui)));
-                    if ui.add(close_btn).clicked() {
+                    // 次按钮：幽灵描边。标签随状态切换——有修改时叫「取消」
+                    // （点了会走放弃确认，语义是放弃修改退出），无修改时叫
+                    // 「关闭」（直接关，无需暗示「取消」什么）
+                    let close_btn = egui::Button::new(
+                        egui::RichText::new(if dirty { "取消" } else { "关闭" }).color(muted(ui)),
+                    )
+                    .corner_radius(8)
+                    .min_size(egui::vec2(80.0, 34.0))
+                    .stroke(egui::Stroke::new(1.0, line(ui)));
+                    if ui
+                        .add(close_btn)
+                        .on_hover_text(if dirty {
+                            "放弃修改并关闭"
+                        } else {
+                            "关闭设置"
+                        })
+                        .clicked()
+                    {
                         self.request_close(&ctx);
                     }
                     if dirty {
@@ -582,6 +840,27 @@ impl eframe::App for SettingsApp {
                     }
                 });
             });
+        // 左侧导航（微信式 tab）：声明在 bottom 之后 → 只占保存栏以上空间。
+        // Panel::left 默认可拖宽，这里锁死；底色抬一层与内容区分。
+        egui::Panel::left(egui::Id::new("settings-nav"))
+            .exact_size(148.0)
+            .resizable(false)
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::card_fill(ui.visuals()))
+                    .stroke(egui::Stroke::new(1.0, line(ui)))
+                    .inner_margin(egui::Margin::same(8)),
+            )
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.add_space(4.0);
+                for tab in SettingsTab::ALL {
+                    let selected = self.active_tab == tab;
+                    if nav_item(ui, selected, tab.label(), tab.icon()).clicked() {
+                        self.active_tab = tab;
+                    }
+                }
+            });
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::NONE
@@ -589,10 +868,21 @@ impl eframe::App for SettingsApp {
                     .inner_margin(egui::Margin::same(16)),
             )
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                let scroll_out = egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    self.page(ui);
+                    match self.active_tab {
+                        SettingsTab::General => self.tab_general(ui),
+                        SettingsTab::Screenshot => self.tab_screenshot(ui),
+                        SettingsTab::Record => self.tab_record(ui),
+                        SettingsTab::Ocr => self.tab_ocr(ui),
+                        SettingsTab::Hotkeys => self.tab_hotkeys(ui),
+                        SettingsTab::About => self.tab_about(ui),
+                    }
                 });
+                // 内容超出视口 = 页面需要滚动，滚轮让位；用本帧的真实值
+                // 更新（下一帧的翻页判定读它）
+                self.page_scrollable =
+                    scroll_out.content_size.y > scroll_out.inner_rect.height() + 2.0;
             });
 
         if let Some((msg, until)) = &self.toast {
@@ -604,7 +894,7 @@ impl eframe::App for SettingsApp {
                     .anchor(egui::Align2::CENTER_BOTTOM, egui::Vec2::new(0.0, -72.0))
                     .show(&ctx, |ui| {
                         // Toast 跟随主题：底色比面板抬起一层、文字用主文字令牌、
-                        // 描边用主题化的品牌红（此前两主题都是黑底红框，浅色下
+                        // 描边用主题化的品牌色（此前两主题都是黑底强调色描边，浅色下
                         // 是在白面板上糊一块黑，用户反馈太丑）
                         egui::Frame::NONE
                             .fill(theme::toast_fill(ui.visuals()))
@@ -644,37 +934,15 @@ impl SettingsApp {
         ctx.request_repaint_after(POLL);
     }
 
-    fn page(&mut self, ui: &mut egui::Ui) {
-        // 页头
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("LaterScreen")
-                    .color(text(ui))
-                    .size(19.0)
-                    .strong(),
-            );
-            ui.add_space(8.0);
-            egui::Frame::NONE
-                .fill(field(ui))
-                .corner_radius(egui::CornerRadius::same(255))
-                .inner_margin(egui::Margin::symmetric(8, 2))
-                .show(ui, |ui| {
-                    let ver = format!("v{}", env!("CARGO_PKG_VERSION"));
-                    ui.label(egui::RichText::new(ver).color(muted(ui)).size(11.0));
-                });
-        });
-        ui.add_space(2.0);
-        ui.label(
-            egui::RichText::new("截图 · 标注 · 取色 · 录屏 · 贴图")
-                .color(muted(ui))
-                .size(12.0),
-        );
-        ui.add_space(14.0);
-
-        card(ui, "保存", |ui| {
+    fn tab_general(&mut self, ui: &mut egui::Ui) {
+        card(ui, "通用", |ui| {
+            // 卡片级宽度：Grid 测量趟里单元格的 available_width 不可靠
+            // （实测出现过 17px），用它在单元格里减预留会算出负宽度直接
+            // panic——宽度一律从这里的稳定值推导，且钳死下限双保险
+            let card_w = ui.available_width();
             egui::Grid::new("save-grid")
                 .num_columns(2)
-                .spacing([12.0, 10.0])
+                .spacing([12.0, 12.0])
                 .show(ui, |ui| {
                     row_label(ui, "主题");
                     egui::ComboBox::from_id_salt("theme")
@@ -690,26 +958,140 @@ impl SettingsApp {
                     ui.end_row();
 
                     row_label(ui, "目录");
-                    input_field(
-                        ui,
-                        egui::TextEdit::singleline(&mut self.cfg.save_dir)
-                            .hint_text("留空 = ~/Pictures")
-                            .desired_width(f32::INFINITY),
-                    )
-                    .on_hover_text("保存截图/录屏的目录；留空用 ~/Pictures（不存在则家目录）");
+                    ui.horizontal(|ui| {
+                        let input_w = (card_w - 152.0).max(160.0); // 预留 标签列+浏览按钮，钳底防负
+                        input_field(
+                            ui,
+                            egui::TextEdit::singleline(&mut self.cfg.save_dir)
+                                .hint_text("留空 = ~/Pictures"),
+                            input_w,
+                        )
+                        .on_hover_text("保存截图/录屏的目录；留空用 ~/Pictures（不存在则家目录）");
+                        // 浏览：调系统文件夹选择器（后台线程，见 browse_dir），
+                        // 选完直接落进未保存的编辑副本
+                        if ui
+                            .add_enabled(
+                                self.dir_pick.is_none(),
+                                egui::Button::new(egui::RichText::new("浏览…").color(muted(ui)))
+                                    .corner_radius(6)
+                                    .min_size(egui::vec2(64.0, crate::theme::FIELD_H))
+                                    .stroke(egui::Stroke::new(1.0, line(ui))),
+                            )
+                            .on_hover_text("打开系统文件夹选择器；对话框开着时不可重复点击")
+                            .clicked()
+                        {
+                            self.browse_dir(ui.ctx());
+                        }
+                    });
                     ui.end_row();
 
                     row_label(ui, "文件名模板");
-                    input_field(
-                        ui,
-                        egui::TextEdit::singleline(&mut self.cfg.filename_template)
-                            .desired_width(f32::INFINITY),
-                    )
-                    .on_hover_text(
-                        "占位符：{YYYYMMDD} {HHMMSS} {YYYY} {MM} {DD} {HH} {MI} {SS}；未知 token 原样保留",
-                    );
+                    ui.horizontal(|ui| {
+                        let input_w = (card_w - 100.0).max(240.0); // 预留 标签列+「?」，钳底防负
+                        input_field(
+                            ui,
+                            egui::TextEdit::singleline(&mut self.cfg.filename_template),
+                            input_w,
+                        )
+                        .on_hover_text(
+                            "占位符：{YYYYMMDD} {HHMMSS} {YYYY} {MM} {DD} {HH} {MI} {SS}；未知 token 原样保留",
+                        );
+                        // 「?」悬停入口：占位符列表原本只在输入框悬停提示里，
+                        // 不看说明书发现不了（可用性反馈）
+                        ui.label(egui::RichText::new("?").color(muted(ui)).size(12.0))
+                            .on_hover_text(
+                                "支持的占位符：{YYYYMMDD} 年月日、{HHMMSS} 时分秒、\
+                                 {YYYY}/{MM}/{DD} 年/月/日、{HH}/{MI}/{SS} 时/分/秒；\
+                                 未知 token 原样保留",
+                            );
+                    });
                     ui.end_row();
 
+                    row_label(ui, "历史条数");
+                    ui.horizontal(|ui| {
+                        // ± 步进：DragValue 单独摆着像普通文本框，加减按钮给
+                        // 「这是个数量」的直观操作
+                        if ui
+                            .add(
+                                egui::Button::new("−")
+                                    .corner_radius(6)
+                                    .min_size(egui::vec2(24.0, 24.0))
+                                    .stroke(egui::Stroke::new(1.0, line(ui))),
+                            )
+                            .clicked()
+                        {
+                            self.cfg.history_max = self.cfg.history_max.saturating_sub(1).max(1);
+                        }
+                        // egui 0.35 的 DragValue 无 on_hover_text：经 ui.add 的 Response 挂
+                        ui.add(
+                            egui::DragValue::new(&mut self.cfg.history_max)
+                                .range(1..=50)
+                                .speed(0.1),
+                        );
+                        if ui
+                            .add(
+                                egui::Button::new("+")
+                                    .corner_radius(6)
+                                    .min_size(egui::vec2(24.0, 24.0))
+                                    .stroke(egui::Stroke::new(1.0, line(ui))),
+                            )
+                            .clicked()
+                        {
+                            self.cfg.history_max = (self.cfg.history_max + 1).min(50);
+                        }
+                    })
+                    .response
+                    .on_hover_text("托盘「历史」窗口保留的最近截图/贴图/录屏条数（1-50）");
+                    ui.end_row();
+                });
+            // 模板实时预览：每帧按当前编辑值渲染，改动即时可见。不用 small()
+            // ——小字号在灰度 AA 下笔画稀释严重，正文字号 + 弱色足够区分
+            // 层级（用户反馈「发白」的重灾区）
+            ui.label(
+                egui::RichText::new(format!(
+                    "ⓘ 示例  {}.png",
+                    config::render_template(&self.cfg.filename_template, (2026, 8, 19, 10, 15, 20))
+                ))
+                .color(muted(ui)),
+            )
+            .on_hover_text(
+                "随文件名模板实时更新；支持 {YYYYMMDD} {HHMMSS} {YYYY} {MM} {DD} {HH} {MI} {SS}",
+            );
+            ui.add_space(6.0);
+            ui.checkbox(&mut self.cfg.open_dir_after_save, "保存后自动打开所在目录");
+            ui.add_space(4.0);
+            // 「打开目录」独立成行：原先和复选框挤在一行，容易误触旁边的勾选
+            // 必须用 link：Label（ui.small）默认 Sense::hover，clicked() 永远不触发
+            if ui
+                .link(egui::RichText::new("打开目录").color(accent_text(ui)))
+                .on_hover_text("调用系统文件管理器打开当前保存目录")
+                .clicked()
+            {
+                // 面板内存中的目录（未保存的编辑也生效）；未设置或不存在
+                // 则退回默认目录（~/Pictures 或家目录）
+                let dir = self
+                    .cfg
+                    .save_dir_override()
+                    .filter(|p| p.is_dir())
+                    .unwrap_or_else(export::default_dir);
+                export::open_in_file_manager(&dir);
+            }
+            ui.add_space(6.0);
+            ui.checkbox(&mut self.cfg.copy_auto_exit, "复制到剪贴板后自动退出");
+            ui.add_space(4.0);
+            ui.checkbox(
+                &mut self.cfg.history_close_after_copy,
+                "历史面板点击复制后自动关闭",
+            );
+        });
+    }
+
+    fn tab_record(&mut self, ui: &mut egui::Ui) {
+        card(ui, "录屏", |ui| {
+            egui::Grid::new("record-grid")
+                .num_columns(2)
+                .spacing([12.0, 12.0])
+                .show(ui, |ui| {
                     row_label(ui, "录制格式");
                     let current = config::RECORD_FORMAT_NAMES
                         .iter()
@@ -773,52 +1155,15 @@ impl SettingsApp {
                             "鼠标按下处叠加扩散圆环（300ms 淡出），GIF/MP4 均生效；教程录制友好。录制前也可用状态窗的齿轮临时修改",
                         );
                     ui.end_row();
-
-                    row_label(ui, "历史条数");
-                    // egui 0.35 的 DragValue 无 on_hover_text：经 ui.add 的 Response 挂
-                    ui.add(
-                        egui::DragValue::new(&mut self.cfg.history_max)
-                            .range(1..=50)
-                            .speed(0.1),
-                    )
-                    .on_hover_text("托盘「历史」窗口保留的最近截图/贴图/录屏条数（1-50）");
-                    ui.end_row();
                 });
-            // 模板预览提示：不用 small()——小字号在灰度 AA 下笔画稀释严重，
-            // 正文字号 + 弱色足够区分层级（用户反馈「发白」的重灾区）
-            ui.label(
-                egui::RichText::new(format!(
-                    "示例  {}.png",
-                    config::render_template(&self.cfg.filename_template, (2026, 8, 19, 10, 15, 20))
-                ))
-                .color(muted(ui)),
-            );
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut self.cfg.open_dir_after_save, "保存后自动打开所在目录");
-                ui.add_space(8.0);
-                // 必须用 link：Label（ui.small）默认 Sense::hover，clicked() 永远不触发
-                if ui
-                    .link(egui::RichText::new("打开目录").color(accent_text(ui)))
-                    .on_hover_text("调用系统文件管理器打开当前保存目录")
-                    .clicked()
-                {
-                    // 面板内存中的目录（未保存的编辑也生效）；未设置或不存在
-                    // 则退回默认目录（~/Pictures 或家目录）
-                    let dir = self
-                        .cfg
-                        .save_dir_override()
-                        .filter(|p| p.is_dir())
-                        .unwrap_or_else(export::default_dir);
-                    export::open_in_file_manager(&dir);
-                }
-            });
         });
+    }
 
+    fn tab_screenshot(&mut self, ui: &mut egui::Ui) {
         card(ui, "默认绘制", |ui| {
             egui::Grid::new("draw-grid")
                 .num_columns(2)
-                .spacing([12.0, 10.0])
+                .spacing([12.0, 12.0])
                 .show(ui, |ui| {
                     row_label(ui, "工具");
                     let current = config::TOOL_NAMES
@@ -879,10 +1224,10 @@ impl SettingsApp {
                 });
         });
 
-        card(ui, "行为", |ui| {
-            egui::Grid::new("behavior-grid")
+        card(ui, "初始选区", |ui| {
+            egui::Grid::new("selection-grid")
                 .num_columns(2)
-                .spacing([12.0, 10.0])
+                .spacing([12.0, 12.0])
                 .show(ui, |ui| {
                     row_label(ui, "初始选区");
                     let current = config::SELECTION_NAMES
@@ -909,21 +1254,18 @@ impl SettingsApp {
                         );
                     ui.end_row();
                 });
-            ui.add_space(6.0);
-            ui.checkbox(&mut self.cfg.copy_auto_exit, "复制到剪贴板后自动退出");
-            ui.add_space(4.0);
-            ui.checkbox(
-                &mut self.cfg.history_close_after_copy,
-                "历史面板点击复制后自动关闭",
-            );
         });
+    }
 
+    fn tab_ocr(&mut self, ui: &mut egui::Ui) {
         card(ui, "文字识别", |ui| self.ocr_settings(ui));
+    }
 
+    fn tab_hotkeys(&mut self, ui: &mut egui::Ui) {
         card(ui, "全局热键", |ui| {
             egui::Grid::new("hotkeys-grid")
                 .num_columns(2)
-                .spacing([12.0, 10.0])
+                .spacing([12.0, 12.0])
                 .show(ui, |ui| {
                     // 行序与值都取自 tray::HOTKEY_FIELDS（下标即字段索引，
                     // 见 hotkey_field_mut），新增可绑动作时这里不用改
@@ -976,25 +1318,50 @@ impl SettingsApp {
             }
             ui.small(egui::RichText::new(hint).color(muted(ui)));
         });
+    }
 
-        if let Some(path) = config::config_path() {
-            ui.add_space(2.0);
+    fn tab_about(&mut self, ui: &mut egui::Ui) {
+        card(ui, "关于", |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("LaterScreen")
+                        .color(text(ui))
+                        .size(15.0)
+                        .strong(),
+                );
+                ui.add_space(8.0);
+                egui::Frame::NONE
+                    .fill(field(ui))
+                    .corner_radius(egui::CornerRadius::same(255))
+                    .inner_margin(egui::Margin::symmetric(8, 2))
+                    .show(ui, |ui| {
+                        let ver = format!("v{}", env!("CARGO_PKG_VERSION"));
+                        ui.label(egui::RichText::new(ver).color(muted(ui)).size(11.0));
+                    });
+            });
+            ui.add_space(4.0);
             ui.label(
-                egui::RichText::new(format!("配置文件  {}", path.display()))
+                egui::RichText::new("截图 · 标注 · 取色 · 录屏 · 贴图")
                     .color(muted(ui))
-                    .size(11.0),
+                    .size(12.0),
             );
-        }
-        ui.add_space(6.0);
-        self.update_row(ui);
-        ui.add_space(6.0);
+            ui.add_space(6.0);
+            if let Some(path) = config::config_path() {
+                ui.label(
+                    egui::RichText::new(format!("配置文件  {}", path.display()))
+                        .color(muted(ui))
+                        .size(11.0),
+                );
+            }
+        });
+        card(ui, "检查更新", |ui| self.update_row(ui));
     }
 
     /// 引擎配置与模型下载分离：前者需要保存，后者成功后立即可供 auto 使用。
     fn ocr_settings(&mut self, ui: &mut egui::Ui) {
         egui::Grid::new("ocr-grid")
             .num_columns(2)
-            .spacing([12.0, 10.0])
+            .spacing([12.0, 12.0])
             .show(ui, |ui| {
                 row_label(ui, "引擎");
                 let current = config::OCR_ENGINE_NAMES
@@ -1050,16 +1417,47 @@ impl SettingsApp {
         ui.add_space(8.0);
         let busy = self.ocr_models.in_flight();
         let checking = self.ocr_models.checking();
-        let failed = matches!(self.ocr_models.result(), Some(Err(_)));
+        let failed = matches!(self.ocr_models.result(), Some((_, Err(_))));
+        let present = self.ocr_models.present();
+
+        // 逐文件轻量状态（按固定字节数判定，不做哈希）：哈希结论看下方
+        // 最近一次「校验完整性」的结果行；下载进行中不读盘（文件在变动）
+        let states = if busy {
+            None
+        } else {
+            lscreen_ocr::paddle::file_states()
+        };
+        if let Some(states) = states {
+            for (file, size, ready) in states {
+                let label = match file {
+                    "ch_PP-OCRv4_det_mobile.onnx" => "检测模型",
+                    "ch_PP-OCRv4_rec_mobile.onnx" => "识别模型",
+                    _ => "字典",
+                };
+                let (mark, color) = if ready {
+                    ("✓", text(ui))
+                } else {
+                    ("✗", accent_text(ui))
+                };
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{mark} {label}（{:.1} MB）",
+                        size as f64 / 1_000_000.0
+                    ))
+                    .color(color)
+                    .size(12.5),
+                );
+            }
+            ui.add_space(4.0);
+        }
+
         ui.horizontal_wrapped(|ui| {
-            let button_label = if checking {
-                "检查本地模型中…"
-            } else if busy {
-                "下载与校验中…"
-            } else if failed {
-                "重试下载 PP-OCR 模型"
-            } else if self.ocr_models.present() {
-                "校验 / 修复 PP-OCR 模型"
+            // 主按钮按状态分流：齐备 → 只读校验（SHA-256）；缺失/失败 → 下载
+            // （下载器会跳过完好文件、重下损坏文件，即「修复」路径）
+            let button_label = if failed {
+                "重新下载 / 修复 PP-OCR 模型"
+            } else if present {
+                "校验完整性（SHA-256）"
             } else {
                 "下载 PP-OCR 模型（约 15.6 MB）"
             };
@@ -1067,7 +1465,11 @@ impl SettingsApp {
                 .add_enabled(!busy, egui::Button::new(button_label))
                 .clicked()
             {
-                self.ocr_models.start(ui.ctx());
+                if present && !failed {
+                    self.ocr_models.verify(ui.ctx());
+                } else {
+                    self.ocr_models.start(ui.ctx());
+                }
             }
             if ui
                 .add_enabled(!busy, egui::Button::new("刷新本地状态"))
@@ -1077,46 +1479,64 @@ impl SettingsApp {
                 self.ocr_models.check(ui.ctx());
             }
         });
-        if busy && !checking {
-            let progress = self.ocr_models.progress();
-            let label = if progress.total == 0 {
-                "准备下载 / 校验模型…".into()
+        if busy {
+            if checking {
+                ui.label(egui::RichText::new("正在检查本地模型文件…").color(muted(ui)));
+            } else if matches!(self.ocr_models.active_kind(), Some("verify")) {
+                ui.label(
+                    egui::RichText::new("正在校验完整性（逐文件 SHA-256，约 15.6 MB）…")
+                        .color(muted(ui)),
+                );
             } else {
-                format!(
-                    "{:.1} / {:.1} MB（三个文件合计）",
-                    progress.done as f64 / 1_000_000.0,
-                    progress.total as f64 / 1_000_000.0,
-                )
-            };
-            ui.add(
-                egui::ProgressBar::new(progress.fraction())
-                    .text(label)
-                    .animate(false)
-                    .desired_width(ui.available_width()),
-            );
-            ui.label(egui::RichText::new("下载期间请保持设置窗口打开。").color(muted(ui)));
-        } else if !checking {
-            match self.ocr_models.result() {
-                Some(Err(e)) => {
+                let progress = self.ocr_models.progress();
+                let label = if progress.total == 0 {
+                    "准备下载…".into()
+                } else {
+                    format!(
+                        "{:.1} / {:.1} MB（三个文件合计）",
+                        progress.done as f64 / 1_000_000.0,
+                        progress.total as f64 / 1_000_000.0,
+                    )
+                };
+                ui.add(
+                    egui::ProgressBar::new(progress.fraction())
+                        .text(label)
+                        .animate(false)
+                        .desired_width(ui.available_width()),
+                );
+                ui.label(egui::RichText::new("下载期间请保持设置窗口打开。").color(muted(ui)));
+            }
+        } else if let Some((kind, outcome)) = self.ocr_models.result() {
+            // 最近一次操作的结果行：明确「检查/下载/校验」各自的结论
+            match outcome {
+                Ok(_) => {
+                    let msg = match kind {
+                        "check" if present => "检查完成：模型文件齐备，自动模式将优先使用。",
+                        "check" => "检查完成：本机未安装 PP-OCR 模型。",
+                        "download" => "下载完成：模型已就绪，自动模式将优先使用。",
+                        "verify" => "校验通过：三个模型文件 SHA-256 与大小全部一致。",
+                        _ => "",
+                    };
+                    ui.label(egui::RichText::new(msg).color(text(ui)));
+                }
+                Err(e) => {
                     ui.label(
                         egui::RichText::new(format!(
-                            "模型操作失败：{e}。可检查网络和目录权限后重试。"
+                            "上次操作失败：{e}。可检查网络和目录权限后重试或修复。"
                         ))
                         .color(accent_text(ui)),
                     );
                 }
-                _ if self.ocr_models.present() => {
-                    ui.label(
-                        egui::RichText::new(
-                            "PP-OCR 模型文件已齐备；自动模式优先，首次识别会校验完整性。",
-                        )
-                        .color(muted(ui)),
-                    );
-                }
-                _ => {
-                    ui.label(egui::RichText::new("尚无完整的 PP-OCR 模型。").color(muted(ui)));
-                }
             }
+        } else if present {
+            ui.label(
+                egui::RichText::new("模型文件齐备；自动模式优先，识别加载时会再次校验完整性。")
+                    .color(muted(ui)),
+            );
+        } else {
+            ui.label(
+                egui::RichText::new("尚无完整的 PP-OCR 模型；点击上方按钮下载。").color(muted(ui)),
+            );
         }
         if let Some(path) = &self.ocr_models_dir {
             ui.label(
@@ -1131,9 +1551,9 @@ impl SettingsApp {
     ///
     /// 手动触发而非自动联网（理由见 `update` 模块头）：按钮点一次发一次
     /// 请求，网络 IO 在后台线程，检查中按钮禁用并持续重绘。
+    /// poll 已提升到帧级（`ui()` 开头）：切走本页时后台检查仍被收尾。
     fn update_row(&mut self, ui: &mut egui::Ui) {
-        self.update.poll();
-        // 新版本提示条（只在确实查到更新时出现）：品牌红描边卡片 +
+        // 新版本提示条（只在确实查到更新时出现）：品牌色描边卡片 +
         // 「去下载」跳 release 页。紧贴「检查更新」按钮上方——检查动作
         // 发生在哪，结果就出现在哪；页面长于视口时放页顶会落在视野外
         // （v0.11.4 实测：查到更新后用户停在页底，看不见提示条）
@@ -1239,10 +1659,50 @@ fn row_label(ui: &mut egui::Ui, label: &str) {
     ui.label(egui::RichText::new(label).color(text(ui)));
 }
 
-/// 通用加高输入框：高度取 `theme::FIELD_H`，与下拉框/数字框（interact_size
-/// 下限）保持同一来源，同 Grid 内等高。
-fn input_field(ui: &mut egui::Ui, builder: egui::TextEdit<'_>) -> egui::Response {
-    ui.add(builder.min_size(egui::vec2(0.0, crate::theme::FIELD_H)))
+/// 通用输入框：高度精确钉在 `theme::FIELD_H`，与下拉框/数字框（interact_size
+/// 下限）同 Grid 内等高。
+///
+/// egui 0.35 的 TextEdit **忽略 `min_size.y`**（高度 = 字体行高，单行仅
+/// ~20px），原先的 min_size 写法一直静默失效——这正是输入框比下拉框矮一截
+/// 的根源。这里改为：定高容器 + 关闭内建边框 + 自绘主题化边框。填充与描边
+/// 都取主题同源令牌（`text_edit_bg_color` 同为 field、聚焦用 selection
+/// 描边，见 theme.rs 的聚焦契约），视觉上与内建边框一致但高度可控。
+fn input_field(ui: &mut egui::Ui, builder: egui::TextEdit<'_>, width: f32) -> egui::Response {
+    let field_h = crate::theme::FIELD_H;
+    let pad_x = ui.spacing().button_padding.x;
+    let (rect, outer) = ui.allocate_exact_size(egui::vec2(width, field_h), egui::Sense::hover());
+    // 绘制顺序 = 底色 → 文字 → 边框。底色若画在文字之后（第一版的写法）
+    // 会把内容整个盖住——表现为「模板空白」「目录选完不回显」，路径其实
+    // 已经写入，只是被不透明背景压在下面
+    ui.painter().rect_filled(rect, 6.0, field(ui));
+    let mut content = ui.new_child(
+        egui::UiBuilder::new()
+            // 水平内边距由内层可用矩形让出（pad_x = button_padding.x，与
+            // ComboBox/Button 同一来源）：走 TextEdit 的 margin 会在
+            // egui 里把光标命中区也算进去，实际字形反而贴到边框上
+            .max_rect(rect.shrink2(egui::vec2(pad_x, 0.0)))
+            // centered_and_justified：内层 TextEdit 自身只有一行高（~20px），
+            // 必须在 32px 容器里垂直居中——top_down 会把文字顶到上沿
+            .layout(egui::Layout::centered_and_justified(
+                egui::Direction::TopDown,
+            )),
+    );
+    let inner = content.add(
+        builder
+            .desired_width(rect.width() - pad_x * 2.0)
+            .frame(egui::Frame::NONE)
+            .vertical_align(egui::Align::Center),
+    );
+    let stroke = if inner.has_focus() {
+        ui.visuals().selection.stroke
+    } else {
+        ui.visuals().widgets.inactive.bg_stroke
+    };
+    ui.painter()
+        .rect_stroke(rect, 6.0, stroke, egui::StrokeKind::Inside);
+    // 悬停提示挂在外层定高矩形上（调用方只做 on_hover_text）；内部点击/
+    // 编辑交互仍由 TextEdit 自己处理
+    outer
 }
 
 fn egui_to_rgba(c: egui::Color32) -> lscreen_core::Rgba {
@@ -1252,6 +1712,351 @@ fn egui_to_rgba(c: egui::Color32) -> lscreen_core::Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn form_control_heights_are_uniform() {
+        // 「输入框/选择框统一高度」契约：theme::apply 把 interact_size.y
+        // 钉在 FIELD_H，所有表单控件都必须落在这个高度上（checkbox 例外，
+        // 它是伴随标签的勾选件，不是表单行控件）
+        for mode in [config::ThemeMode::Dark, config::ThemeMode::Light] {
+            let ctx = egui::Context::default();
+            theme::apply(&ctx, mode);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 400.0),
+                )),
+                ..Default::default()
+            };
+            let mut heights = None;
+            let _ = ctx.run_ui(input, |ui| {
+                let mut s = String::from("x");
+                let text = input_field(ui, egui::TextEdit::singleline(&mut s), 200.0)
+                    .rect
+                    .height();
+                let mut n = 10usize;
+                let drag = ui.add(egui::DragValue::new(&mut n)).rect.height();
+                let combo = egui::ComboBox::from_id_salt("probe-combo")
+                    .selected_text("x")
+                    .width(120.0)
+                    .show_ui(ui, |_ui| {})
+                    .response
+                    .rect
+                    .height();
+                let mut v = 3.0f32;
+                let slider = ui.add(egui::Slider::new(&mut v, 1.0..=12.0)).rect.height();
+                heights = Some((text, drag, combo, slider));
+            });
+            let (text, drag, combo, slider) = heights.expect("run_ui 未执行表单探测");
+            let field_h = crate::theme::FIELD_H;
+            assert_eq!(text, field_h, "TextEdit 高度偏离 FIELD_H（{mode:?}）");
+            assert_eq!(drag, field_h, "DragValue 高度偏离 FIELD_H（{mode:?}）");
+            assert_eq!(combo, field_h, "ComboBox 高度偏离 FIELD_H（{mode:?}）");
+            assert_eq!(slider, field_h, "Slider 高度偏离 FIELD_H（{mode:?}）");
+        }
+    }
+
+    /// 离屏渲染 input_field 的「有文本 / 空+hint」两种状态，供人工核对
+    /// 文本与占位符是否真的画了出来（回显缺陷的实证手段）。CI 不跑：
+    /// `cargo test -p lscreen settings_input_field_preview -- --ignored --nocapture`
+    /// 离屏渲染「输入框 + 下方同宽下拉框」的横向对齐快照（回显/左内边距
+    /// 目视核对）。CI 不跑：
+    /// `cargo test -p lscreen settings_input_align_preview -- --ignored --nocapture`
+    #[test]
+    #[ignore = "生成 /tmp/lscreen_settings_input_align_{dark,light}.png 供人工核对左对齐"]
+    fn settings_input_align_preview() {
+        for (mode, tag) in [
+            (config::ThemeMode::Dark, "dark"),
+            (config::ThemeMode::Light, "light"),
+        ] {
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(4.0);
+            theme::apply(&ctx, mode);
+            let size = egui::Vec2::new(400.0, 120.0);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                ..Default::default()
+            };
+            let mut text = String::from("lscreen_{YYYYMMDD}_101520");
+            let out = ctx.run_ui(input, |ui| {
+                egui::Frame::NONE
+                    .fill(ui.visuals().panel_fill)
+                    .show(ui, |ui| {
+                        ui.add_space(16.0);
+                        input_field(ui, egui::TextEdit::singleline(&mut text), 360.0);
+                        ui.add_space(8.0);
+                        egui::ComboBox::from_id_salt("preview-align-combo")
+                            .selected_text("跟随系统")
+                            .width(360.0)
+                            .show_ui(ui, |_ui| {});
+                    });
+            });
+            let path = format!("/tmp/lscreen_settings_input_align_{tag}.png");
+            let (w, h) = crate::ui::preview::rasterize_png(&ctx, out, size, &path);
+            println!("已生成 {path}（{w}x{h}）");
+        }
+    }
+
+    #[test]
+    #[ignore = "生成 /tmp/lscreen_settings_input_{text,hint}.png 供人工核对输入框回显"]
+    fn settings_input_field_preview() {
+        let ctx = egui::Context::default();
+        ctx.set_pixels_per_point(4.0);
+        theme::apply(&ctx, config::ThemeMode::Dark);
+        let size = egui::Vec2::new(400.0, 120.0);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            ..Default::default()
+        };
+        let mut text = String::from("lscreen_{YYYYMMDD}_101520");
+        let out = ctx.run_ui(input, |ui| {
+            egui::Frame::NONE
+                .fill(ui.visuals().panel_fill)
+                .show(ui, |ui| {
+                    ui.add_space(20.0);
+                    input_field(ui, egui::TextEdit::singleline(&mut text), 360.0);
+                    ui.add_space(20.0);
+                    let mut empty = String::new();
+                    input_field(
+                        ui,
+                        egui::TextEdit::singleline(&mut empty).hint_text("留空 = ~/Pictures"),
+                        360.0,
+                    );
+                });
+        });
+        let path = "/tmp/lscreen_settings_input_text.png";
+        let (w, h) = crate::ui::preview::rasterize_png(&ctx, out, size, path);
+        println!("已生成 {path}（{w}x{h}）");
+        // hint 版单独一张
+        let ctx = egui::Context::default();
+        ctx.set_pixels_per_point(4.0);
+        theme::apply(&ctx, config::ThemeMode::Dark);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            ..Default::default()
+        };
+        let mut empty = String::new();
+        let out = ctx.run_ui(input, |ui| {
+            egui::Frame::NONE
+                .fill(ui.visuals().panel_fill)
+                .show(ui, |ui| {
+                    ui.add_space(20.0);
+                    input_field(
+                        ui,
+                        egui::TextEdit::singleline(&mut empty).hint_text("留空 = ~/Pictures"),
+                        360.0,
+                    );
+                });
+        });
+        let path = "/tmp/lscreen_settings_input_hint.png";
+        let (w, h) = crate::ui::preview::rasterize_png(&ctx, out, size, path);
+        println!("已生成 {path}（{w}x{h}）");
+    }
+
+    #[test]
+    fn input_field_paints_text_above_fill() {
+        // 回显回归：定高包装曾把不透明底色画在文字**之后**——文字被底色
+        // 整个盖住，表现恰好是「文件名模板空白」「目录选完不回显」（路径
+        // 写进去了但看不见）。这里直接断言 tessellate 后的顶点顺序：
+        // 底色矩形的顶点必须全部先于文本字形顶点
+        let ctx = egui::Context::default();
+        theme::apply(&ctx, config::ThemeMode::Dark);
+        let fill_color = ctx
+            .style_of(ctx.theme())
+            .visuals
+            .widgets
+            .inactive
+            .weak_bg_fill;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 100.0),
+            )),
+            ..Default::default()
+        };
+        let input_rect = egui::Rect::from_min_size(egui::pos2(20.0, 30.0), egui::vec2(360.0, 32.0));
+        let mut text = String::from("回显文本 abc123");
+        let out = ctx.run_ui(input, |ui| {
+            ui.allocate_space(egui::vec2(20.0, 30.0)); // 让输入框落在 input_rect 处
+            input_field(ui, egui::TextEdit::singleline(&mut text), 360.0);
+        });
+        let shapes = ctx.tessellate(out.shapes, out.pixels_per_point);
+        let mut last_fill = None;
+        let mut first_glyph = None;
+        let mut seq = 0usize;
+        for clipped in &shapes {
+            if let egui::epaint::Primitive::Mesh(mesh) = &clipped.primitive {
+                for v in &mesh.vertices {
+                    if v.uv == egui::epaint::WHITE_UV
+                        && v.color == fill_color
+                        && input_rect.contains(v.pos)
+                    {
+                        last_fill = Some(seq);
+                    } else if v.uv != egui::epaint::WHITE_UV && first_glyph.is_none() {
+                        first_glyph = Some(seq);
+                    }
+                    seq += 1;
+                }
+            }
+        }
+        let (last_fill, first_glyph) = (
+            last_fill.expect("未找到输入框底色顶点"),
+            first_glyph.expect("未找到文本字形顶点（回显会失效）"),
+        );
+        assert!(
+            last_fill < first_glyph,
+            "底色画到了文字之后（文字被盖住 = 模板空白/目录不回显的根因）: fill@{last_fill} >= glyph@{first_glyph}"
+        );
+
+        // 垂直居中回归：内层 TextEdit 只有一行高，曾在 32px 容器里被
+        // top_down 布局顶到上沿（用户反馈「文字偏高」）。字形包围盒的
+        // 垂直中心应与输入框中心基本重合（±4px 容纳字形上下伸出）
+        let mut glyph_y = (0.0, 0usize);
+        for clipped in &shapes {
+            if let egui::epaint::Primitive::Mesh(mesh) = &clipped.primitive {
+                for v in &mesh.vertices {
+                    if v.uv != egui::epaint::WHITE_UV && input_rect.contains(v.pos) {
+                        glyph_y.0 += v.pos.y;
+                        glyph_y.1 += 1;
+                    }
+                }
+            }
+        }
+        assert!(glyph_y.1 > 0, "未找到文本字形顶点");
+        let glyph_center = glyph_y.0 / glyph_y.1 as f32;
+        let expected = input_rect.center().y;
+        assert!(
+            (glyph_center - expected).abs() < 4.0,
+            "文字未垂直居中：字形中心 {glyph_center}，输入框中心 {expected}"
+        );
+    }
+
+    /// 「文字太靠左 / 下拉与输入框选中不是一个颜色」回归：输入框文本与下拉
+    /// 选中文本必须共用 `spacing.button_padding.x` 作左内边距，且两者的
+    /// 「选中」语义都从同一组 selection 令牌取色（输入框保留 field 底色、
+    /// 只强调描边；下拉 active/open 也用 selection，而非 egui 默认灰）。
+    #[test]
+    fn input_text_left_offset_matches_combo_and_selection_tokens_are_shared() {
+        for mode in [config::ThemeMode::Dark, config::ThemeMode::Light] {
+            let ctx = egui::Context::default();
+            theme::apply(&ctx, mode);
+            let v = &ctx.style_of(ctx.theme()).visuals;
+            // 下拉展开/按下（active、open）必须和输入框聚焦同源于 selection
+            for w in [&v.widgets.active, &v.widgets.open] {
+                assert_eq!(
+                    w.bg_stroke.color, v.selection.stroke.color,
+                    "下拉 {mode:?} 描边色与输入框聚焦描边不一致"
+                );
+                assert_eq!(
+                    w.weak_bg_fill, v.selection.bg_fill,
+                    "下拉 {mode:?} 底色未走 selection 令牌"
+                );
+            }
+            // 输入框底色仍是 field（聚焦只强调描边，不整体变成选中底）
+            assert_eq!(v.text_edit_bg_color(), v.widgets.inactive.weak_bg_fill);
+
+            let mut input_rect = egui::Rect::NAN;
+            let mut combo_rect = egui::Rect::NAN;
+            let mut text = String::from("abc");
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 400.0),
+                )),
+                ..Default::default()
+            };
+            // 只画两个控件，各占一段互不相交的纵向区间，便于按矩形归属字形
+            let out = ctx.run_ui(raw, |ui| {
+                input_rect = input_field(ui, egui::TextEdit::singleline(&mut text), 300.0).rect;
+                ui.add_space(40.0);
+                combo_rect = egui::ComboBox::from_id_salt("probe-align-combo")
+                    .selected_text("abc")
+                    .width(300.0)
+                    .show_ui(ui, |_ui| {})
+                    .response
+                    .rect;
+            });
+            let shapes = ctx.tessellate(out.shapes, out.pixels_per_point);
+            let glyph_left = |rect: egui::Rect| -> f32 {
+                let mut min = f32::MAX;
+                let mut found = 0usize;
+                for clipped in &shapes {
+                    if let egui::epaint::Primitive::Mesh(mesh) = &clipped.primitive {
+                        for vtx in &mesh.vertices {
+                            // 字形顶点 uv 非 WHITE_UV；用矩形横向/纵向范围归属，
+                            // 避免把另一个控件的字形算进来
+                            if vtx.uv != egui::epaint::WHITE_UV && rect.contains(vtx.pos) {
+                                min = min.min(vtx.pos.x);
+                                found += 1;
+                            }
+                        }
+                    }
+                }
+                assert!(found > 0, "未在 {rect:?} 内找到字形顶点");
+                min
+            };
+            let input_text_x = glyph_left(input_rect) - input_rect.left();
+            // Button 的内边距同样是 button_padding.x：它代表「表单控件统一的
+            // 左内边距」，输入框必须与之相等，否则同列里就会显得更靠左
+            let combo_text_x = glyph_left(combo_rect) - combo_rect.left();
+            assert!(
+                (input_text_x - combo_text_x).abs() < 1.5,
+                "输入框左内边距 {input_text_x} 与同类控件 {combo_text_x} 不一致（{mode:?}）"
+            );
+            assert!(
+                input_text_x >= 10.0,
+                "输入框左内边距过小会显得文字贴边：{input_text_x}（{mode:?}）"
+            );
+        }
+    }
+
+    #[test]
+    fn scroll_flip_accumulates_and_resets_past_threshold() {
+        let mut accum = 0.0;
+        assert_eq!(scroll_flip(&mut accum, 30.0, 48.0), None);
+        assert_eq!(scroll_flip(&mut accum, 10.0, 48.0), None);
+        assert_eq!(accum, 40.0);
+        // 触控板反向轻扫会抵消累积
+        assert_eq!(scroll_flip(&mut accum, -20.0, 48.0), None);
+        assert_eq!(accum, 20.0);
+        // 越过阈值 → 翻页并清零（一次大幅轻扫也只翻一页）
+        assert_eq!(scroll_flip(&mut accum, 30.0, 48.0), Some(1));
+        assert_eq!(accum, 0.0);
+        // 向上同理
+        assert_eq!(scroll_flip(&mut accum, -60.0, 48.0), Some(-1));
+        assert_eq!(accum, 0.0);
+    }
+
+    #[test]
+    fn scroll_tab_steps_and_clamps_at_ends() {
+        let first = SettingsTab::default();
+        assert_eq!(first.next(), SettingsTab::Screenshot);
+        assert_eq!(first.prev(), first, "首页向上钳住");
+        let last = SettingsTab::About;
+        assert_eq!(last.next(), last, "末页向下钳住");
+        assert_eq!(last.prev(), SettingsTab::Hotkeys);
+    }
+
+    #[test]
+    fn settings_tabs_have_unique_labels_and_distinct_icons() {
+        let mut labels = std::collections::BTreeSet::new();
+        let mut icons = std::collections::BTreeSet::new();
+        for tab in SettingsTab::ALL {
+            assert!(!tab.label().is_empty());
+            assert!(
+                labels.insert(tab.label()),
+                "重复的 tab 标签: {}",
+                tab.label()
+            );
+            assert!(
+                icons.insert(tab.icon() as usize),
+                "重复的 tab 图标: {}",
+                tab.label()
+            );
+        }
+        assert_eq!(SettingsTab::ALL.len(), 6);
+        assert_eq!(SettingsTab::default(), SettingsTab::General);
+    }
 
     #[test]
     fn ocr_engine_config_change_is_dirty_until_saved_or_discarded() {
@@ -1317,5 +2122,45 @@ mod tests {
         assert_eq!(edited.theme, config::ThemeMode::Light);
         assert!(!guard.is_dirty(&edited));
         assert!(!guard.confirming_discard());
+    }
+
+    /// 离屏渲染左侧导航栏（首个 tab 选中态）双主题各一张 PNG，供人工核对
+    /// 图标造型与选中/悬停底色（无窗口依赖，光栅化见 ui::preview）。CI 不跑：
+    /// `cargo test -p lscreen settings_nav_preview -- --ignored --nocapture`
+    #[test]
+    #[ignore = "生成 /tmp/lscreen_settings_nav_{dark,light}.png 供人工核对导航栏"]
+    fn settings_nav_preview() {
+        for (mode, tag) in [
+            (config::ThemeMode::Dark, "dark"),
+            (config::ThemeMode::Light, "light"),
+        ] {
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(4.0); // 4x 渲染，看得清线稿
+            theme::apply(&ctx, mode);
+            let size = egui::Vec2::new(148.0, 260.0);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                ..Default::default()
+            };
+            let out = ctx.run_ui(input, |ui| {
+                egui::Frame::NONE
+                    .fill(theme::card_fill(ui.visuals()))
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        // 裸 run_ui 的根 ui 可用宽度无界，真实 Panel::left 会
+                        // 把内容约束在面板宽内——这里显式对齐同一约束，
+                        // 否则 nav_item 的 available_width 会吞掉右侧内边距
+                        ui.set_max_width(size.x - 16.0);
+                        ui.spacing_mut().item_spacing.y = 4.0;
+                        ui.add_space(4.0);
+                        for (i, tab) in SettingsTab::ALL.into_iter().enumerate() {
+                            nav_item(ui, i == 0, tab.label(), tab.icon());
+                        }
+                    });
+            });
+            let path = format!("/tmp/lscreen_settings_nav_{tag}.png");
+            let (w, h) = crate::ui::preview::rasterize_png(&ctx, out, size, &path);
+            println!("已生成 {path}（{w}x{h}）");
+        }
     }
 }

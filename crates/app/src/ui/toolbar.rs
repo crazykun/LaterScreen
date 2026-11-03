@@ -673,10 +673,10 @@ fn close_button(ui: &mut egui::Ui) -> bool {
 /// 最强的视觉锚点，不再需要额外放大小怪。
 fn primary_copy_button(ui: &mut egui::Ui) -> bool {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(BTN), Sense::click());
-    // 悬停压深一档而非提亮：绿色不比红色对「提亮->对比度跌破 AA」免疫
+    // 悬停压深一档而非提亮：绿色不比品牌色对「提亮->对比度跌破 AA」免疫
     // （同色系 Material Green 900 方向，白字对比度 5.13 → 7.17）。压深幅度
     // 取 0.8：v0.11.5 的 0.92 只暗 8%，实心块小到 hover 无感（用户反馈），
-    // 20% 的明度差才与关闭按钮的红色悬停一个量级
+    // 20% 的明度差才与关闭按钮的强调色悬停一个量级
     let fill = if response.hovered() {
         SUCCESS_FILL.gamma_multiply(0.8)
     } else {
@@ -1031,8 +1031,8 @@ pub(crate) fn draw_save(p: &egui::Painter, r: Rect, c: Color32) {
 
 /// 对号图标：颜色跟随调用方（`c`）——贴图条把它画在弹层底色上（普通前景
 /// 色），截图覆盖层的主复制按钮把它画在交付绿实心底上（传 `SUCCESS_ON_TEXT`
-/// 白；v0.11.5 起底是绿不是红，白勾 5.13:1）。此前绿色对号画在品牌红底上只有
-/// 1.79:1（v0.11.4 修复），红绿色弱也不可辨。
+/// 白；v0.11.5 起底是绿不是强调色，白勾 5.13:1）。此前绿色对号画在强调色底
+/// 上只有 1.79:1（v0.11.4 修复），两者在色弱下也不可辨。
 pub(crate) fn draw_check(p: &egui::Painter, r: Rect, c: Color32) {
     let s = Stroke::new(2.0, c);
     let w = r.width();
@@ -1124,7 +1124,7 @@ fn draw_qr_gen(p: &egui::Painter, r: Rect, c: Color32) {
     p.line_segment([Pos2::new(cx, cy - s), Pos2::new(cx, cy + s)], plus);
 }
 
-fn draw_ocr(p: &egui::Painter, r: Rect, c: Color32) {
+pub(crate) fn draw_ocr(p: &egui::Painter, r: Rect, c: Color32) {
     p.text(
         Pos2::new(r.center().x, r.min.y + r.height() * 0.38),
         egui::Align2::CENTER_CENTER,
@@ -1173,6 +1173,115 @@ pub(crate) fn draw_close(p: &egui::Painter, r: Rect, c: Color32) {
     let r = r.shrink(1.0);
     p.line_segment([r.left_top(), r.right_bottom()], s);
     p.line_segment([r.right_top(), r.left_bottom()], s);
+}
+
+// ---- 设置面板导航图标：与工具栏同一套线稿约定（比例坐标，任意尺寸可画） ----
+
+/// 通用：两条滑轨各带一颗滑块。
+pub(crate) fn draw_sliders(p: &egui::Painter, r: Rect, c: Color32) {
+    let stroke = Stroke::new(1.4, c);
+    for (i, y_ratio) in [0.3f32, 0.7].into_iter().enumerate() {
+        let y = r.min.y + r.height() * y_ratio;
+        p.line_segment([Pos2::new(r.min.x, y), Pos2::new(r.max.x, y)], stroke);
+        let kx = if i == 0 {
+            r.min.x + r.width() * 0.62
+        } else {
+            r.min.x + r.width() * 0.3
+        };
+        p.circle_filled(Pos2::new(kx, y), r.width() * 0.14, c);
+    }
+}
+
+/// 截图：取景框（四角括号 + 中心对焦点）。
+pub(crate) fn draw_viewfinder(p: &egui::Painter, r: Rect, c: Color32) {
+    let stroke = Stroke::new(1.4, c);
+    let len = r.width() * 0.32;
+    let corners = [
+        (
+            r.min,
+            Pos2::new(r.min.x + len, r.min.y),
+            Pos2::new(r.min.x, r.min.y + len),
+        ),
+        (
+            Pos2::new(r.max.x, r.min.y),
+            Pos2::new(r.max.x - len, r.min.y),
+            Pos2::new(r.max.x, r.min.y + len),
+        ),
+        (
+            Pos2::new(r.min.x, r.max.y),
+            Pos2::new(r.min.x, r.max.y - len),
+            Pos2::new(r.min.x + len, r.max.y),
+        ),
+        (
+            r.max,
+            Pos2::new(r.max.x - len, r.max.y),
+            Pos2::new(r.max.x, r.max.y - len),
+        ),
+    ];
+    for (corner, h, v) in corners {
+        p.line_segment([corner, h], stroke);
+        p.line_segment([corner, v], stroke);
+    }
+    p.circle_filled(r.center(), r.width() * 0.09, c);
+}
+
+/// 录屏：机身 + 右侧镜头楔形。
+pub(crate) fn draw_video(p: &egui::Painter, r: Rect, c: Color32) {
+    let stroke = Stroke::new(1.4, c);
+    let body = Rect::from_min_size(
+        Pos2::new(r.min.x, r.min.y + r.height() * 0.22),
+        Vec2::new(r.width() * 0.6, r.height() * 0.56),
+    );
+    p.rect_stroke(body, 2.0, stroke, StrokeKind::Inside);
+    let (cy, spread) = (r.center().y, r.height() * 0.16);
+    let tip = Pos2::new(r.max.x, cy);
+    p.line_segment([Pos2::new(body.max.x, cy - spread), tip], stroke);
+    p.line_segment([tip, Pos2::new(body.max.x, cy + spread)], stroke);
+}
+
+/// 热键：键盘（按键点 + 空格条）。
+pub(crate) fn draw_keyboard(p: &egui::Painter, r: Rect, c: Color32) {
+    let stroke = Stroke::new(1.3, c);
+    let body = Rect::from_min_size(
+        Pos2::new(r.min.x, r.min.y + r.height() * 0.18),
+        Vec2::new(r.width(), r.height() * 0.64),
+    );
+    p.rect_stroke(body, 2.0, stroke, StrokeKind::Inside);
+    let key_y = body.min.y + body.height() * 0.32;
+    for i in 0..3u32 {
+        let kx = body.min.x + body.width() * (0.22 + 0.28 * i as f32);
+        p.line_segment(
+            [Pos2::new(kx - 1.2, key_y), Pos2::new(kx + 1.2, key_y)],
+            stroke,
+        );
+    }
+    let bar_y = body.max.y - body.height() * 0.3;
+    p.line_segment(
+        [
+            Pos2::new(body.min.x + body.width() * 0.25, bar_y),
+            Pos2::new(body.max.x - body.width() * 0.25, bar_y),
+        ],
+        stroke,
+    );
+}
+
+/// 关于：信息圈（i）。
+pub(crate) fn draw_info(p: &egui::Painter, r: Rect, c: Color32) {
+    let stroke = Stroke::new(1.4, c);
+    p.circle_stroke(r.center(), r.width() * 0.5 - 0.7, stroke);
+    let cx = r.center().x;
+    p.circle_filled(
+        Pos2::new(cx, r.min.y + r.height() * 0.32),
+        r.width() * 0.07,
+        c,
+    );
+    p.line_segment(
+        [
+            Pos2::new(cx, r.min.y + r.height() * 0.48),
+            Pos2::new(cx, r.max.y - r.height() * 0.26),
+        ],
+        Stroke::new(1.6, c),
+    );
 }
 
 /// 修改样式时同步应用到当前选中的图元。

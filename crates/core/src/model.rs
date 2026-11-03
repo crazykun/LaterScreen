@@ -17,7 +17,10 @@ pub const TEXT_BG_RADIUS: f32 = 2.0;
 pub struct Rgba(pub [u8; 4]);
 
 impl Rgba {
-    pub const RED: Rgba = Rgba([0xe5, 0x39, 0x35, 0xff]);
+    /// 品牌色（v0.14 起为 LaterScreen 蓝，与 app 侧 `theme::ACCENT` 同源）。
+    /// 名字沿用 RED 是为了不动下游调用点；改色值时要与 `theme::ACCENT_HEX`
+    /// 同步，否则会出现「UI 蓝、标注红」。
+    pub const RED: Rgba = Rgba([0x21, 0x96, 0xf3, 0xff]);
 
     pub const fn r(&self) -> u8 {
         self.0[0]

@@ -2743,7 +2743,7 @@ dependencies = [
 
 [[package]]
 name = "lscreen"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "arboard",
  "clap",
@@ -2758,6 +2758,7 @@ dependencies = [
  "lscreen-ocr",
  "lscreen-record",
  "raw-window-handle",
+ "rfd",
  "serde",
  "tiny-skia 0.12.0",
  "toml 0.9.12+spec-1.1.0",
@@ -2771,7 +2772,7 @@ dependencies = [
 
 [[package]]
 name = "lscreen-capture"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "ashpd",
  "async-io",
@@ -2788,7 +2789,7 @@ dependencies = [
 
 [[package]]
 name = "lscreen-core"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "ab_glyph",
  "image",
@@ -2799,7 +2800,7 @@ dependencies = [
 
 [[package]]
 name = "lscreen-ocr"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "ab_glyph",
  "image",
@@ -2817,7 +2818,7 @@ dependencies = [
 
 [[package]]
 name = "lscreen-record"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "block2 0.6.2",
  "bytes",
@@ -2839,7 +2840,7 @@ dependencies = [
 
 [[package]]
 name = "lscreen-setup"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "eframe",
  "image",

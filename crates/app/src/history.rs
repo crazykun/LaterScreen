@@ -641,7 +641,7 @@ const THUMB_H: f32 = 120.0;
 /// 此上限的较小值：横版图填满行宽时右栏收到上限，竖版窄图时右栏跟着
 /// 收窄——图片永远是行内最大元素，文字只是配角。
 const META_W: f32 = 76.0;
-/// 行与行之间的垂直间距：红框悬停会外扩 2px，无间距时会压到相邻行。
+/// 行与行之间的垂直间距：强调色悬停框会外扩 2px，无间距时会压到相邻行。
 const ROW_GAP: f32 = 12.0;
 
 /// 历史面板（Snipaste 式自绘弹窗）：无边框浮窗 + 缩略图列表，悬停 Tooltip +
@@ -1071,7 +1071,7 @@ impl eframe::App for HistoryApp {
                     self.confirm_clear = false;
                 }
                 let (label, fg, bg) = if self.confirm_clear {
-                    // 待确认态：红底白字（两主题通用）——底色取品牌红深档，
+                    // 待确认态：强调实心底白字（两主题通用）——底色取品牌色深档，
                     // 白字 5.4:1，见 theme::ACCENT_FILL 的同源约定
                     (
                         "确认?",
@@ -1228,7 +1228,7 @@ impl eframe::App for HistoryApp {
                                 );
                             });
 
-                            // 整行卡片矩形（缩略图左缘到面板右缘）——用于悬停底色 + 红框
+                            // 整行卡片矩形（缩略图左缘到面板右缘）——用于悬停底色 + 强调色框
                             let row_rect = Rect::from_min_size(
                                 img_rect.min,
                                 Vec2::new(
@@ -1236,7 +1236,7 @@ impl eframe::App for HistoryApp {
                                     img_rect.height(),
                                 ),
                             );
-                            // 行文字区 hover-only：只负责悬停红框，不抢占滚动区拖拽层，
+                            // 行文字区 hover-only：只负责悬停强调色框，不抢占滚动区拖拽层，
                             // 在文字/空白处按住拖动即滚动列表（缩略图上的点击除外）。
                             let hover = ui
                                 .interact(
@@ -1251,7 +1251,7 @@ impl eframe::App for HistoryApp {
                                     7.0,
                                     egui::Color32::from_rgba_unmultiplied(0xe5, 0x39, 0x35, 18),
                                 );
-                                // 描边走主题化的品牌红：品牌红本尊在浅色面板上
+                                // 描边走主题化的品牌色：品牌色本尊在浅色面板上
                                 // 只有 3.85:1，细边框看不清（见 theme::accent_line）
                                 ui.painter().rect_stroke(
                                     row_rect.expand(2.0),
@@ -1306,7 +1306,7 @@ impl eframe::App for HistoryApp {
                                 }
                             });
 
-                            // 行间隔：给红框悬停外扩留出空间，不压到相邻行。
+                            // 行间隔：给强调色悬停框外扩留出空间，不压到相邻行。
                             ui.add_space(ROW_GAP);
                         }
                         if let Some(name) = remove {

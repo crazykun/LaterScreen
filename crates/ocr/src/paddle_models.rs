@@ -83,6 +83,30 @@ pub fn models_present() -> bool {
     models_dir().is_some_and(|dir| models_present_in(&dir))
 }
 
+/// 逐文件轻量状态（按固定字节数判定，不做哈希）：设置面板的状态列表用。
+/// `(文件名, 大小字节, 是否就绪)`；无法定位缓存目录时返回 None。
+pub fn file_states() -> Option<[(&'static str, u64, bool); 3]> {
+    let dir = models_dir()?;
+    Some(file_states_in(&dir))
+}
+
+fn file_states_in(dir: &Path) -> [(&'static str, u64, bool); 3] {
+    MANIFEST.map(|spec| {
+        let ready = fs::metadata(dir.join(spec.file))
+            .map(|m| m.is_file() && m.len() == spec.size)
+            .unwrap_or(false);
+        (spec.file, spec.size, ready)
+    })
+}
+
+/// 全量完整性校验（SHA-256 + 字节数）当前缓存目录的三个模型文件。
+/// 供设置面板「校验完整性」按钮在后台线程调用；结果只有通过/失败（失败
+/// 文案带第一个不一致的文件名），不存在部分通过。
+pub fn verify_installed_models() -> Result<()> {
+    let dir = models_dir().ok_or_else(|| OcrError("无法定位用户缓存目录".into()))?;
+    verify_models(&dir)
+}
+
 pub(crate) fn models_present_in(dir: &Path) -> bool {
     present_for_manifest(dir, &MANIFEST)
 }
@@ -641,6 +665,33 @@ mod tests {
         assert!(!models_present_in(&dir));
         fs::create_dir(dir.join(REC_FILE)).unwrap();
         assert!(!models_present_in(&dir));
+    }
+
+    #[test]
+    fn file_states_report_each_manifest_entry_by_exact_size() {
+        let dir = TempDir::new().unwrap();
+        assert!(file_states_in(dir.path())
+            .iter()
+            .all(|(_, _, ready)| !ready));
+        // 按清单字节数写入 fixture（哈希随意，本状态只看大小）
+        for spec in &MANIFEST {
+            fs::write(dir.path().join(spec.file), vec![0u8; spec.size as usize]).unwrap();
+        }
+        let states = file_states_in(dir.path());
+        assert!(states.iter().all(|(_, _, ready)| *ready));
+        // 其中一个截断 → 只有两个就绪，且文件名/大小与清单一致
+        fs::write(dir.path().join(REC_FILE), b"short").unwrap();
+        let states = file_states_in(dir.path());
+        let rec = states
+            .iter()
+            .find(|(name, _, _)| *name == REC_FILE)
+            .unwrap();
+        assert!(!rec.2);
+        assert_eq!(states.iter().filter(|(_, _, ready)| *ready).count(), 2);
+        assert_eq!(
+            states.map(|(name, size, _)| (name, size)),
+            MANIFEST.map(|spec| (spec.file, spec.size))
+        );
     }
 
     #[test]

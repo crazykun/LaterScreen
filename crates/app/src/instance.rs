@@ -240,6 +240,10 @@ mod tests {
     #[test]
     fn raise_signal_consumed_once() {
         let _g = serial();
+        // 重定向环境（XDG_CACHE_HOME 指向空目录）下父目录可能不存在——
+        // 生产路径由 acquire 的 create_dir_all 兜底，测试自己建，否则
+        // 会随并行调度偶发 NotFound（别的套件先建了目录就绿）
+        std::fs::create_dir_all(raise_path(Kind::Settings).parent().unwrap()).unwrap();
         std::fs::write(raise_path(Kind::Settings), b"1").unwrap();
         assert!(take_raise(Kind::Settings));
         assert!(!take_raise(Kind::Settings));
