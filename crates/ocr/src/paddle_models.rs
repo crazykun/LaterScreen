@@ -205,8 +205,32 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_RESPONSE_HEADER_SIZE: usize = 64 * 1024;
 const READ_BUFFER_SIZE: usize = 64 * 1024;
 const PROGRESS_GRANULARITY: u64 = 256 * 1024;
+/// 传输层瞬断重试前的间隔，留给本机栈/对端从 RST 中恢复。
+const TRANSPORT_RETRY_DELAY: Duration = Duration::from_millis(250);
 static PART_COUNTER: AtomicU64 = AtomicU64::new(0);
 static DOWNLOAD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// 单次下载尝试的失败分类。传输层瞬断（对端 RST、本机栈中止等）换一条
+/// 新连接重试即可恢复，是环境噪声；尺寸/哈希校验、HTTP 状态、本地文件
+/// 错误是确定性的，重试只会原样复现，必须原样上抛。
+enum DownloadError {
+    Transient(OcrError),
+    Fatal(OcrError),
+}
+
+/// 非「超时类」的 io 错误视为传输层瞬断。超时类排除在外：对端故意
+/// stalls 时重试只会把最长等待翻倍，快速失败更好。注意 ureq 的读超时
+/// 以 `Other` kind + "timeout: <阶段>" 文案冒泡（实测 3.4），kind 判定
+/// 对它无效，必须先按文案甄别。
+fn is_transient_io(error: &std::io::Error) -> bool {
+    if error.to_string().starts_with("timeout") {
+        return false;
+    }
+    !matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    )
+}
 
 pub(crate) fn download_models_to(dir: &Path, progress: &mut dyn FnMut(u64, u64)) -> Result<()> {
     let lock = DOWNLOAD_LOCK.get_or_init(|| Mutex::new(()));
@@ -288,6 +312,8 @@ fn download_manifest(
     download_models_locked(dir, manifest, base_url, agent, progress)
 }
 
+/// 单文件下载：传输层瞬断自动重试一次（新连接重新下载整个文件，半成品
+/// `.part` 由 `PartFile::drop` 清理）；其余失败原样上抛。
 fn download_one(
     destination: &Path,
     spec: &ModelSpec,
@@ -297,6 +323,42 @@ fn download_one(
     total: u64,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<()> {
+    let mut outcome = attempt_download_one(
+        destination,
+        spec,
+        base_url,
+        agent,
+        completed,
+        total,
+        progress,
+    );
+    if let Err(DownloadError::Transient(_)) = &outcome {
+        std::thread::sleep(TRANSPORT_RETRY_DELAY);
+        outcome = attempt_download_one(
+            destination,
+            spec,
+            base_url,
+            agent,
+            completed,
+            total,
+            progress,
+        );
+    }
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(DownloadError::Transient(error)) | Err(DownloadError::Fatal(error)) => Err(error),
+    }
+}
+
+fn attempt_download_one(
+    destination: &Path,
+    spec: &ModelSpec,
+    base_url: &str,
+    agent: &ureq::Agent,
+    completed: u64,
+    total: u64,
+    progress: &mut dyn FnMut(u64, u64),
+) -> std::result::Result<(), DownloadError> {
     let url = format!("{}/{}", base_url.trim_end_matches('/'), spec.remote);
     let response = agent
         .get(&url)
@@ -305,12 +367,17 @@ fn download_one(
             format!("LaterScreen/{}", env!("CARGO_PKG_VERSION")),
         )
         .call()
-        .map_err(|error| OcrError(format!("下载 {url} 失败: {error}")))?;
+        .map_err(|error| match &error {
+            ureq::Error::Io(io) if is_transient_io(io) => {
+                DownloadError::Transient(OcrError(format!("下载 {url} 失败: {error}")))
+            }
+            _ => DownloadError::Fatal(OcrError(format!("下载 {url} 失败: {error}"))),
+        })?;
     if !response.status().is_success() {
-        return Err(OcrError(format!(
+        return Err(DownloadError::Fatal(OcrError(format!(
             "下载 {url} 失败: HTTP {}",
             response.status()
-        )));
+        ))));
     }
     if let Some(content_length) = response
         .headers()
@@ -319,14 +386,14 @@ fn download_one(
         .and_then(|value| value.parse::<u64>().ok())
     {
         if content_length != spec.size {
-            return Err(OcrError(format!(
+            return Err(DownloadError::Fatal(OcrError(format!(
                 "模型 {} 响应大小不符（实际 {}，应为 {} 字节）",
                 spec.file, content_length, spec.size
-            )));
+            ))));
         }
     }
 
-    let mut part = PartFile::create(destination)?;
+    let mut part = PartFile::create(destination).map_err(DownloadError::Fatal)?;
     let mut reader = response
         .into_body()
         .into_with_config()
@@ -337,24 +404,33 @@ fn download_one(
     let mut received = 0u64;
     let mut reported = 0u64;
     loop {
-        let count = reader
-            .read(&mut buffer)
-            .map_err(|error| OcrError(format!("下载 {} 时读取失败: {error}", spec.file)))?;
+        let count = reader.read(&mut buffer).map_err(|error| {
+            let wrapped = OcrError(format!("下载 {} 时读取失败: {error}", spec.file));
+            if is_transient_io(&error) {
+                DownloadError::Transient(wrapped)
+            } else {
+                DownloadError::Fatal(wrapped)
+            }
+        })?;
         if count == 0 {
             break;
         }
-        let next = received
-            .checked_add(count as u64)
-            .ok_or_else(|| OcrError(format!("下载 {} 大小溢出", spec.file)))?;
+        let next = received.checked_add(count as u64).ok_or_else(|| {
+            DownloadError::Fatal(OcrError(format!("下载 {} 大小溢出", spec.file)))
+        })?;
         if next > spec.size {
-            return Err(OcrError(format!(
+            return Err(DownloadError::Fatal(OcrError(format!(
                 "模型 {} 大小不符（下载超量，超过 {} 字节）",
                 spec.file, spec.size
-            )));
+            ))));
         }
-        part.file_mut()?
-            .write_all(&buffer[..count])
-            .map_err(|error| OcrError(format!("写入模型 {} 失败: {error}", spec.file)))?;
+        part.file_mut()
+            .map_err(DownloadError::Fatal)
+            .and_then(|file| {
+                file.write_all(&buffer[..count]).map_err(|error| {
+                    DownloadError::Fatal(OcrError(format!("写入模型 {} 失败: {error}", spec.file)))
+                })
+            })?;
         hasher.update(&buffer[..count]);
         received = next;
         // 最多每 256KiB 报一次，避免小包响应淹没 UI 消息队列。每个文件的
@@ -365,22 +441,26 @@ fn download_one(
         }
     }
     if received != spec.size {
-        return Err(OcrError(format!(
+        return Err(DownloadError::Fatal(OcrError(format!(
             "模型 {} 下载大小不符（实际 {}，应为 {} 字节）",
             spec.file, received, spec.size
-        )));
+        ))));
     }
     let actual = hex_digest(hasher.finalize());
     if actual != spec.sha256 {
-        return Err(OcrError(format!(
+        return Err(DownloadError::Fatal(OcrError(format!(
             "模型 {} SHA-256 校验失败（实际 {actual}，应为 {}）",
             spec.file, spec.sha256
-        )));
+        ))));
     }
-    part.file_mut()?
-        .sync_all()
-        .map_err(|error| OcrError(format!("刷新模型 {} 失败: {error}", spec.file)))?;
-    part.publish(destination)?;
+    part.file_mut()
+        .map_err(DownloadError::Fatal)
+        .and_then(|file| {
+            file.sync_all().map_err(|error| {
+                DownloadError::Fatal(OcrError(format!("刷新模型 {} 失败: {error}", spec.file)))
+            })
+        })?;
+    part.publish(destination).map_err(DownloadError::Fatal)?;
     progress(completed + spec.size, total);
     Ok(())
 }
@@ -496,7 +576,7 @@ mod tests {
     }
 
     impl Server {
-        fn new(mut respond: impl FnMut(&mut TcpStream, usize) + Send + 'static) -> Self {
+        fn new(mut respond: impl FnMut(&mut TcpStream, usize, &str) + Send + 'static) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
@@ -524,7 +604,12 @@ mod tests {
                                 assert!(request.len() <= 16 * 1024);
                             }
                             let index = thread_hits.fetch_add(1, Ordering::Relaxed);
-                            respond(&mut stream, index);
+                            // 请求行形如 "GET /det HTTP/1.1"，第二个 token 即路径
+                            let path = String::from_utf8_lossy(
+                                request.split(|b| *b == b' ').nth(1).unwrap_or(b""),
+                            )
+                            .into_owned();
+                            respond(&mut stream, index, &path);
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(1));
@@ -541,14 +626,31 @@ mod tests {
             }
         }
 
-        fn responses(responses: Vec<Vec<u8>>) -> Self {
-            Self::new(move |stream, i| {
-                let response = responses
-                    .get(i)
-                    .map(Vec::as_slice)
-                    .unwrap_or(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
+        /// 按请求路径路由的静态服务器。响应与路径一一对应：下载器对同一
+        /// 文件的传输层重试（见 `download_one`）拿到的始终是同一响应——
+        /// 旧的「按命中序号轮询」做不到这一点，重试会错位拿到下一个文件
+        /// 的响应，把偶发瞬断放大成校验失败。
+        fn routes(routes: &[(&'static str, &'static [u8], Option<u64>)]) -> Self {
+            let routes: Vec<(&str, &[u8], Option<u64>)> = routes.to_vec();
+            Self::new(move |stream, _, path| {
+                let route = routes
+                    .iter()
+                    .find(|(name, _, _)| path == format!("/{name}"));
+                let response = match route {
+                    Some((_, body, Some(length))) => {
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"
+                        );
+                        [head.into_bytes(), body.to_vec()].concat()
+                    }
+                    Some((_, body, None)) => {
+                        let head = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";
+                        [head.as_bytes().to_vec(), body.to_vec()].concat()
+                    }
+                    None => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec(),
+                };
                 // 下载器可提前拒绝超量响应，BrokenPipe 不属于测试服务器失败。
-                let _ = stream.write_all(response);
+                let _ = stream.write_all(&response);
             })
         }
     }
@@ -601,6 +703,17 @@ mod tests {
                 .to_string_lossy()
                 .contains(".part.")
         }));
+    }
+
+    /// 命中数断言：传输层瞬断会触发 `download_one` 对同一文件的一次自动
+    /// 重试（路径路由保证拿到同一响应），允许命中数翻倍；「不该发生的
+    /// 请求」（复用有效文件）仍以 `expected = 0` 精确断言。
+    fn assert_hits(server: &Server, expected: usize) {
+        let hits = server.hits.load(Ordering::Relaxed);
+        assert!(
+            (expected..=expected * 2).contains(&hits),
+            "服务器命中 {hits} 次，预期 {expected}（允许传输层重试至多翻倍）"
+        );
     }
 
     #[test]
@@ -713,12 +826,11 @@ mod tests {
     #[test]
     fn downloads_publish_three_verified_files_with_monotonic_aggregate_progress() {
         let dir = TempDir::new().unwrap();
-        let server = Server::responses(
-            BODIES
-                .iter()
-                .map(|b| response(b, Some(b.len() as u64)))
-                .collect(),
-        );
+        let server = Server::routes(&[
+            ("det", BODIES[0], Some(BODIES[0].len() as u64)),
+            ("rec", BODIES[1], Some(BODIES[1].len() as u64)),
+            ("dict", BODIES[2], Some(BODIES[2].len() as u64)),
+        ]);
         let mut events = Vec::new();
         download(dir.path(), &server, &mut |received, total| {
             events.push((received, total));
@@ -733,7 +845,7 @@ mod tests {
             assert_eq!(fs::read(dir.path().join(spec.file)).unwrap(), body);
         }
         verify_manifest(dir.path(), &FIXTURES).unwrap();
-        assert_eq!(server.hits.load(Ordering::Relaxed), 3);
+        assert_hits(&server, 3);
         assert_no_parts(dir.path());
     }
 
@@ -743,7 +855,7 @@ mod tests {
         for (spec, body) in FIXTURES.iter().zip(BODIES) {
             fs::write(dir.path().join(spec.file), body).unwrap();
         }
-        let server = Server::responses(Vec::new());
+        let server = Server::routes(&[]);
         let mut events = Vec::new();
         download(dir.path(), &server, &mut |n, total| events.push((n, total))).unwrap();
         assert_eq!(server.hits.load(Ordering::Relaxed), 0);
@@ -757,11 +869,11 @@ mod tests {
             fs::write(dir.path().join(spec.file), body).unwrap();
         }
         fs::write(dir.path().join(REC_FILE), b"bad").unwrap();
-        let server = Server::responses(vec![response(b"rec", None)]);
+        let server = Server::routes(&[("rec", b"rec", None)]);
         let mut events = Vec::new();
         download(dir.path(), &server, &mut |n, total| events.push((n, total))).unwrap();
         assert_eq!(fs::read(dir.path().join(REC_FILE)).unwrap(), b"rec");
-        assert_eq!(server.hits.load(Ordering::Relaxed), 1);
+        assert_hits(&server, 1);
         assert!(events.windows(2).all(|pair| pair[0].0 <= pair[1].0));
         assert_eq!(events.last(), Some(&(10, 10)));
         assert_no_parts(dir.path());
@@ -769,21 +881,22 @@ mod tests {
 
     #[test]
     fn empty_truncated_oversized_and_wrong_hash_responses_never_replace_old_files() {
-        let cases = [
-            (response(b"", None), "大小"),
-            (response(b"de", None), "大小"),
-            (response(b"de", Some(3)), "下载"),
-            (response(b"dett", None), "大小"),
-            (response(b"", Some(0)), "大小"),
-            (response(b"dett", Some(4)), "大小"),
-            (response(b"bad", Some(3)), "SHA-256"),
+        let cases: [(&[u8], Option<u64>, &str); 7] = [
+            (b"", None, "大小"),
+            (b"de", None, "大小"),
+            (b"de", Some(3), "下载"),
+            (b"dett", None, "大小"),
+            (b"", Some(0), "大小"),
+            (b"dett", Some(4), "大小"),
+            (b"bad", Some(3), "SHA-256"),
         ];
-        for (raw, expected_error) in cases {
+        for (raw, length, expected_error) in cases {
             let dir = TempDir::new().unwrap();
             fs::write(dir.path().join(DET_FILE), b"old").unwrap();
             let unrelated = dir.path().join("unrelated.part.123.456");
             fs::write(&unrelated, b"belongs to another downloader").unwrap();
-            let server = Server::responses(vec![raw]);
+            // 校验类失败是确定性 Fatal，重试会原样复现同一响应后再次失败
+            let server = Server::routes(&[("det", raw, length)]);
             let mut events = Vec::new();
             let err =
                 download(dir.path(), &server, &mut |n, total| events.push((n, total))).unwrap_err();
@@ -803,10 +916,10 @@ mod tests {
     #[test]
     fn failure_after_two_files_cannot_report_complete_or_leave_partial_dictionary() {
         let dir = TempDir::new().unwrap();
-        let server = Server::responses(vec![
-            response(b"det", None),
-            response(b"rec", None),
-            response(b"FAIL", None),
+        let server = Server::routes(&[
+            ("det", b"det", None),
+            ("rec", b"rec", None),
+            ("dict", b"FAIL", None),
         ]);
         let mut events = Vec::new();
         let err =
@@ -825,7 +938,7 @@ mod tests {
         fs::write(dir.path().join(DET_FILE), b"old").unwrap();
         let (sent_tx, sent_rx) = mpsc::channel();
         let (resume_tx, resume_rx) = mpsc::channel();
-        let server = Server::new(move |stream, i| {
+        let server = Server::new(move |stream, i, _| {
             if i == 0 {
                 stream
                     .write_all(
@@ -874,7 +987,7 @@ mod tests {
     #[test]
     fn stalled_body_times_out_and_cleans_its_part() {
         let dir = TempDir::new().unwrap();
-        let server = Server::new(|stream, _| {
+        let server = Server::new(|stream, _, _| {
             let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nd");
             thread::sleep(Duration::from_millis(150));
         });
@@ -897,7 +1010,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let (first_tx, first_rx) = mpsc::channel();
         let (resume_tx, resume_rx) = mpsc::channel();
-        let server = Server::new(move |stream, i| {
+        let server = Server::new(move |stream, i, _| {
             if i == 0 {
                 first_tx.send(()).unwrap();
                 resume_rx.recv_timeout(Duration::from_secs(3)).unwrap();
@@ -950,7 +1063,7 @@ mod tests {
             size: BODY.len() as u64,
             sha256: Box::leak(digest.into_boxed_str()),
         }];
-        let server = Server::new(|stream, _| {
+        let server = Server::new(|stream, _, _| {
             let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n");
             for chunk in BODY.chunks(128) {
                 let _ = stream.write_all(chunk);
@@ -979,7 +1092,7 @@ mod tests {
         let destination = dir.path().join(DET_FILE);
         fs::create_dir(&destination).unwrap();
         fs::write(destination.join("keep"), b"old").unwrap();
-        let server = Server::responses(vec![response(b"det", None)]);
+        let server = Server::routes(&[("det", b"det", None)]);
         let mut events = Vec::new();
         assert!(download(dir.path(), &server, &mut |n, total| events.push((n, total))).is_err());
         assert_eq!(fs::read(destination.join("keep")).unwrap(), b"old");
