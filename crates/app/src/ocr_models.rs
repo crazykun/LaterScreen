@@ -466,29 +466,20 @@ mod tests {
         let ctx = egui::Context::default();
         let mut models = OcrModels::default();
         models.check_on_open(&ctx);
-        let done = wait_for_completion(&mut models, &ctx);
-        assert_eq!(
-            done,
-            Some(JobFinished {
-                kind: "check",
-                ok: true,
-                present: true,
-                silent: true
-            }),
+        let done = wait_for_completion(&mut models, &ctx).expect("应有终态");
+        // 只断言与机器无关的字段：present 取决于本机是否装过模型（CI 上
+        // 必然没有），断死 true 会在干净机器上翻车（v0.14.1 CI 实测）
+        assert_eq!(done.kind, "check");
+        assert!(done.ok);
+        assert!(
+            done.silent,
             "打开窗口的自动探测必须带 silent 标记（进门不弹 toast）"
         );
         models.check(&ctx);
-        let done = wait_for_completion(&mut models, &ctx);
-        assert_eq!(
-            done,
-            Some(JobFinished {
-                kind: "check",
-                ok: true,
-                present: true,
-                silent: false
-            }),
-            "手动「检查」按钮要有完成反馈"
-        );
+        let done = wait_for_completion(&mut models, &ctx).expect("应有终态");
+        assert_eq!(done.kind, "check");
+        assert!(done.ok);
+        assert!(!done.silent, "手动「检查」按钮要有完成反馈");
     }
 
     #[test]
