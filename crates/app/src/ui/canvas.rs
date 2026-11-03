@@ -31,7 +31,7 @@ pub fn mosaic_key(points: &[P2], brush: f32, cell: f32) -> u64 {
 }
 
 const DIM: Color32 = Color32::from_black_alpha(120);
-const ACCENT: Color32 = Color32::from_rgb(0x21, 0x96, 0xf3);
+const ACCENT: Color32 = Color32::from_rgb(0xe5, 0x39, 0x35);
 const UV_FULL: Rect = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
 /// 命中容差（逻辑点）
 const HIT_TOL_PT: f32 = 4.0;
@@ -232,7 +232,7 @@ fn draw_magnifier(
     // 中心十字线
     let cell = ZOOM_SIZE / SRC;
     let c = zoom_rect.center();
-    let cross = Stroke::new(1.0, Color32::from_rgba_unmultiplied(0x21, 0x96, 0xf3, 180));
+    let cross = Stroke::new(1.0, Color32::from_rgba_unmultiplied(0xe5, 0x39, 0x35, 180));
     painter.line_segment(
         [
             Pos2::new(zoom_rect.min.x, c.y),
@@ -417,7 +417,7 @@ fn selecting(
             painter.rect_stroke(
                 rp,
                 0.0,
-                Stroke::new(1.5, Color32::from_rgba_unmultiplied(0x21, 0x96, 0xf3, 200)),
+                Stroke::new(1.5, Color32::from_rgba_unmultiplied(0xe5, 0x39, 0x35, 200)),
                 StrokeKind::Outside,
             );
             win_label(painter, rp, screen, &w.title);
@@ -1301,7 +1301,7 @@ fn draw_highlights(app: &SnipApp, painter: &egui::Painter, view: View) {
             painter.rect_stroke(
                 view.rect_pt(e.bounds()).expand(4.0),
                 2.0,
-                Stroke::new(1.0, Color32::from_rgba_unmultiplied(0x21, 0x96, 0xf3, 140)),
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(0xe5, 0x39, 0x35, 140)),
                 StrokeKind::Outside,
             );
         }

@@ -47,11 +47,14 @@ impl JobKind {
 }
 
 /// 一次后台任务的终态；`poll` 在状态转入 Done 的那一帧返回一次。
+/// `silent` = 打开窗口时的自动探测，结果只反映在卡片状态里，调用方
+/// 不应为它弹 toast（每次进门都「检查完成」是噪音）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JobFinished {
     pub kind: &'static str,
     pub ok: bool,
     pub present: bool,
+    pub silent: bool,
 }
 
 #[derive(Default)]
@@ -62,6 +65,7 @@ enum State {
         kind: JobKind,
         progress: Arc<Mutex<Progress>>,
         rx: mpsc::Receiver<Result<bool, String>>,
+        silent: bool,
     },
     Done {
         kind: JobKind,
@@ -117,7 +121,14 @@ impl OcrModels {
 
     /// 一次本地探测，不联网。即使 helper 后续加入哈希校验也不阻塞 UI。
     pub fn check(&mut self, ctx: &egui::Context) {
-        self.start_with(ctx, JobKind::Check, |_| {
+        self.start_with(ctx, JobKind::Check, false, |_| {
+            Ok(lscreen_ocr::paddle::models_present())
+        });
+    }
+
+    /// 打开设置窗口时的自动探测：结果只落在卡片状态里，完成不弹 toast。
+    pub fn check_on_open(&mut self, ctx: &egui::Context) {
+        self.start_with(ctx, JobKind::Check, true, |_| {
             Ok(lscreen_ocr::paddle::models_present())
         });
     }
@@ -126,7 +137,7 @@ impl OcrModels {
     /// 已完好的文件会在下载器内跳过，因此这也是「修复」路径（重下校验
     /// 不通过的文件）。
     pub fn start(&mut self, ctx: &egui::Context) {
-        self.start_with(ctx, JobKind::Download, |progress| {
+        self.start_with(ctx, JobKind::Download, false, |progress| {
             lscreen_ocr::paddle::download_models(progress)
                 .map(|()| true)
                 .map_err(|e| e.to_string())
@@ -135,7 +146,7 @@ impl OcrModels {
 
     /// 全量 SHA-256 完整性校验，不联网；给出明确的通过/失败结论。
     pub fn verify(&mut self, ctx: &egui::Context) {
-        self.start_with(ctx, JobKind::Verify, |_| {
+        self.start_with(ctx, JobKind::Verify, false, |_| {
             lscreen_ocr::paddle::verify_installed_models()
                 .map(|()| true)
                 .map_err(|e| e.to_string())
@@ -148,6 +159,7 @@ impl OcrModels {
         &mut self,
         ctx: &egui::Context,
         kind: JobKind,
+        silent: bool,
         job: impl FnOnce(&mut dyn FnMut(u64, u64)) -> Result<bool, String> + Send + 'static,
     ) {
         if self.in_flight() {
@@ -157,7 +169,12 @@ impl OcrModels {
         let progress = Arc::new(Mutex::new(Progress::default()));
         let worker_progress = progress.clone();
         self.progress = Progress::default();
-        self.state = State::Working { kind, progress, rx };
+        self.state = State::Working {
+            kind,
+            progress,
+            rx,
+            silent,
+        };
         let ui_ctx = ctx.clone();
         let spawned = std::thread::Builder::new()
             .name("ocr-models".into())
@@ -182,10 +199,17 @@ impl OcrModels {
     /// 每帧只读取内存；等待时用低频心跳兜底异常退出（无结果就不会主动重绘）。
     /// 状态转入 Done 的那一帧返回一次终态，调用方用它给 toast 反馈。
     pub fn poll(&mut self, ctx: &egui::Context) -> Option<JobFinished> {
-        let State::Working { kind, progress, rx } = &self.state else {
+        let State::Working {
+            kind,
+            progress,
+            rx,
+            silent,
+        } = &self.state
+        else {
             return None;
         };
         let kind = *kind;
+        let silent = *silent;
         // 先收终态、再读进度：收到结果后 worker 不再写槽，确保最后一帧
         // 不会在「读旧进度 → worker 完成 → 收到结果」的竞态里停在旧数值。
         let outcome = rx.try_recv();
@@ -203,6 +227,7 @@ impl OcrModels {
                     kind: kind.label(),
                     ok: true,
                     present,
+                    silent,
                 })
             }
             Ok(Err(e)) => {
@@ -215,6 +240,7 @@ impl OcrModels {
                     kind: kind.label(),
                     ok: false,
                     present: false,
+                    silent,
                 })
             }
             Err(mpsc::TryRecvError::Disconnected) => {
@@ -227,6 +253,7 @@ impl OcrModels {
                     kind: kind.label(),
                     ok: false,
                     present: false,
+                    silent,
                 })
             }
             Err(mpsc::TryRecvError::Empty) => {
@@ -263,7 +290,7 @@ mod tests {
         assert!(!models.present());
         assert!(models.result().is_none());
 
-        models.start_with(&ctx, JobKind::Check, |_| Ok(true));
+        models.start_with(&ctx, JobKind::Check, false, |_| Ok(true));
         assert!(models.checking());
         wait_for_completion(&mut models, &ctx);
         assert!(models.present());
@@ -273,7 +300,7 @@ mod tests {
             "检查来源与结果要一起可见"
         );
 
-        models.start_with(&ctx, JobKind::Check, |_| Ok(false));
+        models.start_with(&ctx, JobKind::Check, false, |_| Ok(false));
         wait_for_completion(&mut models, &ctx);
         assert!(!models.present());
         assert_eq!(models.result(), Some(("check", &Ok(false))));
@@ -285,7 +312,7 @@ mod tests {
         let mut models = OcrModels::default();
         let (progress_tx, progress_rx) = mpsc::channel();
         let (finish_tx, finish_rx) = mpsc::channel();
-        models.start_with(&ctx, JobKind::Download, move |progress| {
+        models.start_with(&ctx, JobKind::Download, false, move |progress| {
             for done in 1..=1_000 {
                 progress(done, 3_000);
             }
@@ -326,13 +353,13 @@ mod tests {
         let ctx = egui::Context::default();
         let mut models = OcrModels::default();
         let (finish_tx, finish_rx) = mpsc::channel();
-        models.start_with(&ctx, JobKind::Download, move |_| {
+        models.start_with(&ctx, JobKind::Download, false, move |_| {
             finish_rx.recv_timeout(Duration::from_secs(3)).unwrap();
             Ok(true)
         });
         let second_calls = Arc::new(AtomicUsize::new(0));
         let calls = second_calls.clone();
-        models.start_with(&ctx, JobKind::Download, move |_| {
+        models.start_with(&ctx, JobKind::Download, false, move |_| {
             calls.fetch_add(1, Ordering::SeqCst);
             Ok(false)
         });
@@ -346,7 +373,7 @@ mod tests {
     fn failed_download_can_be_retried_without_stale_error_or_progress() {
         let ctx = egui::Context::default();
         let mut models = OcrModels::default();
-        models.start_with(&ctx, JobKind::Download, |progress| {
+        models.start_with(&ctx, JobKind::Download, false, |progress| {
             progress(10, 30);
             Err("模拟下载失败".into())
         });
@@ -356,7 +383,7 @@ mod tests {
             models.result(),
             Some(("download", &Err("模拟下载失败".into())))
         );
-        models.start_with(&ctx, JobKind::Download, |_| Ok(true));
+        models.start_with(&ctx, JobKind::Download, false, |_| Ok(true));
         assert!(models.result().is_none());
         assert_eq!(models.progress(), Progress::default());
         wait_for_completion(&mut models, &ctx);
@@ -368,7 +395,7 @@ mod tests {
     fn verify_reports_explicit_result_once() {
         let ctx = egui::Context::default();
         let mut models = OcrModels::default();
-        models.start_with(&ctx, JobKind::Verify, |_| Ok(true));
+        models.start_with(&ctx, JobKind::Verify, false, |_| Ok(true));
         assert!(!models.checking());
         // 终态只在转入 Done 的那一帧返回一次，之后稳定可查
         let finished = wait_for_completion(&mut models, &ctx);
@@ -377,7 +404,8 @@ mod tests {
             Some(JobFinished {
                 kind: "verify",
                 ok: true,
-                present: true
+                present: true,
+                silent: false
             })
         );
         assert_eq!(models.poll(&ctx), None, "完成事件不能重复发");
@@ -385,14 +413,17 @@ mod tests {
         assert_eq!(models.result(), Some(("verify", &Ok(true))));
 
         // 校验失败：present 置否，来源仍是 verify，便于 UI 给「修复」引导
-        models.start_with(&ctx, JobKind::Verify, |_| Err("SHA-256 校验失败".into()));
+        models.start_with(&ctx, JobKind::Verify, false, |_| {
+            Err("SHA-256 校验失败".into())
+        });
         let finished = wait_for_completion(&mut models, &ctx);
         assert_eq!(
             finished,
             Some(JobFinished {
                 kind: "verify",
                 ok: false,
-                present: false
+                present: false,
+                silent: false
             })
         );
         assert!(!models.present());
@@ -411,6 +442,7 @@ mod tests {
                 kind: JobKind::Download,
                 progress: Arc::new(Mutex::new(Progress::default())),
                 rx,
+                silent: false,
             },
             ..Default::default()
         };
@@ -424,9 +456,39 @@ mod tests {
             .as_ref()
             .unwrap_err()
             .contains("退出"));
-        models.start_with(&ctx, JobKind::Download, |_| Ok(true));
+        models.start_with(&ctx, JobKind::Download, false, |_| Ok(true));
         wait_for_completion(&mut models, &ctx);
         assert!(models.present());
+    }
+
+    #[test]
+    fn open_time_probe_is_silent_button_check_is_not() {
+        let ctx = egui::Context::default();
+        let mut models = OcrModels::default();
+        models.check_on_open(&ctx);
+        let done = wait_for_completion(&mut models, &ctx);
+        assert_eq!(
+            done,
+            Some(JobFinished {
+                kind: "check",
+                ok: true,
+                present: true,
+                silent: true
+            }),
+            "打开窗口的自动探测必须带 silent 标记（进门不弹 toast）"
+        );
+        models.check(&ctx);
+        let done = wait_for_completion(&mut models, &ctx);
+        assert_eq!(
+            done,
+            Some(JobFinished {
+                kind: "check",
+                ok: true,
+                present: true,
+                silent: false
+            }),
+            "手动「检查」按钮要有完成反馈"
+        );
     }
 
     #[test]

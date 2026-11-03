@@ -30,7 +30,7 @@ fn line(ui: &egui::Ui) -> egui::Color32 {
     ui.visuals().widgets.noninteractive.bg_stroke.color
 }
 /// 品牌色作**文字**用（录屏提示/热键文案等）：走主题化前景色，别直接用
-/// `theme::ACCENT`——品牌蓝当文字在浅色下只有 2.85:1，见 theme::accent_ink
+/// `theme::ACCENT`——品牌色当文字在浅色下不达 AA（红 3.6:1），见 theme::accent_ink
 fn accent_text(ui: &egui::Ui) -> egui::Color32 {
     theme::accent_ink(ui.visuals())
 }
@@ -42,7 +42,8 @@ fn accent_border(ui: &egui::Ui) -> egui::Color32 {
 
 // ---------------------------------------------------------------- 页签导航
 
-/// 左侧导航页签：按功能域归组（原单页卡片拆分），内容见 `ui()` 的 match。
+/// 左侧导航分区：右侧内容连续滚动页里的分组锚点（见 CentralPanel 的
+/// scroll-spy），不再是独立页签。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum SettingsTab {
     #[default]
@@ -88,40 +89,31 @@ impl SettingsTab {
             Self::About => crate::ui::toolbar::draw_info,
         }
     }
-
-    /// 滚轮向下 = 下一页；到末页钳住（回卷会让人迷失方位）。
-    fn next(self) -> Self {
-        let i = Self::ALL.iter().position(|&t| t == self).unwrap_or(0);
-        Self::ALL[(i + 1).min(Self::ALL.len() - 1)]
-    }
-
-    /// 滚轮向上 = 上一页；首页钳住。
-    fn prev(self) -> Self {
-        let i = Self::ALL.iter().position(|&t| t == self).unwrap_or(0);
-        Self::ALL[i.saturating_sub(1)]
-    }
 }
 
-/// 滚轮翻页的累积判定：跨触控板的平滑小增量也要攒够阈值才翻页，
-/// 否则轻扫一下连跳数页。返回 Some(+1/-1) = 下一页/上一页。
-/// 正 `delta` = 滚轮向下 = 下一页（与 egui 滚动语义一致）。
-fn scroll_flip(accum: &mut f32, delta: f32, threshold: f32) -> Option<i32> {
-    *accum += delta;
-    if *accum >= threshold {
-        *accum = 0.0;
-        Some(1)
-    } else if *accum <= -threshold {
-        *accum = 0.0;
-        Some(-1)
-    } else {
-        None
+/// 滚动侦测（scroll-spy）：视口顶部下探 `lead` 像素的判定线落在哪个分区
+/// 区间内，就高亮哪个分区；滚到最底时强制选中最后一节——矮分区永远碰
+/// 不到判定线，不兜底的话「关于」永远高亮不了。`tops` 为各分区起点在
+/// 内容坐标系里的 y（同一空间内单调递增即可，与绝对原点无关）。
+fn scroll_spy(tops: &[(SettingsTab, f32)], line: f32, at_bottom: bool) -> SettingsTab {
+    let mut current = tops.first().map_or(SettingsTab::default(), |&(tab, _)| tab);
+    for &(tab, top) in tops {
+        if top <= line {
+            current = tab;
+        }
     }
+    if at_bottom {
+        if let Some(&(tab, _)) = tops.last() {
+            current = tab;
+        }
+    }
+    current
 }
 
-/// 导航项：图标 + 文字整行可点。选中/悬停底走 egui 的 selection 令牌
-/// （`interact_selectable` 与 toolbar::icon_button 同款——选中即
-/// `selection.bg_fill` + 配对前景色，对比度由 theme::selection_is_readable
-/// 测试锁定，这里不需要新令牌）。
+/// 导航项：图标 + 文字整行可点。扁平风选中态 = 品牌色淡 tint 底 +
+/// `accent_ink` 前景（不再是实心 selection 色块），未选中悬停 = field
+/// 灰。品牌 tint 直接用半透明 [`theme::ACCENT`] 叠在面板底上，深浅随主题
+/// 自适应；文字/图标走主题化前景色保证对比度（同 accent_ink 契约）。
 fn nav_item(
     ui: &mut egui::Ui,
     selected: bool,
@@ -130,49 +122,71 @@ fn nav_item(
 ) -> egui::Response {
     let (rect, resp) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), egui::Sense::click());
-    let vis = ui.style().interact_selectable(&resp, selected);
-    if selected || resp.hovered() {
-        ui.painter()
-            .rect_filled(rect, egui::CornerRadius::same(6), vis.bg_fill);
-    }
+    let v = ui.visuals();
+    // 选中 tint：半透明品牌色叠在面板底上（色相自动跟随 theme::ACCENT，
+    // 勿写字面量——品牌色换色时这里必须跟着变）
+    let accent = if v.dark_mode {
+        // 暗色面板上叠半透明品牌色：抬亮而不是压灰
+        egui::Color32::from_rgba_unmultiplied(
+            theme::ACCENT.r(),
+            theme::ACCENT.g(),
+            theme::ACCENT.b(),
+            36,
+        )
+    } else {
+        egui::Color32::from_rgba_unmultiplied(
+            theme::ACCENT.r(),
+            theme::ACCENT.g(),
+            theme::ACCENT.b(),
+            26,
+        )
+    };
     if selected {
-        // 左侧品牌色指示条：浅色主题下选中底（淡粉）与卡片底的对比偏弱，
-        // 指示条让「当前在哪一页」不依赖底色也能读出来
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(8), accent);
+    } else if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(8), field(ui));
+    }
+    let fg = if selected {
+        theme::accent_ink(v)
+    } else {
+        text(ui)
+    };
+    if selected {
+        // 左侧品牌色指示条：让「当前在哪一节」不依赖底色也能读出来
         ui.painter().rect_filled(
             egui::Rect::from_center_size(
                 egui::pos2(rect.left() + 2.0, rect.center().y),
                 egui::vec2(3.0, rect.height() * 0.55),
             ),
             egui::CornerRadius::same(2),
-            theme::accent_line(ui.visuals()),
+            theme::accent_line(v),
         );
     }
     let icon_rect = egui::Rect::from_center_size(
         egui::pos2(rect.left() + 24.0, rect.center().y),
         egui::Vec2::splat(16.0),
     );
-    icon(ui.painter(), icon_rect, vis.fg_stroke.color);
+    icon(ui.painter(), icon_rect, fg);
     ui.painter().text(
         egui::pos2(rect.left() + 40.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::proportional(13.5),
-        vis.fg_stroke.color,
+        fg,
     );
     resp
 }
 
 // ---------------------------------------------------------------- 卡片容器
 
-/// 分区卡片：标题左侧一条强调色小竖条 + 圆角深色面板。
+/// 分区卡片：标题左侧一条强调色小竖条 + 圆角深色面板。扁平风：无描边，
+/// 轮廓全靠卡片底色与窗口底的色调差（见 theme.rs 卡片令牌注释）。
 fn card<R>(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::Frame::NONE
         .fill(theme::card_fill(ui.visuals()))
-        .stroke(egui::Stroke::new(
-            1.0,
-            ui.visuals().widgets.noninteractive.bg_stroke.color,
-        ))
-        .corner_radius(10)
+        .corner_radius(12)
         .inner_margin(egui::Margin::same(14))
         .outer_margin(egui::Margin {
             bottom: 10,
@@ -262,8 +276,12 @@ impl UnsavedChanges {
 
 pub struct SettingsApp {
     cfg: Config,
-    /// 当前显示的页签（微信式左侧导航）；不持久化，每次打开默认「通用」。
+    /// 当前高亮的分区：点击导航立即更新，滚动时由 scroll-spy 跟随；
+    /// 不持久化，每次打开默认「通用」。
     active_tab: SettingsTab,
+    /// 待跳转的分区（点击导航设置，下一帧渲染到该分区起点时消费并瞬时
+    /// 滚动过去）；跳转帧跳过 scroll-spy，防止旧滚动位置把高亮拉回去。
+    jump_target: Option<SettingsTab>,
     /// 最近一次成功落盘的配置与关闭确认状态，用于统一保护所有未保存编辑。
     unsaved: UnsavedChanges,
     toast: Option<(String, f64)>,
@@ -283,11 +301,6 @@ pub struct SettingsApp {
     /// 进行中的系统目录选择对话框（后台线程 → mpsc 回传）。
     /// None = 没有打开；Some(rx) = 等待用户选择/取消。
     dir_pick: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
-    /// 滚轮翻页的累积增量（见 `scroll_flip`）。
-    scroll_accum: f32,
-    /// 当前页内容是否超高需要滚动（上一帧的判定）：可滚动时滚轮让位给
-    /// 页面滚动，不翻页。
-    page_scrollable: bool,
 }
 
 impl SettingsApp {
@@ -306,7 +319,8 @@ impl SettingsApp {
             }
         }
         let mut ocr_models = crate::ocr_models::OcrModels::default();
-        ocr_models.check(&cc.egui_ctx);
+        // 进门探测走静音通道：结果落卡片，不弹「检查完成」toast
+        ocr_models.check_on_open(&cc.egui_ctx);
         Self {
             cfg,
             active_tab: SettingsTab::default(),
@@ -321,8 +335,7 @@ impl SettingsApp {
             ocr_engine_env: std::env::var_os("LSCREEN_OCR_ENGINE")
                 .map(|value| value.to_string_lossy().into_owned()),
             dir_pick: None,
-            scroll_accum: 0.0,
-            page_scrollable: false,
+            jump_target: None,
         }
     }
 
@@ -426,15 +439,11 @@ impl SettingsApp {
         // 视觉与页面同语言：卡片标题条 + 弱化说明 + 底部栏同款按钮（等高、
         // 圆角 8、强调实心底/幽灵双形态）。安全动作「继续编辑」放最右：确认弹窗
         // 的默认位置给无损选项，误触回车/Esc 都不会丢修改。
-        // 弹窗边框不再用 egui 默认 popup 样式（与主题脱节）：底色/描边/
-        // 圆角全部取自主题令牌，配一层柔和投影与加深的半透明遮罩
+        // 弹窗与页面同语言：主题化底色 + 柔和投影 + 深色半透明遮罩，
+        // 扁平风下不再描边（悬浮层级靠投影与遮罩表达）
         let style = ctx.style_of(ctx.theme());
         let frame = egui::Frame::NONE
             .fill(theme::card_fill(&style.visuals))
-            .stroke(egui::Stroke::new(
-                1.0,
-                style.visuals.widgets.noninteractive.bg_stroke.color,
-            ))
             .corner_radius(12)
             .inner_margin(egui::Margin::same(20))
             .shadow(egui::epaint::Shadow {
@@ -465,8 +474,7 @@ impl SettingsApp {
                         .add(
                             egui::Button::new(egui::RichText::new("继续编辑").color(text(ui)))
                                 .corner_radius(8)
-                                .min_size(egui::vec2(96.0, 34.0))
-                                .stroke(egui::Stroke::new(1.0, line(ui))),
+                                .min_size(egui::vec2(96.0, 34.0)),
                         )
                         .clicked();
                     ui.add_space(8.0);
@@ -606,33 +614,37 @@ impl SettingsApp {
     /// 热键捕获输入框：点击进入录制态，随后直接按键录入。
     fn hotkey_capture(&mut self, ui: &mut egui::Ui, idx: usize, value: &str) {
         let active = self.recording == Some(idx);
-        let (label, stroke) = if active {
+        // 扁平化：空闲/已设值都是纯填充无边框；唯一保留的描边是录入态的
+        // 强调环——「正在监听键盘」需要一圈明确的焦点语义
+        let (label, recording_ring) = if active {
             (
                 egui::RichText::new("按下组合键…  (Esc 取消 / Backspace 清除)")
                     .color(accent_text(ui))
                     .monospace(),
-                egui::Stroke::new(1.5, accent_border(ui)),
+                true,
             )
         } else if value.is_empty() {
             (
                 egui::RichText::new("点击设置热键")
                     .color(muted(ui))
                     .monospace(),
-                egui::Stroke::new(1.0, line(ui)),
+                false,
             )
         } else {
             (
                 egui::RichText::new(format!("{value}（点击修改）"))
                     .color(text(ui))
                     .monospace(),
-                egui::Stroke::new(1.0, line(ui)),
+                false,
             )
         };
-        let btn = egui::Button::new(label)
+        let mut btn = egui::Button::new(label)
             .min_size(egui::vec2(0.0, crate::theme::FIELD_H))
-            .stroke(stroke)
-            .corner_radius(6)
+            .corner_radius(8)
             .fill(field(ui));
+        if recording_ring {
+            btn = btn.stroke(egui::Stroke::new(1.5, accent_border(ui)));
+        }
         let resp = ui
             .add_sized([300.0, crate::theme::FIELD_H], btn)
             .on_hover_text("点击后按下想要的组合键（如 Ctrl+Alt+A）");
@@ -695,18 +707,24 @@ impl eframe::App for SettingsApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         // 模型任务完成时给一次明确 toast：此前「校验」跑完没有任何可见
-        // 反馈（只有两行灰字回到点击前的样子），用户看不出结果
+        // 反馈（只有两行灰字回到点击前的样子），用户看不出结果。
+        // 打开窗口时的自动探测（silent）不弹——每次进门都「检查完成」
+        // 是噪音，状态在卡片里本来就看得到
         if let Some(done) = self.ocr_models.poll(&ctx) {
-            let msg = match (done.kind, done.ok) {
-                ("check", true) if done.present => "检查完成：PP-OCR 模型已就绪",
-                ("check", true) => "检查完成：本机未安装 PP-OCR 模型",
-                ("download", true) => "下载完成：PP-OCR 模型已就绪",
-                ("verify", true) => "校验通过：模型文件完整",
-                ("check", false) => "模型检查未通过",
-                ("download", false) => "模型下载失败",
-                _ => "模型校验未通过",
-            };
-            self.toast(&ctx, msg);
+            if done.silent {
+                // 静默任务的终态只落卡片
+            } else {
+                let msg = match (done.kind, done.ok) {
+                    ("check", true) if done.present => "检查完成：PP-OCR 模型已就绪",
+                    ("check", true) => "检查完成：本机未安装 PP-OCR 模型",
+                    ("download", true) => "下载完成：PP-OCR 模型已就绪",
+                    ("verify", true) => "校验通过：模型文件完整",
+                    ("check", false) => "模型检查未通过",
+                    ("download", false) => "模型下载失败",
+                    _ => "模型校验未通过",
+                };
+                self.toast(&ctx, msg);
+            }
         }
         // 两个后台状态机都在帧级收尾：切走「关于」页后，进行中的更新检查
         // 也要被 poll（结果留在槽里等下次进页会显示，但状态要先落定）
@@ -752,22 +770,6 @@ impl eframe::App for SettingsApp {
             }
         }
 
-        // 滚轮翻页（微信式）：页面内容不超高时，滚轮切换上/下一页；超高
-        // 时滚轮让位给页面滚动（可滚动性用上一帧的判定，滞后一帧无感）。
-        // 确认弹窗开着时不翻页——背后的页签变来变去很怪
-        if !self.page_scrollable && !self.unsaved.confirming_discard() {
-            let delta = ctx.input(|i| i.smooth_scroll_delta()).y;
-            if let Some(dir) = scroll_flip(&mut self.scroll_accum, delta, 48.0) {
-                self.active_tab = if dir > 0 {
-                    self.active_tab.next()
-                } else {
-                    self.active_tab.prev()
-                };
-            }
-        } else {
-            self.scroll_accum = 0.0;
-        }
-
         let dirty = self.unsaved.is_dirty(&self.cfg);
 
         // 底部按钮条（固定高度，勿动：见上一版 Panel 高度自增 bug 的复盘注释）
@@ -782,7 +784,7 @@ impl eframe::App for SettingsApp {
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // 主按钮双形态：有待保存修改时品牌蓝实心底白字（品牌色只作
+                    // 主按钮双形态：有待保存修改时品牌色实心底白字（品牌色只作
                     // 填充，配白字见 theme::ACCENT_FILL）；无修改时中性幽灵
                     // ——暗淡的强调色底曾被误读为「危险/异常」，灰幽灵让
                     // 「可保存 ↔ 不可保存」的状态变化一眼可见
@@ -799,7 +801,6 @@ impl eframe::App for SettingsApp {
                         egui::Button::new(egui::RichText::new("保存").color(muted(ui)))
                             .corner_radius(8)
                             .min_size(egui::vec2(96.0, 34.0))
-                            .stroke(egui::Stroke::new(1.0, line(ui)))
                     };
                     let save_response = ui.add_enabled(dirty, save_btn).on_hover_text(if dirty {
                         "保存修改（Ctrl/Cmd+S）"
@@ -817,8 +818,7 @@ impl eframe::App for SettingsApp {
                         egui::RichText::new(if dirty { "取消" } else { "关闭" }).color(muted(ui)),
                     )
                     .corner_radius(8)
-                    .min_size(egui::vec2(80.0, 34.0))
-                    .stroke(egui::Stroke::new(1.0, line(ui)));
+                    .min_size(egui::vec2(80.0, 34.0));
                     if ui
                         .add(close_btn)
                         .on_hover_text(if dirty {
@@ -840,15 +840,16 @@ impl eframe::App for SettingsApp {
                     }
                 });
             });
-        // 左侧导航（微信式 tab）：声明在 bottom 之后 → 只占保存栏以上空间。
-        // Panel::left 默认可拖宽，这里锁死；底色抬一层与内容区分。
+        // 左侧导航：右侧是连续滚动页，这里只做「当前分区」指示 + 点击跳转
+        // （scroll-spy 联动见 CentralPanel）。声明在 bottom 之后 → 只占保存
+        // 栏以上空间；Panel::left 默认可拖宽，这里锁死。扁平风：导航与窗口
+        // 底同色（融入「页框」），唯一的白色块是右侧内容卡片。
         egui::Panel::left(egui::Id::new("settings-nav"))
             .exact_size(148.0)
             .resizable(false)
             .frame(
                 egui::Frame::NONE
-                    .fill(theme::card_fill(ui.visuals()))
-                    .stroke(egui::Stroke::new(1.0, line(ui)))
+                    .fill(ui.visuals().panel_fill)
                     .inner_margin(egui::Margin::same(8)),
             )
             .show(ui, |ui| {
@@ -858,9 +859,13 @@ impl eframe::App for SettingsApp {
                     let selected = self.active_tab == tab;
                     if nav_item(ui, selected, tab.label(), tab.icon()).clicked() {
                         self.active_tab = tab;
+                        self.jump_target = Some(tab);
                     }
                 }
             });
+        // 右侧内容：全部分区连续排布在同一滚动页里（VS Code 设置式），
+        // 左侧导航与滚动位置双向联动：滚动 → scroll-spy 高亮；点击 → 瞬时
+        // 跳转到分区起点。
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::NONE
@@ -868,21 +873,52 @@ impl eframe::App for SettingsApp {
                     .inner_margin(egui::Margin::same(16)),
             )
             .show(ui, |ui| {
+                // 本帧点击导航 → 立即跳转并跳过本帧滚动侦测：pass 内的
+                // cursor 位置还是旧 offset，侦测会把高亮拉回旧分区。
+                let jump = self.jump_target.take();
+                let mut tops: Vec<(SettingsTab, f32)> = Vec::with_capacity(SettingsTab::ALL.len());
                 let scroll_out = egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    match self.active_tab {
-                        SettingsTab::General => self.tab_general(ui),
-                        SettingsTab::Screenshot => self.tab_screenshot(ui),
-                        SettingsTab::Record => self.tab_record(ui),
-                        SettingsTab::Ocr => self.tab_ocr(ui),
-                        SettingsTab::Hotkeys => self.tab_hotkeys(ui),
-                        SettingsTab::About => self.tab_about(ui),
+                    // pass 内 cursor 随 offset 平移（content_max_rect 起点 =
+                    // inner_rect.min - offset），减去首分区起点归一化成与
+                    // `state.offset` 同一空间的内容坐标，scroll-spy 才可比
+                    let base = ui.cursor().top();
+                    for (index, tab) in SettingsTab::ALL.iter().enumerate() {
+                        if index > 0 {
+                            // 分区间空隙比组内卡片间距略大，扫读时能看出分组
+                            ui.add_space(6.0);
+                        }
+                        if jump == Some(*tab) {
+                            // 瞬时跳转（不用默认平滑动画）：动画期间侦测会
+                            // 沿途经高亮中间分区，滚轮输入也会与动画目标拉扯
+                            ui.scroll_to_cursor_animation(
+                                Some(egui::Align::Min),
+                                egui::style::ScrollAnimation::none(),
+                            );
+                        }
+                        tops.push((*tab, ui.cursor().top() - base));
+                        match tab {
+                            SettingsTab::General => self.tab_general(ui),
+                            SettingsTab::Screenshot => self.tab_screenshot(ui),
+                            SettingsTab::Record => self.tab_record(ui),
+                            SettingsTab::Ocr => self.tab_ocr(ui),
+                            SettingsTab::Hotkeys => self.tab_hotkeys(ui),
+                            SettingsTab::About => self.tab_about(ui),
+                        }
                     }
                 });
-                // 内容超出视口 = 页面需要滚动，滚轮让位；用本帧的真实值
-                // 更新（下一帧的翻页判定读它）
-                self.page_scrollable =
-                    scroll_out.content_size.y > scroll_out.inner_rect.height() + 2.0;
+                if jump.is_none()
+                    && scroll_out.content_size.y > scroll_out.inner_rect.height() + 2.0
+                {
+                    // 判定线：视口顶部下探 80px。滞后一帧无感；滚到底兜底选
+                    // 最后一节（矮分区碰不到判定线，「关于」否则永远高亮不了）。
+                    // 内容不超高时跳过侦测：at_bottom 恒真会把高亮错拉到末节，
+                    // 保持点击/默认状态即可
+                    let line = scroll_out.state.offset.y + 80.0;
+                    let at_bottom = scroll_out.state.offset.y
+                        >= scroll_out.content_size.y - scroll_out.inner_rect.height() - 2.0;
+                    self.active_tab = scroll_spy(&tops, line, at_bottom);
+                }
             });
 
         if let Some((msg, until)) = &self.toast {
@@ -973,9 +1009,8 @@ impl SettingsApp {
                             .add_enabled(
                                 self.dir_pick.is_none(),
                                 egui::Button::new(egui::RichText::new("浏览…").color(muted(ui)))
-                                    .corner_radius(6)
-                                    .min_size(egui::vec2(64.0, crate::theme::FIELD_H))
-                                    .stroke(egui::Stroke::new(1.0, line(ui))),
+                                    .corner_radius(8)
+                                    .min_size(egui::vec2(64.0, crate::theme::FIELD_H)),
                             )
                             .on_hover_text("打开系统文件夹选择器；对话框开着时不可重复点击")
                             .clicked()
@@ -1014,9 +1049,8 @@ impl SettingsApp {
                         if ui
                             .add(
                                 egui::Button::new("−")
-                                    .corner_radius(6)
-                                    .min_size(egui::vec2(24.0, 24.0))
-                                    .stroke(egui::Stroke::new(1.0, line(ui))),
+                                    .corner_radius(8)
+                                    .min_size(egui::vec2(24.0, 24.0)),
                             )
                             .clicked()
                         {
@@ -1031,9 +1065,8 @@ impl SettingsApp {
                         if ui
                             .add(
                                 egui::Button::new("+")
-                                    .corner_radius(6)
-                                    .min_size(egui::vec2(24.0, 24.0))
-                                    .stroke(egui::Stroke::new(1.0, line(ui))),
+                                    .corner_radius(8)
+                                    .min_size(egui::vec2(24.0, 24.0)),
                             )
                             .clicked()
                         {
@@ -1561,7 +1594,6 @@ impl SettingsApp {
             let tag = tag.clone();
             egui::Frame::NONE
                 .fill(field(ui))
-                .stroke(egui::Stroke::new(1.0, accent_border(ui)))
                 .corner_radius(8)
                 .inner_margin(egui::Margin::symmetric(12, 8))
                 .outer_margin(egui::Margin {
@@ -1603,7 +1635,6 @@ impl SettingsApp {
             })
             .corner_radius(8)
             .min_size(egui::vec2(88.0, crate::theme::FIELD_H))
-            .stroke(egui::Stroke::new(1.0, line(ui)))
             .fill(field(ui));
             if ui
                 .add_enabled(!checking, btn)
@@ -1664,17 +1695,16 @@ fn row_label(ui: &mut egui::Ui, label: &str) {
 ///
 /// egui 0.35 的 TextEdit **忽略 `min_size.y`**（高度 = 字体行高，单行仅
 /// ~20px），原先的 min_size 写法一直静默失效——这正是输入框比下拉框矮一截
-/// 的根源。这里改为：定高容器 + 关闭内建边框 + 自绘主题化边框。填充与描边
-/// 都取主题同源令牌（`text_edit_bg_color` 同为 field、聚焦用 selection
-/// 描边，见 theme.rs 的聚焦契约），视觉上与内建边框一致但高度可控。
+/// 的根源。这里改为：定高容器 + 关闭内建边框 + 自绘。扁平风：空闲态只有
+/// field 底色（轮廓 = 与卡片底色的色调差），聚焦画 selection 描边环。
 fn input_field(ui: &mut egui::Ui, builder: egui::TextEdit<'_>, width: f32) -> egui::Response {
     let field_h = crate::theme::FIELD_H;
     let pad_x = ui.spacing().button_padding.x;
     let (rect, outer) = ui.allocate_exact_size(egui::vec2(width, field_h), egui::Sense::hover());
-    // 绘制顺序 = 底色 → 文字 → 边框。底色若画在文字之后（第一版的写法）
+    // 绘制顺序 = 底色 → 文字 → 聚焦环。底色若画在文字之后（第一版的写法）
     // 会把内容整个盖住——表现为「模板空白」「目录选完不回显」，路径其实
     // 已经写入，只是被不透明背景压在下面
-    ui.painter().rect_filled(rect, 6.0, field(ui));
+    ui.painter().rect_filled(rect, 8.0, field(ui));
     let mut content = ui.new_child(
         egui::UiBuilder::new()
             // 水平内边距由内层可用矩形让出（pad_x = button_padding.x，与
@@ -1693,13 +1723,16 @@ fn input_field(ui: &mut egui::Ui, builder: egui::TextEdit<'_>, width: f32) -> eg
             .frame(egui::Frame::NONE)
             .vertical_align(egui::Align::Center),
     );
-    let stroke = if inner.has_focus() {
-        ui.visuals().selection.stroke
-    } else {
-        ui.visuals().widgets.inactive.bg_stroke
-    };
-    ui.painter()
-        .rect_stroke(rect, 6.0, stroke, egui::StrokeKind::Inside);
+    // 扁平化：空闲态无边框（轮廓 = field 底色 vs 卡片底色的色调差），
+    // 只有聚焦画一圈 selection 描边
+    if inner.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            8.0,
+            ui.visuals().selection.stroke,
+            egui::StrokeKind::Inside,
+        );
+    }
     // 悬停提示挂在外层定高矩形上（调用方只做 on_hover_text）；内部点击/
     // 编辑交互仍由 TextEdit 自己处理
     outer
@@ -1933,8 +1966,9 @@ mod tests {
 
     /// 「文字太靠左 / 下拉与输入框选中不是一个颜色」回归：输入框文本与下拉
     /// 选中文本必须共用 `spacing.button_padding.x` 作左内边距，且两者的
-    /// 「选中」语义都从同一组 selection 令牌取色（输入框保留 field 底色、
-    /// 只强调描边；下拉 active/open 也用 selection，而非 egui 默认灰）。
+    /// 「选中」语义都从同一组 selection 令牌取色。扁平化（v0.14.1）后契约
+    /// 收窄为**填充同源**：下拉 active/open 用 selection 底色（不再画边框，
+    /// egui 默认灰填充也一并排除）；输入框聚焦环仍走 selection.stroke。
     #[test]
     fn input_text_left_offset_matches_combo_and_selection_tokens_are_shared() {
         for mode in [config::ThemeMode::Dark, config::ThemeMode::Light] {
@@ -1943,9 +1977,9 @@ mod tests {
             let v = &ctx.style_of(ctx.theme()).visuals;
             // 下拉展开/按下（active、open）必须和输入框聚焦同源于 selection
             for w in [&v.widgets.active, &v.widgets.open] {
-                assert_eq!(
-                    w.bg_stroke.color, v.selection.stroke.color,
-                    "下拉 {mode:?} 描边色与输入框聚焦描边不一致"
+                assert!(
+                    w.bg_stroke.is_empty(),
+                    "下拉 {mode:?} 应无边框（扁平风：状态反馈只走填充）"
                 );
                 assert_eq!(
                     w.weak_bg_fill, v.selection.bg_fill,
@@ -2011,30 +2045,25 @@ mod tests {
     }
 
     #[test]
-    fn scroll_flip_accumulates_and_resets_past_threshold() {
-        let mut accum = 0.0;
-        assert_eq!(scroll_flip(&mut accum, 30.0, 48.0), None);
-        assert_eq!(scroll_flip(&mut accum, 10.0, 48.0), None);
-        assert_eq!(accum, 40.0);
-        // 触控板反向轻扫会抵消累积
-        assert_eq!(scroll_flip(&mut accum, -20.0, 48.0), None);
-        assert_eq!(accum, 20.0);
-        // 越过阈值 → 翻页并清零（一次大幅轻扫也只翻一页）
-        assert_eq!(scroll_flip(&mut accum, 30.0, 48.0), Some(1));
-        assert_eq!(accum, 0.0);
-        // 向上同理
-        assert_eq!(scroll_flip(&mut accum, -60.0, 48.0), Some(-1));
-        assert_eq!(accum, 0.0);
-    }
-
-    #[test]
-    fn scroll_tab_steps_and_clamps_at_ends() {
-        let first = SettingsTab::default();
-        assert_eq!(first.next(), SettingsTab::Screenshot);
-        assert_eq!(first.prev(), first, "首页向上钳住");
-        let last = SettingsTab::About;
-        assert_eq!(last.next(), last, "末页向下钳住");
-        assert_eq!(last.prev(), SettingsTab::Hotkeys);
+    fn scroll_spy_follows_judge_line_and_pins_bottom() {
+        let tops = [
+            (SettingsTab::General, 0.0),
+            (SettingsTab::Screenshot, 300.0),
+            (SettingsTab::Record, 500.0),
+            (SettingsTab::Ocr, 700.0),
+            (SettingsTab::Hotkeys, 900.0),
+            (SettingsTab::About, 1100.0),
+        ];
+        // 顶部：判定线在首分区内
+        assert_eq!(scroll_spy(&tops, 80.0, false), SettingsTab::General);
+        // 判定线越过第二分区起点 → 高亮跟随
+        assert_eq!(scroll_spy(&tops, 310.0, false), SettingsTab::Screenshot);
+        // 判定线正好落在分区起点上 → 该分区接管（边界含等号）
+        assert_eq!(scroll_spy(&tops, 500.0, false), SettingsTab::Record);
+        // 矮分区（如「关于」）起点永远够不到判定线，滚到底必须兜底选中
+        assert_eq!(scroll_spy(&tops, 950.0, true), SettingsTab::About);
+        // 空列表兜底默认分区
+        assert_eq!(scroll_spy(&[], 80.0, false), SettingsTab::General);
     }
 
     #[test]
