@@ -110,10 +110,11 @@ fn scroll_spy(tops: &[(SettingsTab, f32)], line: f32, at_bottom: bool) -> Settin
     current
 }
 
-/// 导航项：图标 + 文字整行可点。扁平风选中态 = 品牌色淡 tint 底 +
-/// `accent_ink` 前景（不再是实心 selection 色块），未选中悬停 = field
-/// 灰。品牌 tint 直接用半透明 [`theme::ACCENT`] 叠在面板底上，深浅随主题
-/// 自适应；文字/图标走主题化前景色保证对比度（同 accent_ink 契约）。
+/// 导航项：图标 + 文字整行可点。扁平风选中态 = 淡 tint 底 + `accent_ink`
+/// 前景 + 左侧品牌色指示条，未选中悬停 = field 灰。tint 按主题分：浅色是
+/// 半透明品牌色（白卡片上淡红 tint 干净）；暗色是**中性提亮**（半透明白，
+/// 压暗的红在暗底上发闷，用户反馈「选中的红色不好看」——红交给文字与
+/// 指示条表达）。文字/图标走主题化前景色保证对比度（同 accent_ink 契约）。
 fn nav_item(
     ui: &mut egui::Ui,
     selected: bool,
@@ -123,17 +124,11 @@ fn nav_item(
     let (rect, resp) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), egui::Sense::click());
     let v = ui.visuals();
-    // 选中 tint：半透明品牌色叠在面板底上（色相自动跟随 theme::ACCENT，
-    // 勿写字面量——品牌色换色时这里必须跟着变）
-    let accent = if v.dark_mode {
-        // 暗色面板上叠半透明品牌色：抬亮而不是压灰
-        egui::Color32::from_rgba_unmultiplied(
-            theme::ACCENT.r(),
-            theme::ACCENT.g(),
-            theme::ACCENT.b(),
-            36,
-        )
+    let selected_fill = if v.dark_mode {
+        // 中性高光：半透明白叠面板（勿写字面量色值，alpha 即全部自由度）
+        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 22)
     } else {
+        // 半透明品牌色叠面板，色相自动跟随 theme::ACCENT
         egui::Color32::from_rgba_unmultiplied(
             theme::ACCENT.r(),
             theme::ACCENT.g(),
@@ -143,7 +138,7 @@ fn nav_item(
     };
     if selected {
         ui.painter()
-            .rect_filled(rect, egui::CornerRadius::same(8), accent);
+            .rect_filled(rect, egui::CornerRadius::same(8), selected_fill);
     } else if resp.hovered() {
         ui.painter()
             .rect_filled(rect, egui::CornerRadius::same(8), field(ui));
@@ -1723,15 +1718,17 @@ fn input_field(ui: &mut egui::Ui, builder: egui::TextEdit<'_>, width: f32) -> eg
             .frame(egui::Frame::NONE)
             .vertical_align(egui::Align::Center),
     );
-    // 扁平化：空闲态无边框（轮廓 = field 底色 vs 卡片底色的色调差），
-    // 只有聚焦画一圈 selection 描边
-    if inner.has_focus() {
-        ui.painter().rect_stroke(
-            rect,
-            8.0,
-            ui.visuals().selection.stroke,
-            egui::StrokeKind::Inside,
-        );
+    // 空闲描边走 widgets.inactive.bg_stroke（随主题：浅色 NONE = 纯色调
+    // 分层，暗色有可见边框，见 theme.rs 控件描边策略）；聚焦换 selection
+    // 焦点环。两者取同一令牌来源，暗色下与内建 TextEdit/下拉框外观一致
+    let stroke = if inner.has_focus() {
+        ui.visuals().selection.stroke
+    } else {
+        ui.visuals().widgets.inactive.bg_stroke
+    };
+    if !stroke.is_empty() {
+        ui.painter()
+            .rect_stroke(rect, 8.0, stroke, egui::StrokeKind::Inside);
     }
     // 悬停提示挂在外层定高矩形上（调用方只做 on_hover_text）；内部点击/
     // 编辑交互仍由 TextEdit 自己处理
@@ -1975,12 +1972,20 @@ mod tests {
             let ctx = egui::Context::default();
             theme::apply(&ctx, mode);
             let v = &ctx.style_of(ctx.theme()).visuals;
-            // 下拉展开/按下（active、open）必须和输入框聚焦同源于 selection
+            // 下拉展开/按下（active、open）必须和输入框聚焦同源于 selection；
+            // 描边随主题策略：暗色有 selection 环，浅色无边框
             for w in [&v.widgets.active, &v.widgets.open] {
-                assert!(
-                    w.bg_stroke.is_empty(),
-                    "下拉 {mode:?} 应无边框（扁平风：状态反馈只走填充）"
-                );
+                if v.dark_mode {
+                    assert_eq!(
+                        w.bg_stroke.color, v.selection.stroke.color,
+                        "暗色下拉展开描边与输入框聚焦环不同源"
+                    );
+                } else {
+                    assert!(
+                        w.bg_stroke.is_empty(),
+                        "浅色下拉应无边框（扁平风：状态反馈只走填充）"
+                    );
+                }
                 assert_eq!(
                     w.weak_bg_fill, v.selection.bg_fill,
                     "下拉 {mode:?} 底色未走 selection 令牌"

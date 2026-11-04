@@ -46,7 +46,9 @@ const DARK_CARD: egui::Color32 = egui::Color32::from_rgb(0x1d, 0x1d, 0x25);
 const DARK_STROKE: egui::Color32 = egui::Color32::from_rgb(0x3d, 0x3d, 0x4c);
 const DARK_TEXT: egui::Color32 = egui::Color32::from_rgb(0xec, 0xec, 0xf1);
 const DARK_MUTED: egui::Color32 = egui::Color32::from_rgb(0x9a, 0x9a, 0xa5);
-const DARK_FIELD: egui::Color32 = egui::Color32::from_rgb(0x1f, 0x1f, 0x27);
+/// 输入域底色：暗色下控件描边恢复后仍要比卡片再亮一档，双层可辨
+/// （v0.14.1 用户反馈暗色 select/input 边框不明显）
+const DARK_FIELD: egui::Color32 = egui::Color32::from_rgb(0x23, 0x23, 0x2c);
 /// 页脚条（比面板更深一层）
 const DARK_FOOTER: egui::Color32 = egui::Color32::from_rgb(0x11, 0x11, 0x15);
 
@@ -66,15 +68,18 @@ const LIGHT_FOOTER: egui::Color32 = egui::Color32::from_rgb(0xea, 0xea, 0xef);
 
 // ---------------------------------------------------------------- 选中态
 
-/// 选中底色：浅色下是品牌红的**浅化**版（红调仍在、但不与输入域糊成一片），
-/// 深色下是压暗的红。
+/// 选中底色：浅色下是品牌红的**浅化**版（红调仍在、但不与输入域糊成一片）。
 const LIGHT_SELECT_BG: egui::Color32 = egui::Color32::from_rgb(0xff, 0xcf, 0xc7);
 /// 选中文字色：压在选中底上的**深红**（不是品牌红——品牌红在浅底上只有
 /// 约 2.5:1，等于红底红字）
 const LIGHT_SELECT_INK: egui::Color32 = egui::Color32::from_rgb(0x7f, 0x15, 0x12);
-const DARK_SELECT_BG: egui::Color32 = egui::Color32::from_rgb(0x6b, 0x26, 0x22);
-/// 深色下反向：底色压暗、文字提亮（浅粉）
-const DARK_SELECT_INK: egui::Color32 = egui::Color32::from_rgb(0xff, 0xd9, 0xd5);
+/// 暗色选中底：**中性提亮灰**。压暗的红（旧值 #6b2622）在暗色下发闷发棕
+/// （用户反馈「选中的红色不好看」）；现代深色 UI 的选中态普遍用中性高光，
+/// 品牌红交给选中文字、聚焦环与左侧指示条表达。
+const DARK_SELECT_BG: egui::Color32 = egui::Color32::from_rgb(0x30, 0x30, 0x38);
+/// 暗色选中文字/聚焦环：提亮的品牌红（珊瑚色，与 accent_line 暗值同源）。
+/// 中性底上红字对比约 5.7:1 达 AA，比旧浅粉 #ffd9d5 红色识别度更高。
+const DARK_SELECT_INK: egui::Color32 = egui::Color32::from_rgb(0xff, 0x8a, 0x80);
 
 // ---------------------------------------------------------------- 品牌色前景化
 
@@ -211,29 +216,43 @@ pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
             w.corner_radius = egui::CornerRadius::same(6);
             w.fg_stroke.color = text;
         }
-        // 非交互态（分隔线/装饰线）保留一条淡描边；交互控件（输入框/按钮/
-        // 下拉框）一律**无边框**——现代扁平风靠色调分层立轮廓，边框堆叠
-        // 是「旧表单感」的主要来源。悬停/按下反馈全走 weak_bg_fill 变化。
-        // 注意 egui 默认 inactive.bg_stroke 是 Stroke::NONE（width 0），
-        // 想要线必须整条 Stroke::new 赋值。
+        // 非交互态（分隔线/装饰线）保留一条淡描边。交互控件（输入框/下拉/
+        // 按钮）的轮廓策略**按主题分**：浅色无边框、纯色调分层（白卡片上
+        // field 灰一眼可辨）；暗色明度范围小，field 与卡片只差几级灰度，
+        // 纯色调分层撑不起来（用户反馈「select 和 input 边框太不明显」）
+        // ——恢复一条与卡片拉开差距的描边。注意 egui 默认 inactive.bg_stroke
+        // 是 Stroke::NONE（width 0），想要线必须整条 Stroke::new 赋值。
         v.widgets.noninteractive.corner_radius = egui::CornerRadius::same(6);
         v.widgets.noninteractive.fg_stroke.color = muted;
         v.widgets.noninteractive.weak_bg_fill = field;
         v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, stroke);
         v.widgets.inactive.weak_bg_fill = field;
-        v.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+        v.widgets.inactive.bg_stroke = if dark {
+            egui::Stroke::new(1.0, stroke)
+        } else {
+            egui::Stroke::NONE
+        };
         for w in [
             &mut v.widgets.hovered,
             &mut v.widgets.active,
             &mut v.widgets.open,
         ] {
-            w.bg_stroke = egui::Stroke::NONE;
+            w.bg_stroke = if dark {
+                // 悬停/按下维持同宽描边，避免悬停瞬间边框闪没
+                egui::Stroke::new(1.0, stroke)
+            } else {
+                egui::Stroke::NONE
+            };
         }
         // 下拉框打开/按下时与 TextEdit 聚焦使用同一组 selection 令牌：
-        // 输入框保留 field 底色；这里只取色（填充/前景），不再画边框。
+        // 输入框保留 field 底色；浅色只取填充/前景，暗色再叠 selection
+        // 描边（展开态比静止态更强调，与输入框聚焦环同一语言）。
         for w in [&mut v.widgets.active, &mut v.widgets.open] {
             w.weak_bg_fill = sel_bg;
             w.fg_stroke.color = sel_ink;
+            if dark {
+                w.bg_stroke = egui::Stroke::new(1.5, sel_ink);
+            }
         }
         style.spacing.button_padding = egui::vec2(12.0, 6.0);
         style.spacing.interact_size.y = FIELD_H;
@@ -286,23 +305,37 @@ mod tests {
     }
 
     #[test]
-    fn text_edit_flat_but_visible() {
-        // 扁平化契约（v0.14.1）：输入框 idle 态**无边框**，靠 field 底色与
-        // 面板拉开（历史回归：只赋 bg_stroke.color 时 width 仍为 0，边框
-        // 整条不渲染——当年靠边框区分，现在边框刻意移除，可读性完全压在
-        // 底色差上，所以底色差是硬性要求）。聚焦态仍走 selection 描边。
+    fn input_idle_outline_matches_theme_strategy() {
+        // 控件轮廓策略（v0.14.1）：浅色无边框、纯色调分层；暗色明度范围
+        // 小，field 与卡片只差几级灰度，纯色调撑不起来（用户反馈「暗色
+        // select 和 input 边框太不明显」）——暗色必须有与卡片拉开的描边。
+        // 两种主题下 field 底色都必须区别于面板底色（历史回归：只赋
+        // bg_stroke.color 时 width 仍为 0，边框整条不渲染）。
         let ctx = egui::Context::default();
         apply(&ctx, ThemeMode::Dark);
         for theme in [egui::Theme::Dark, egui::Theme::Light] {
             let v = &ctx.style_of(theme).visuals;
-            assert!(
-                v.widgets.inactive.bg_stroke.is_empty(),
-                "{theme:?} 输入框 idle 必须无边框（扁平风：色调分层）"
-            );
+            if theme == egui::Theme::Dark {
+                let stroke = v.widgets.inactive.bg_stroke;
+                assert!(
+                    !stroke.is_empty(),
+                    "暗色输入框 idle 必须有可见边框（纯色调分层不够）"
+                );
+                let ratio = contrast(stroke.color, DARK_CARD);
+                assert!(
+                    ratio >= 1.15,
+                    "暗色输入框边框在卡片上仅 {ratio:.2}（需 ≥ 1.15）"
+                );
+            } else {
+                assert!(
+                    v.widgets.inactive.bg_stroke.is_empty(),
+                    "浅色输入框 idle 必须无边框（扁平风：色调分层）"
+                );
+            }
             assert_ne!(
                 v.text_edit_bg_color(),
                 v.panel_fill,
-                "{theme:?} 输入域底色必须区别于面板底色（无边框后的唯一轮廓）"
+                "{theme:?} 输入域底色必须区别于面板底色"
             );
             assert!(
                 !v.selection.stroke.is_empty(),
