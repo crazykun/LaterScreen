@@ -420,6 +420,14 @@ fn report_fatal(msg: &str) {
     if !HAS_CONSOLE.load(std::sync::atomic::Ordering::Relaxed) {
         win_message_box(msg);
     }
+    // Linux：托盘拉起的 GUI 子进程 stderr 被重定向到 lscreen-tray.log，致命
+    // 错误用户看不到，表现为「按 F1 什么都没发生」。补桌面通知，与 Windows
+    // 无控制台时弹框同一语义。终端里手动跑 CLI 时 stderr 是 tty，不打扰。
+    #[cfg(target_os = "linux")]
+    // SAFETY: isatty 只接收整数 fd，无指针/内存操作
+    if unsafe { libc::isatty(2) } == 0 {
+        export::notify_error("LaterScreen", msg);
+    }
 }
 
 /// 统一跑 eframe 窗口，把 GL 环境类失败翻译成用户可自救的提示。
@@ -633,8 +641,11 @@ fn main() {
 }
 
 /// 托盘入口：默认分离到后台（静默驻留），--foreground 保持前台便于调试。
-/// 分离方式 = 再拉起一个自身子进程（stdio 全断开 + 环境变量防递归），
-/// 父进程随即退出，终端立即返回；子进程被 init 收养，无僵尸问题。
+/// 分离方式 = 再拉起一个自身子进程（stdin/stdout 断开，stderr 落
+/// `~/.config/lscreen/lscreen-tray.log` + 环境变量防递归），父进程随即退出，
+/// 终端立即返回；子进程被 init 收养，无僵尸问题。
+/// 托盘自身的热键注册/重连日志必须留痕：以前 stdio 全丢 /dev/null，
+/// Wayland 全局热键静默失效时只能靠 D-Bus 会话树猜，排障成本极高。
 fn run_tray(foreground: bool) -> Result<(), String> {
     use std::process::Stdio;
     const CHILD_ENV: &str = "LSCREEN_TRAY_CHILD";
@@ -654,7 +665,7 @@ fn run_tray(foreground: bool) -> Result<(), String> {
             .env(CHILD_ENV, "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(crate::tray::child_stderr(&["tray", "--foreground"]))
             .spawn()
             .map_err(|e| format!("启动托盘进程失败: {e}"))?;
         eprintln!("LaterScreen 已驻留后台：托盘菜单或全局热键唤起（lscreen tray --foreground 可前台运行）");

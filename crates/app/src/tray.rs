@@ -133,7 +133,7 @@ fn spawn_detached(args: &[&str]) {
 /// 托盘拉起的子进程 stderr 落日志：托盘自身被 daemonize 后 stdio 全断开，
 /// 子进程失败（如 Wayland 下区域录制不支持）若继续 /dev/null，用户表现
 /// 为「点了没反应」。日志放配置目录，超 4MB 截断防无限增长。
-fn child_stderr(args: &[&str]) -> std::process::Stdio {
+pub(crate) fn child_stderr(args: &[&str]) -> std::process::Stdio {
     use std::io::Write;
     use std::process::Stdio;
     let Some(dir) = config::config_dir() else {
@@ -161,6 +161,27 @@ fn child_stderr(args: &[&str]) -> std::process::Stdio {
             f.into()
         }
         Err(_) => Stdio::null(),
+    }
+}
+
+/// Wayland 全局热键重连退避：会话活过 30s 属正常 TTL 到期，**立即重连**
+/// （不 sleep，消除每次重连约 1 秒的热键空窗）；注册立刻失败才从 1s 起
+/// 按 2 倍退避、封顶 30s，避免 portal 长期不可用时占 CPU、刷日志。
+#[cfg(target_os = "linux")]
+fn reconnect_backoff(
+    current: std::time::Duration,
+    session_duration: std::time::Duration,
+) -> std::time::Duration {
+    use std::time::Duration;
+    const FIRST_RETRY: Duration = Duration::from_secs(1);
+    const MAX: Duration = Duration::from_secs(30);
+    const LONG_SESSION: Duration = Duration::from_secs(30);
+    if session_duration >= LONG_SESSION {
+        Duration::ZERO
+    } else if current.is_zero() {
+        FIRST_RETRY
+    } else {
+        (current * 2).min(MAX)
     }
 }
 
@@ -972,33 +993,28 @@ mod linux_impl {
             if !specs.is_empty() {
                 let gs_tx = tx.clone();
                 std::thread::spawn(move || {
-                    const MAX_ATTEMPTS: u8 = 2;
-                    for attempt in 1..=MAX_ATTEMPTS {
-                        eprintln!(
-                            "lscreen tray: 注册 Wayland 全局热键（第 {attempt}/{MAX_ATTEMPTS} 次）"
-                        );
+                    // portal 会话会被合成器随时关闭（锁屏、portal 重启、快捷键
+                    // 设置变更），且 GNOME 下 Activated 信号流并不会随会话
+                    // 结束。capture 侧按 TTL 主动返回，这里必须重新注册而不是
+                    // break —— 曾经直接 break + 无限等 Activated，导致热键
+                    // 永久静默失效但托盘图标仍在（「F1 又不管用了，重启才好」）。
+                    let mut backoff = std::time::Duration::ZERO;
+                    let mut round: u32 = 0;
+                    loop {
+                        round += 1;
+                        eprintln!("lscreen tray: 注册 Wayland 全局热键（第 {round} 次）");
+                        let started = std::time::Instant::now();
                         let r = lscreen_capture::run_global_shortcuts(&specs, |id| {
                             if let Some(a) = super::action_from_shortcut_id(id) {
                                 let _ = gs_tx.send(a);
                             }
                         });
                         match r {
-                            Ok(()) => {
-                                eprintln!("lscreen tray: Wayland 全局热键监听已结束");
-                                break;
-                            }
-                            Err(e) if attempt < MAX_ATTEMPTS => {
-                                eprintln!(
-                                    "lscreen tray: Wayland 全局热键注册失败，将在 1 秒后重试: {e}"
-                                );
-                                std::thread::sleep(std::time::Duration::from_secs(1));
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "lscreen tray: Wayland 全局热键不可用，自动重试已耗尽（菜单仍可用）: {e}"
-                                );
-                            }
+                            Ok(()) => eprintln!("lscreen tray: 热键会话已结束，准备重连"),
+                            Err(e) => eprintln!("lscreen tray: 热键注册失败，准备重试: {e}"),
                         }
+                        backoff = super::reconnect_backoff(backoff, started.elapsed());
+                        std::thread::sleep(backoff);
                     }
                 });
             }
@@ -1304,6 +1320,22 @@ mod native_impl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wayland_reconnect_backoff() {
+        use std::time::Duration;
+        let d = |s| Duration::from_secs(s);
+        // 正常 TTL 到期：0 退避立即重连，不留热键空窗
+        assert_eq!(super::reconnect_backoff(d(16), d(30)), d(0));
+        assert_eq!(super::reconnect_backoff(d(30), d(3600)), d(0));
+        // 会话秒退（注册失败 / portal 反复关会话）：从 1s 起指数退避并封顶
+        assert_eq!(super::reconnect_backoff(d(0), d(0)), d(1));
+        assert_eq!(super::reconnect_backoff(d(1), d(0)), d(2));
+        assert_eq!(super::reconnect_backoff(d(8), d(0)), d(16));
+        assert_eq!(super::reconnect_backoff(d(16), d(0)), d(30));
+        assert_eq!(super::reconnect_backoff(d(30), d(0)), d(30));
+    }
 
     #[test]
     fn mac_vk_table_matches_global_hotkey() {

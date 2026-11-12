@@ -353,6 +353,39 @@ fn show_items_dbus(path: &Path) -> bool {
     result.is_ok()
 }
 
+/// Linux：发一条桌面通知（`org.freedesktop.Notifications.Notify`）。
+///
+/// 托盘拉起的 GUI 子进程 stdio 只落 `lscreen-tray.log`，致命错误用户完全
+/// 看不到，表现为「按了热键什么都没发生」。这里补一条可见反馈，与 Windows
+/// 无控制台时弹 MessageBox 同一语义。通知服务不可用时静默忽略——错误本身
+/// 仍留在 stderr/日志里，不影响退出码。
+#[cfg(target_os = "linux")]
+pub fn notify_error(summary: &str, body: &str) {
+    use std::collections::HashMap;
+    use zbus::zvariant::Value;
+    let Ok(conn) = zbus::blocking::Connection::session() else {
+        return;
+    };
+    let Ok(proxy) = zbus::blocking::Proxy::new(
+        &conn,
+        "org.freedesktop.Notifications",
+        "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications",
+    ) else {
+        return;
+    };
+    let actions: Vec<&str> = Vec::new();
+    let hints: HashMap<&str, Value<'_>> = HashMap::new();
+    // Notify(s app_name, u replaces_id, s icon, s summary, s body,
+    //        as actions, a{sv} hints, i timeout) -> u id
+    let _: Result<u32, zbus::Error> = proxy.call(
+        "Notify",
+        &(
+            "lscreen", 0u32, "lscreen", summary, body, actions, hints, 5000i32,
+        ),
+    );
+}
+
 pub fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {

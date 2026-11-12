@@ -1242,9 +1242,13 @@ pub struct ShortcutSpec {
 /// 才把键位交给自己；这期间 Activated 不会来，属正常。
 ///
 /// 注册阶段（连接、订阅、建会话、绑定）设有 8 秒超时，防止 portal 在登录后
-/// 偶发卡住导致热键永久静默失效；绑定成功后的 Activated 监听没有超时，按设计
-/// 持续到 portal 会话结束。
+/// 偶发卡住导致热键永久静默失效；绑定成功后按 TTL 定期返回，让调用方重新
+/// 注册，兜住合成器静默关闭会话而信号流不结束的情况。
 const GLOBAL_SHORTCUTS_REGISTER_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// 单次 GlobalShortcuts 会话最长监听时长。到期主动返回触发重连，代价仅一次
+/// D-Bus 往返；上层对「活过 30s 的会话」按 1s 立即重连，恢复延迟约 1 秒。
+const GLOBAL_SHORTCUTS_SESSION_TTL: Duration = Duration::from_secs(60);
 
 pub fn run_global_shortcuts(
     specs: &[ShortcutSpec],
@@ -1292,7 +1296,7 @@ pub fn run_global_shortcuts(
         };
         let timeout = async_io::Timer::after(GLOBAL_SHORTCUTS_REGISTER_TIMEOUT);
         futures_util::pin_mut!(registration, timeout);
-        let (_gs, mut activated, _session) = futures_util::select_biased! {
+        let (_gs, mut activated, session) = futures_util::select_biased! {
             result = registration.fuse() => result?,
             _ = FutureExt::fuse(timeout) => {
                 return Err(CaptureError(format!(
@@ -1301,11 +1305,26 @@ pub fn run_global_shortcuts(
             }
         };
 
-        // 阻塞消费 Activated 流：session 与 activated 都在本作用域存活
-        while let Some(ev) = activated.next().await {
-            on_activated(ev.shortcut_id());
+        // 会话 TTL 兜底：GNOME 51 实测合成器会悄悄关掉 impl 侧会话（portal
+        // 会话树里对象消失）却**不结束 Activated 信号流**——ashpd 的
+        // receive_activated() 只是普通 D-Bus 信号订阅，会话关闭时永远 pending。
+        // 只等 Activated 会让热键永久静默失效，且上层监听线程一直阻塞，
+        // 连重连都触发不了。到点主动返回，由调用方重新注册（重连代价仅一次
+        // D-Bus 往返；已授权的应用再绑定不会弹确认框）。
+        let mut ttl = async_io::Timer::after(GLOBAL_SHORTCUTS_SESSION_TTL);
+        loop {
+            futures_util::select_biased! {
+                ev = activated.next().fuse() => match ev {
+                    Some(ev) => on_activated(ev.shortcut_id()),
+                    None => break, // D-Bus 连接断开
+                },
+                _ = FutureExt::fuse(&mut ttl) => break, // 会话 TTL 到期，重连
+            }
         }
-        // 流结束（portal 关闭会话）——正常退出
+        // 主动关掉旧会话：托盘的 D-Bus 连接是长驻的，portal 只在连接断开时
+        // 清理会话对象；每次 TTL 重连都新建会累积 session 对象。close 让
+        // 前端立即释放（会话已被合成器提前关掉时返回 Err，忽略即可）。
+        let _ = session.close().await;
         Ok(())
     })
 }

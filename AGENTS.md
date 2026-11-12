@@ -9,7 +9,7 @@ cargo build --release          # 产物 target/release/lscreen
 cargo test --workspace         # 纯单元测试，无需显示器/外部服务
 cargo test -p lscreen-core     # 单 crate 测试
 cargo test -p lscreen-core qr  # 按名过滤单个测试
-cargo check -p lscreen-app     # 快速单 crate 校验
+cargo check -p lscreen         # 快速单 crate 校验（app crate 包名为 lscreen）
 cargo fmt --all                # 格式化（CI 强制 --check）
 cargo clippy --workspace --all-targets -- -D warnings
 ```
