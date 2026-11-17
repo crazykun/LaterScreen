@@ -97,18 +97,33 @@ fn set_dock_icon() {
         return;
     }
     // libobjc 直连（repo 既有风格：capture/other.rs 直连 CG/CF 同款，不引入
-    // objc 系新依赖）。objc_msgSend 只声明**一次**且用 C 变参形状——同符号
-    // 按不同签名重复声明会被 rustc 拒绝；实参全是指针/整数，变参调用在本
-    // 平台 ABI 上与定参一致，void 方法（release）的返回值丢弃即可。
+    // objc 系新依赖）。objc_msgSend 是汇编实现的**定参**函数，必须按定参
+    // 形状声明：C 变参形状（`...`）在 Apple arm64 上会把匿名参数压栈
+    // （arm64 变参调用约定），而 objc_msgSend 只从 x2/x3/… 寄存器读实参，
+    // 拿到的是寄存器残留垃圾——真机 M6/macOS 27 实测 `+[NSString
+    // stringWithUTF8String:]` 对垃圾指针 strlen 直接 SIGSEGV，v0.11.8–
+    // v0.14.2 所有 mac GUI 子进程（截图/取色/贴图/历史/设置）首帧必崩。
+    // x86_64 变参仍走寄存器，故当年 Intel 真机验证通过、arm64 才暴露。
+    // 同符号按不同签名各自声明即可（链接期都解析到同一符号，rustc 不做
+    // 跨声明签名一致性校验）：0 参形状给 sharedApplication/alloc/release，
+    // 1 参形状给其余调用；void 方法（release）的返回值丢弃即可。
+    // clashing_extern_declarations 警的本就是「意外」的签名冲突，这里两个
+    // 形状都是有意为之（变参的教训见上），CI -D warnings 下显式放行。
     #[link(name = "objc", kind = "dylib")]
-    extern "C" {
+    #[allow(clashing_extern_declarations)]
+    unsafe extern "C" {
         fn objc_getClass(name: *const i8) -> *mut core::ffi::c_void;
         fn sel_registerName(name: *const i8) -> *const core::ffi::c_void;
         #[link_name = "objc_msgSend"]
-        fn msg_send(
+        fn msg_send0(
             obj: *mut core::ffi::c_void,
             sel: *const core::ffi::c_void,
-            ...
+        ) -> *mut core::ffi::c_void;
+        #[link_name = "objc_msgSend"]
+        fn msg_send1(
+            obj: *mut core::ffi::c_void,
+            sel: *const core::ffi::c_void,
+            arg0: *mut core::ffi::c_void,
         ) -> *mut core::ffi::c_void;
     }
     let sel = |name: &'static core::ffi::CStr| unsafe { sel_registerName(name.as_ptr()) };
@@ -119,7 +134,7 @@ fn set_dock_icon() {
         if nsapp_cls.is_null() || nsimage_cls.is_null() || nsstring_cls.is_null() {
             return;
         }
-        let nsapp = msg_send(nsapp_cls, sel(c"sharedApplication"));
+        let nsapp = msg_send0(nsapp_cls, sel(c"sharedApplication"));
         if nsapp.is_null() {
             return;
         }
@@ -131,17 +146,21 @@ fn set_dock_icon() {
             Ok(c) => c,
             Err(_) => return,
         };
-        let path = msg_send(nsstring_cls, sel(c"stringWithUTF8String:"), tmp_c.as_ptr());
-        let image = msg_send(
-            msg_send(nsimage_cls, sel(c"alloc")),
+        let path = msg_send1(
+            nsstring_cls,
+            sel(c"stringWithUTF8String:"),
+            tmp_c.as_ptr() as *mut core::ffi::c_void,
+        );
+        let image = msg_send1(
+            msg_send0(nsimage_cls, sel(c"alloc")),
             sel(c"initWithContentsOfFile:"),
             path,
         );
         if image.is_null() {
             return;
         }
-        msg_send(nsapp, sel(c"setApplicationIconImage:"), image);
-        msg_send(image, sel(c"release"));
+        msg_send1(nsapp, sel(c"setApplicationIconImage:"), image);
+        msg_send0(image, sel(c"release"));
     }
 }
 
