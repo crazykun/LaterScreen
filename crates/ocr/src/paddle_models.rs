@@ -588,6 +588,10 @@ mod tests {
                 while !thread_stop.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
+                            // Windows 上自非阻塞 listener accept 的流会继承非阻塞
+                            // 模式（Unix 不会）：请求字节晚于 accept 到达时 read
+                            // 立刻 WouldBlock，空请求被路由成 404，偶发打挂 CI。
+                            stream.set_nonblocking(false).unwrap();
                             stream
                                 .set_read_timeout(Some(Duration::from_secs(1)))
                                 .unwrap();
