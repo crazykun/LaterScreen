@@ -2390,7 +2390,12 @@ fn run_ocr_show(title: String) -> Result<(), String> {
         "lscreen-ocr-result",
         true,
         options,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
+            // 结果窗会显示中文识别文本，必须先装系统字体（同 countdown/pin，
+            // 缺字体时 CJK 全是方块——「乱码」的真身）
+            if let Some(bytes) = crate::font::load_system_font() {
+                crate::font::setup_egui_fonts(&cc.egui_ctx, bytes);
+            }
             Ok(Box::new(OcrResultApp {
                 text,
                 copied: true,
