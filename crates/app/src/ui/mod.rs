@@ -900,6 +900,14 @@ impl SnipApp {
             return;
         };
         self.remember_selection();
+        // 覆盖层模式（preview=false）识别成功改走「贴图 + 独立结果窗」：
+        // 贴图钉回选区原位（原图对照），全文另开独立窗口便于粘贴到别处
+        let deliver = !self.preview;
+        let deliver_pos = (
+            (self.shot.origin.0 as f32 + self.region.min.x) / self.shot.scale,
+            (self.shot.origin.1 as f32 + self.region.min.y) / self.shot.scale,
+        );
+        let deliver_scale = self.shot.scale;
         self.spawn_scan(ctx, move || {
             // 已打开的标注窗也读取最新保存值；构造/探测（含 tesseract 子进程）、
             // 首次模型下载与推理全部留在 worker，不能阻塞 UI 线程。
@@ -916,7 +924,24 @@ impl SnipApp {
                         .filter(|block| !block.text.trim().is_empty())
                         .map(|block| block.text)
                         .collect();
-                    ScanOutcome::Ok("文字识别结果".into(), items)
+                    if deliver {
+                        // 选区 PNG 落临时文件（唯一名防覆盖）给贴图进程
+                        let nanos = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos())
+                            .unwrap_or(0);
+                        let path = std::env::temp_dir().join(format!("lscreen-ocr-pin-{nanos}.png"));
+                        let png_path = crate::export::save_png(&rgba, w, h, &path).unwrap_or(path);
+                        ScanOutcome::Deliver {
+                            title: "文字识别结果".into(),
+                            items,
+                            png_path,
+                            pos: deliver_pos,
+                            scale: deliver_scale,
+                        }
+                    } else {
+                        ScanOutcome::Ok("文字识别结果".into(), items)
+                    }
                 }
                 Ok(_) => ScanOutcome::Empty("选区内未识别到文字".into()),
                 Err(e) => ScanOutcome::Empty(format!("识别失败: {e}")),
@@ -947,6 +972,27 @@ impl SnipApp {
                 self.scan_job = None;
                 self.toast = None;
                 self.results_panel = Some((title, items));
+            }
+            Ok(ScanOutcome::Deliver {
+                title,
+                items,
+                png_path,
+                pos,
+                scale,
+            }) => {
+                self.scan_job = None;
+                self.toast = None;
+                // 全文先进剪贴板：粘贴到别处一步到位（结果窗内仍可手动复制）
+                let text = items.join("\n");
+                let _ = export::copy_text_to_clipboard(&text);
+                // 选区原图钉回原位（贴图进程，多开语义）
+                let _ = crate::spawn_pin_file(&png_path, pos, scale);
+                // 识别文本独立窗口（全文经 stdin 交子进程）
+                let _ = crate::spawn_ocr_show(&title, &text);
+                // 覆盖层使命完成：关窗（与 Esc 同通道，close_requested 在
+                // update 尾部兜底，viewport 关闭事件双保险）
+                self.close_requested = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Ok(ScanOutcome::Empty(msg)) => {
                 self.scan_job = None;
@@ -1201,6 +1247,17 @@ impl eframe::App for SnipApp {
 enum ScanOutcome {
     /// (面板标题, 文本条目)
     Ok(String, Vec<String>),
+    /// 覆盖层模式 OCR 成功：改走「贴图 + 独立结果窗」交付并关闭覆盖层
+    /// （用户反馈：原地内嵌面板不便于对照原文粘贴，2026-11-18）。
+    /// png_path = 选区裁剪 PNG（贴图进程读）；pos/scale = 贴图摆放
+    /// （选区左上角的屏幕逻辑点与缩放比，原图钉回原位）
+    Deliver {
+        title: String,
+        items: Vec<String>,
+        png_path: std::path::PathBuf,
+        pos: (f32, f32),
+        scale: f32,
+    },
     /// 无结果或失败，toast 提示
     Empty(String),
 }

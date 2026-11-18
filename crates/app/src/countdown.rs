@@ -68,7 +68,7 @@ pub fn run(secs: f64) -> bool {
             cancelled: c,
         }) as Box<dyn eframe::App>)
     };
-    if let Err(e) = run_eframe("lscreen-countdown", options, Box::new(app)) {
+    if let Err(e) = run_eframe("lscreen-countdown", true, options, Box::new(app)) {
         eprintln!("lscreen: 倒计时窗不可用（{e}），改为纯延时");
         std::thread::sleep(Duration::from_secs_f64(secs));
         return true;

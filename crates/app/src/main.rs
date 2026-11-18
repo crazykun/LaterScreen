@@ -345,6 +345,13 @@ enum Cmd {
         #[arg(long, default_value_t = 1.0, allow_hyphen_values = true)]
         scale: f32,
     },
+    /// 识别结果独立窗口：文本经 stdin 传入（覆盖层 OCR/扫码成功后自动弹出，
+    /// 与贴图配套——原图钉回原位、文本单独成窗方便复制）
+    OcrShow {
+        /// 窗口标题
+        #[arg(long, default_value = "识别结果")]
+        title: String,
+    },
     /// 滚动长截图：框选区域后自动滚动内容并拼接为长图（v0.8.0 起三平台；
     /// Wayland 除外）
     Scroll {
@@ -461,16 +468,25 @@ fn report_fatal(msg: &str) {
 /// 没有，切 `HardwareAcceleration::Off` 也救不回来。
 fn run_eframe(
     title: &str,
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] dock_icon: bool,
     options: eframe::NativeOptions,
     app: eframe::AppCreator<'static>,
 ) -> Result<(), String> {
     // mac 裸子进程的 Dock 图标在首帧补设（早期时机 Dock 不采纳），见
-    // DockIconOnceApp / set_dock_icon
+    // DockIconOnceApp / set_dock_icon。覆盖层类窗口（截图/取色/框选）传
+    // false：覆盖层是菜单栏之上的整屏窗，Dock 上挂一个点不动的本应用图标
+    // 只会突兀（用户反馈 2026-11-18）；贴图/历史/设置等交互窗仍补设。
     #[cfg(target_os = "macos")]
-    let app: eframe::AppCreator<'static> = Box::new(move |cc| {
-        let inner = app(cc)?;
-        Ok(Box::new(DockIconOnceApp { inner, done: false }) as Box<dyn eframe::App>)
-    });
+    let app: eframe::AppCreator<'static> = if dock_icon {
+        Box::new(move |cc| {
+            let inner = app(cc)?;
+            Ok(Box::new(DockIconOnceApp { inner, done: false }) as Box<dyn eframe::App>)
+        })
+    } else {
+        app
+    };
+    #[cfg(not(target_os = "macos"))]
+    let _ = dock_icon;
     eframe::run_native(title, options, app).map_err(|e| match e {
         eframe::Error::OpenGL(_)
         | eframe::Error::NoGlutinConfigs(..)
@@ -648,6 +664,7 @@ fn main() {
             }
         }
         Some(Cmd::Pin { input, pos, scale }) => run_pin(input, pos, scale),
+        Some(Cmd::OcrShow { title }) => run_ocr_show(title),
         Some(Cmd::Config) => run_settings(),
         Some(Cmd::History) => run_history(),
         Some(Cmd::Upload { file }) => run_upload(file),
@@ -728,6 +745,7 @@ fn run_settings() -> Result<(), String> {
     };
     run_eframe(
         "lscreen 配置",
+        true,
         options,
         Box::new(|cc| Ok(Box::new(settings_ui::SettingsApp::new(cc)))),
     )
@@ -773,6 +791,7 @@ fn run_history() -> Result<(), String> {
     };
     run_eframe(
         "lscreen 历史",
+        true,
         options,
         Box::new(|cc| Ok(Box::new(history::HistoryApp::new(cc)))),
     )
@@ -849,6 +868,7 @@ fn pick_region_interactive() -> Result<Option<String>, String> {
     let out = shared.clone();
     run_eframe(
         "lscreen-record",
+        false,
         options,
         Box::new(move |cc| {
             apply_overlay_behavior(cc);
@@ -1047,6 +1067,7 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
     };
     run_eframe(
         "lscreen",
+        false,
         options,
         Box::new(move |cc| {
             apply_overlay_behavior(cc);
@@ -1110,6 +1131,7 @@ fn run_gui_wayland() -> Result<(), String> {
     };
     run_eframe(
         "lscreen",
+        false,
         options,
         Box::new(move |cc| {
             Ok(Box::new(ui::SnipApp::new(
@@ -1787,6 +1809,7 @@ fn run_record(
     let app_status = status.clone();
     run_eframe(
         "lscreen-record-status",
+        true,
         options,
         Box::new(move |cc| {
             Ok(Box::new(record_ui::RecordApp::new(
@@ -2161,6 +2184,7 @@ fn run_scroll(
     let app_start = started.clone();
     run_eframe(
         "lscreen-scroll-status",
+        true,
         options,
         Box::new(move |cc| {
             Ok(Box::new(record_ui::RecordApp::new(
@@ -2252,6 +2276,129 @@ pub(crate) fn spawn_annotate_stdin(png: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// 把 PNG 文件交给独立贴图进程（OCR 识别成功后的贴图交付，见 ui::scan_ocr）：
+/// 原图钉回选区原位，方便对照识别文本。pin 多开是刻意语义（M9），单例不拦。
+pub(crate) fn spawn_pin_file(
+    path: &std::path::Path,
+    pos: (f32, f32),
+    scale: f32,
+) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut child = std::process::Command::new(exe)
+        .args([
+            "pin",
+            "-i",
+            &path.to_string_lossy(),
+            "--pos",
+            &format!("{},{}", pos.0, pos.1),
+            "--scale",
+            &format!("{scale}"),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("启动贴图进程失败: {e}"))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+/// 识别文本独立窗口：全文经 stdin 交子进程（同 spawn_annotate_stdin 的
+/// 「先读完再开窗」防死锁约定）。
+pub(crate) fn spawn_ocr_show(title: &str, text: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut child = Command::new(exe)
+        .args(["ocr-show", "--title", title])
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("启动结果窗进程失败: {e}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "无法写入结果窗进程".to_string())?
+        .write_all(text.as_bytes())
+        .map_err(|e| format!("写入结果窗进程失败: {e}"))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+/// 识别结果独立窗口：全文可选中、可整体复制（与贴图配套的 OCR 交付，
+/// 见 ui::scan_ocr）。
+struct OcrResultApp {
+    text: String,
+    copied: bool,
+}
+
+impl eframe::App for OcrResultApp {
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
+        eframe::egui::CentralPanel::default().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("识别结果");
+                ui.with_layout(
+                    eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
+                    |ui| {
+                        if ui.button("复制全部").clicked() {
+                            let _ = crate::export::copy_text_to_clipboard(&self.text);
+                            self.copied = true;
+                        }
+                        if self.copied {
+                            ui.weak("已复制");
+                        }
+                    },
+                );
+            });
+            ui.separator();
+            eframe::egui::ScrollArea::vertical().show(ui, |ui| {
+                eframe::egui::TextEdit::multiline(&mut self.text)
+                    .desired_width(ui.available_width())
+                    .desired_rows(12)
+                    .show(ui);
+            });
+        });
+    }
+
+    fn clear_color(&self, visuals: &eframe::egui::Visuals) -> [f32; 4] {
+        let c = visuals.panel_fill;
+        [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0, 1.0]
+    }
+}
+
+/// 识别结果窗入口：全文经 stdin 读入（spawn_ocr_show 对端），打开即自动
+/// 复制一份到剪贴板（标题栏「复制全部」可随时重抄）。
+fn run_ocr_show(title: String) -> Result<(), String> {
+    if is_stdin_tty() {
+        return Err("缺少识别文本：经管道传入（覆盖层识别成功后自动走此通道）".into());
+    }
+    use std::io::Read;
+    let mut text = String::new();
+    std::io::stdin()
+        .read_to_string(&mut text)
+        .map_err(|e| format!("读取识别文本失败: {e}"))?;
+    let _ = crate::export::copy_text_to_clipboard(&text);
+    let options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_title(title)
+            .with_inner_size(eframe::egui::vec2(440.0, 520.0)),
+        ..Default::default()
+    };
+    run_eframe(
+        "lscreen-ocr-result",
+        true,
+        options,
+        Box::new(move |_cc| {
+            Ok(Box::new(OcrResultApp {
+                text,
+                copied: true,
+            }) as Box<dyn eframe::App>)
+        }),
+    )
+}
+
 /// 标注预览窗口：把已有图片开进带完整工具栏的标注窗（保存/复制/贴图/
 /// OCR/二维码）。滚动截图拼接结果的内部预览入口——独立进程跑，因为拼接
 /// 进程已消耗过自己的事件循环额度（macOS 限制），见 run_scroll。
@@ -2311,6 +2458,7 @@ fn run_annotate(input: Option<PathBuf>) -> Result<(), String> {
     let config = config::Config::load();
     run_eframe(
         "lscreen-annotate",
+        true,
         options,
         Box::new(move |cc| {
             let shot = lscreen_capture::Screenshot {
@@ -2387,6 +2535,7 @@ fn run_pin(input: Option<PathBuf>, pos: Option<String>, scale: f32) -> Result<()
     };
     run_eframe(
         "lscreen-pin",
+        true,
         options,
         Box::new(move |cc| {
             let font = font::load_system_font();

@@ -1153,8 +1153,13 @@ fn draw_element(
         ElementKind::Marker { center, number } => {
             let c = view.to_pt(*center);
             painter.circle_filled(c, view.len_pt(e.marker_radius()), color);
+            // 数字往下补偿居中：galley 行高含字体大上伸/下伸，CENTER_CENTER
+            // 按整行居中会让数字偏高（mac 自选中文字体尤甚，用户反馈
+            // 2026-11-18）。系数按真机目测校准（0.12em）；导出层走
+            // text_ink_box 逐字形实测，两边视觉一致。
+            let shift = view.len_pt(e.style.font_size) * 0.12;
             painter.text(
-                c,
+                c + egui::vec2(0.0, shift),
                 Align2::CENTER_CENTER,
                 number.to_string(),
                 FontId::proportional(view.len_pt(e.style.font_size)),

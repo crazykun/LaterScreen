@@ -127,15 +127,30 @@ impl Renderer {
                 }
                 let label = number.to_string();
                 let size = e.style.font_size;
-                let (tw, th) = self.measure_text(&label, size);
-                self.draw_text(
-                    canvas,
-                    &label,
-                    center.x - tw / 2.0,
-                    center.y - th / 2.0,
-                    size,
-                    Rgba([255, 255, 255, 255]),
-                );
+                // 数字按墨水盒实测居中（text_ink_box 与 draw_text 同源）：
+                // 行高含 CJK 字体的大上伸/下伸，按整行居中会让数字偏离圆心
+                // （mac 自选中文字体尤甚，用户反馈 2026-11-18）。无字形时
+                // 退回整行居中。
+                if let Some((ix, iy, iw, ih)) = self.text_ink_box(&label, size) {
+                    self.draw_text(
+                        canvas,
+                        &label,
+                        center.x - ix - iw / 2.0,
+                        center.y - iy - ih / 2.0,
+                        size,
+                        Rgba([255, 255, 255, 255]),
+                    );
+                } else {
+                    let (tw, th) = self.measure_text(&label, size);
+                    self.draw_text(
+                        canvas,
+                        &label,
+                        center.x - tw / 2.0,
+                        center.y - th / 2.0,
+                        size,
+                        Rgba([255, 255, 255, 255]),
+                    );
+                }
             }
             ElementKind::Text {
                 pos, content, bg, ..
@@ -281,6 +296,35 @@ impl Renderer {
             max_w = max_w.max(w);
         }
         (max_w, line_h * lines as f32)
+    }
+
+    /// 单行文本的墨水盒（相对笔位/基线，屏幕坐标 y 向下）：逐字形 outline
+    /// 实测，与 draw_text 完全同源。数字标注按墨水盒居中用——文本行高含
+    /// CJK 字体的大上伸/下伸，按行高居中会让数字偏离圆心。无字形返回 None。
+    fn text_ink_box(&self, text: &str, size: f32) -> Option<(f32, f32, f32, f32)> {
+        let font = self.font.as_ref()?;
+        let scaled = font.as_scaled(size);
+        let mut pen_x = 0.0f32;
+        let mut prev: Option<_> = None;
+        let (mut min_x, mut min_y) = (f32::MAX, f32::MAX);
+        let (mut max_x, mut max_y) = (f32::MIN, f32::MIN);
+        for ch in text.chars() {
+            let gid = scaled.glyph_id(ch);
+            if let Some(p) = prev {
+                pen_x += scaled.kern(p, gid);
+            }
+            let glyph = gid.with_scale_and_position(size, ab_glyph::point(pen_x, 0.0));
+            if let Some(outlined) = font.outline_glyph(glyph) {
+                let bb = outlined.px_bounds();
+                min_x = min_x.min(bb.min.x);
+                min_y = min_y.min(bb.min.y);
+                max_x = max_x.max(bb.max.x);
+                max_y = max_y.max(bb.max.y);
+            }
+            pen_x += scaled.h_advance(gid);
+            prev = Some(gid);
+        }
+        (max_x > min_x && max_y > min_y).then_some((min_x, min_y, max_x - min_x, max_y - min_y))
     }
 
     /// 在 (x, y)（文本框左上角）绘制多行文本。
