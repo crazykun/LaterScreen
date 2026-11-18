@@ -198,8 +198,17 @@ make_dmg() { # $1=target $2=bin
     # 与资源）。LSCREEN_SIGN_IDENTITY 给出证书名时用自签名证书（TCC 绑定
     # 证书身份，跨版本升级不再重新授权，CI 由 release.yml 注入）；缺省 "-"
     # 为 ad-hoc（cdhash 锚定，同版本内稳定、每次升级需重授权一次）。
-    codesign --force -s "${LSCREEN_SIGN_IDENTITY:--}" "$app/Contents/MacOS/lscreen"
-    codesign --force -s "${LSCREEN_SIGN_IDENTITY:--}" "$app"
+    local sign_args=()
+    if [[ -n ${LSCREEN_SIGN_IDENTITY:-} ]]; then
+        sign_args=(--force --timestamp=none -s "$LSCREEN_SIGN_IDENTITY")
+        [[ -n ${LSCREEN_SIGN_KEYCHAIN:-} ]] && sign_args+=(--keychain "$LSCREEN_SIGN_KEYCHAIN")
+    else
+        sign_args=(--force -s -)
+    fi
+    # 自签名证书不请求 Apple 时间戳：发布包未公证，CI 中等待 timestamp
+    # 服务没有意义且可能无限阻塞。显式 keychain 避免 codesign 弹 GUI 解锁框。
+    codesign "${sign_args[@]}" "$app/Contents/MacOS/lscreen"
+    codesign "${sign_args[@]}" "$app"
     # 拖拽安装：卷内放 /Applications 快捷方式
     ln -s /Applications "$stage/Applications"
     out="$DIST/lscreen-v$VERSION-$1.dmg"

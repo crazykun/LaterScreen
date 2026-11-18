@@ -84,6 +84,7 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -k lscreen-build build.keychain
           rm -f "$RUNNER_TEMP/lscreen-key.pem"
           echo "LSCREEN_SIGN_IDENTITY=LaterScreen" >> "$GITHUB_ENV"
+          echo "LSCREEN_SIGN_KEYCHAIN=$PWD/build.keychain" >> "$GITHUB_ENV"
       - name: 构建并打包
         shell: bash
         run: bash scripts/package.sh "${{ matrix.target }}"
