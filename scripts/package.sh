@@ -192,6 +192,14 @@ make_dmg() { # $1=target $2=bin
             --out "$iconset/icon_${s}x${s}@2x.png" >/dev/null
     done
     iconutil -c icns "$iconset" -o "$app/Contents/Resources/icon.icns"
+    # 密封签名：macOS 15+ 的屏幕录制 TCC 校验走 bundle 语义，未密封 bundle
+    # （仅二进制 linker-signed）进程身份校验必败——授权后仍反复弹窗、采集
+    # 黑帧（真机 2026-11-18）。先签内部二进制、再签 bundle（密封 Info.plist
+    # 与资源）。LSCREEN_SIGN_IDENTITY 给出证书名时用自签名证书（TCC 绑定
+    # 证书身份，跨版本升级不再重新授权，CI 由 release.yml 注入）；缺省 "-"
+    # 为 ad-hoc（cdhash 锚定，同版本内稳定、每次升级需重授权一次）。
+    codesign --force -s "${LSCREEN_SIGN_IDENTITY:--}" "$app/Contents/MacOS/lscreen"
+    codesign --force -s "${LSCREEN_SIGN_IDENTITY:--}" "$app"
     # 拖拽安装：卷内放 /Applications 快捷方式
     ln -s /Applications "$stage/Applications"
     out="$DIST/lscreen-v$VERSION-$1.dmg"

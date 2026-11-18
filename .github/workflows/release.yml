@@ -60,6 +60,30 @@ jobs:
             -o /usr/local/bin/appimagetool \
             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           sudo chmod +x /usr/local/bin/appimagetool
+      - name: 导入 macOS 签名证书（自签名，跨版本稳定 TCC 身份）
+        if: runner.os == 'macOS'
+        env:
+          LSCREEN_SIGN_KEY_PEM_B64: ${{ secrets.LSCREEN_SIGN_KEY_PEM_B64 }}
+          LSCREEN_SIGN_CERT_PEM_B64: ${{ secrets.LSCREEN_SIGN_CERT_PEM_B64 }}
+        run: |
+          if [ -z "$LSCREEN_SIGN_KEY_PEM_B64" ]; then
+            echo "::warning::未配置签名证书 secret，退回 ad-hoc 签名（升级需重新授权一次）"
+            exit 0
+          fi
+          echo "$LSCREEN_SIGN_KEY_PEM_B64" | base64 -d > "$RUNNER_TEMP/lscreen-key.pem"
+          echo "$LSCREEN_SIGN_CERT_PEM_B64" | base64 -d > "$RUNNER_TEMP/lscreen-cert.pem"
+          security create-keychain -p lscreen-build build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p lscreen-build build.keychain
+          security import "$RUNNER_TEMP/lscreen-key.pem" -k build.keychain -T /usr/bin/codesign
+          security import "$RUNNER_TEMP/lscreen-cert.pem" -k build.keychain -T /usr/bin/codesign
+          # 自签名根必须进信任域，codesign 才认这个身份（-d 管理域免 GUI，
+          # runner 有免密 sudo；本机操作走用户域会弹密码框）
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign \
+            -k build.keychain "$RUNNER_TEMP/lscreen-cert.pem"
+          security set-key-partition-list -S apple-tool:,apple: -k lscreen-build build.keychain
+          rm -f "$RUNNER_TEMP/lscreen-key.pem"
+          echo "LSCREEN_SIGN_IDENTITY=LaterScreen" >> "$GITHUB_ENV"
       - name: 构建并打包
         shell: bash
         run: bash scripts/package.sh "${{ matrix.target }}"
