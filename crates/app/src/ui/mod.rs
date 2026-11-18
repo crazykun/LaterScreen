@@ -231,6 +231,34 @@ pub struct SnipApp {
 impl SnipApp {
     pub fn new(cc: &eframe::CreationContext<'_>, init: OverlayInit) -> Self {
         crate::apply_window_class(cc);
+        // 跨屏覆盖层：记下 X11 window id，前几帧向 WM 重发
+        // _NET_WM_FULLSCREEN_MONITORS（此刻窗口尚未 map，发了也无效）
+        let span_wid = if init.span_monitors {
+            crate::x11_window_id(cc)
+        } else {
+            None
+        };
+        // 先用 Renderer 解析一遍：epaint 内部同样用 ab_glyph，且解析失败是 panic!
+        // 而非 Err。这里只把已确认可解析的字节交给 egui，坏字体退回内置字体。
+        let font = init.font.clone();
+        let mut app = Self::from_init(init);
+        app.span_wid = span_wid;
+        // 重发泵开关与 wid 成对回填：from_init 恒置 0（离屏测量构造无窗口），
+        // 漏掉它 pump_span 首行就会短路，跨屏覆盖层静默退化成单屏 fullscreen
+        app.span_retries = if span_wid.is_some() { 8 } else { 0 };
+        if app.renderer.has_font() {
+            if let Some(bytes) = font {
+                crate::font::setup_egui_fonts(&cc.egui_ctx, bytes);
+            }
+        }
+        app
+    }
+
+    /// 纯数据初始化（不含窗口类设置与字体挂载）：`new` 的数据部分。拆出
+    /// 是为了离屏测试（工具栏单行宽度测量）能不经 eframe CreationContext
+    /// 构造会话——其私有字段无法跨 crate 手工构造。工具栏为全图标布局、
+    /// 无文字控件，测量不依赖系统字体，故字体挂载留在 `new` 即可。
+    fn from_init(init: OverlayInit) -> Self {
         let OverlayInit {
             shot,
             font,
@@ -240,23 +268,9 @@ impl SnipApp {
             windows,
             initial_region,
             preview,
-            span_monitors,
+            span_monitors: _,
         } = init;
-        // 跨屏覆盖层：记下 X11 window id，前几帧向 WM 重发
-        // _NET_WM_FULLSCREEN_MONITORS（此刻窗口尚未 map，发了也无效）
-        let span_wid = if span_monitors {
-            crate::x11_window_id(cc)
-        } else {
-            None
-        };
-        // 先用 Renderer 解析一遍：epaint 内部同样用 ab_glyph，且解析失败是 panic!
-        // 而非 Err。这里只把已确认可解析的字节交给 egui，坏字体退回内置字体。
-        let renderer = Renderer::new(font.clone());
-        if renderer.has_font() {
-            if let Some(bytes) = font {
-                crate::font::setup_egui_fonts(&cc.egui_ctx, bytes);
-            }
-        }
+        let renderer = Renderer::new(font);
         // 默认工具与样式来自配置（M8）
         let tool = config.tool();
         let style = config.style();
@@ -332,9 +346,10 @@ impl SnipApp {
                 scale: 1.0,
             },
             last_click: None,
-            span_wid,
-            // 前若干帧重发，覆盖 WM map+fullscreen 的延迟窗口
-            span_retries: if span_wid.is_some() { 8 } else { 0 },
+            // 跨屏重发泵（span_wid/span_retries）由 `new` 按窗口句柄成对回填，
+            // 这里恒置未启用（离屏测量构造无窗口可 span）
+            span_wid: None,
+            span_retries: 0,
         }
     }
 
@@ -900,8 +915,9 @@ impl SnipApp {
             return;
         };
         self.remember_selection();
-        // 覆盖层模式（preview=false）识别成功改走「贴图 + 独立结果窗」：
-        // 贴图钉回选区原位（原图对照），全文另开独立窗口便于粘贴到别处
+        // 覆盖层模式（preview=false）识别成功改走「贴图 + 面板」单进程交付：
+        // 贴图钉回选区原位（原图对照），识别全文经 --ocr-text 带进贴图右侧
+        // 面板（不再开独立结果窗）
         let deliver = !self.preview;
         let deliver_pos = (
             (self.shot.origin.0 as f32 + self.region.min.x) / self.shot.scale,
@@ -918,7 +934,7 @@ impl SnipApp {
             }
             match engine.recognize(&rgba, w, h) {
                 Ok(out) if !out.is_empty() => {
-                    let items = out
+                    let items: Vec<String> = out
                         .blocks
                         .into_iter()
                         .filter(|block| !block.text.trim().is_empty())
@@ -930,14 +946,25 @@ impl SnipApp {
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_nanos())
                             .unwrap_or(0);
-                        let path = std::env::temp_dir().join(format!("lscreen-ocr-pin-{nanos}.png"));
+                        let path =
+                            std::env::temp_dir().join(format!("lscreen-ocr-pin-{nanos}.png"));
                         let png_path = crate::export::save_png(&rgba, w, h, &path).unwrap_or(path);
+                        // 识别全文落临时文本文件（唯一名同上），经 --ocr-text
+                        // 交贴图进程；写失败不阻断贴图——交付降级为不带文本
+                        // 启动，用户可在贴图内点「识别文字」重新识别
+                        let text_path = {
+                            let p =
+                                std::env::temp_dir().join(format!("lscreen-ocr-text-{nanos}.txt"));
+                            match std::fs::write(&p, items.join("\n")) {
+                                Ok(()) => Some(p),
+                                Err(_) => None,
+                            }
+                        };
                         ScanOutcome::Deliver {
-                            title: "文字识别结果".into(),
                             items,
                             png_path,
+                            text_path,
                             pos: deliver_pos,
-                            size: (w as f32 / deliver_scale, h as f32 / deliver_scale),
                             scale: deliver_scale,
                         }
                     } else {
@@ -975,42 +1002,21 @@ impl SnipApp {
                 self.results_panel = Some((title, items));
             }
             Ok(ScanOutcome::Deliver {
-                title,
                 items,
                 png_path,
+                text_path,
                 pos,
-                size,
                 scale,
             }) => {
                 self.scan_job = None;
                 self.toast = None;
-                // 全文先进剪贴板：粘贴到别处一步到位（结果窗内仍可手动复制）
+                // 全文先进剪贴板：粘贴到别处一步到位（贴图面板内仍可重抄）
                 let text = items.join("\n");
                 let _ = export::copy_text_to_clipboard(&text);
-                // 选区原图钉回原位（贴图进程，多开语义）。贴图是置顶窗，
-                // 结果窗必须摆在它旁边而不是同位——否则被压在下面，看起来
-                // 「关了贴图才出来」（用户反馈 2026-11-18）
-                let _ = crate::spawn_pin_file(&png_path, pos, scale);
-                // 结果窗摆位：贴图右侧 12pt，越出所在显示器则贴右缘内收，
-                // 显示器过窄时退居显示器中央
-                let (mon_x, mon_y) = (
-                    self.shot.origin.0 as f32 / scale,
-                    self.shot.origin.1 as f32 / scale,
-                );
-                let (mon_w, mon_h) = (
-                    self.shot.width as f32 / scale,
-                    self.shot.height as f32 / scale,
-                );
-                const WIN: egui::Vec2 = egui::vec2(440.0, 520.0);
-                let rx = (pos.0 + size.0 + 12.0).max(mon_x + 8.0);
-                let rx = if rx + WIN.x > mon_x + mon_w - 8.0 {
-                    (mon_x + (mon_w - WIN.x) * 0.5).max(mon_x + 8.0)
-                } else {
-                    rx
-                };
-                let ry = pos.1.clamp(mon_y + 8.0, (mon_y + mon_h - WIN.y - 8.0).max(mon_y + 8.0));
-                // 识别文本独立窗口（全文经 stdin 交子进程）
-                let _ = crate::spawn_ocr_show(&title, &text, (rx, ry));
+                // 单进程交付（R4）：选区原图钉回原位 + --ocr-text 带全文，
+                // 识别结果显示在贴图右侧面板（贴图与结果从此同窗，不再有
+                // 「结果窗摆位」问题）
+                let _ = crate::spawn_pin_file(&png_path, pos, scale, text_path.as_deref());
                 // 覆盖层使命完成：关窗（与 Esc 同通道，close_requested 在
                 // update 尾部兜底，viewport 关闭事件双保险）
                 self.close_requested = true;
@@ -1269,17 +1275,16 @@ impl eframe::App for SnipApp {
 enum ScanOutcome {
     /// (面板标题, 文本条目)
     Ok(String, Vec<String>),
-    /// 覆盖层模式 OCR 成功：改走「贴图 + 独立结果窗」交付并关闭覆盖层
-    /// （用户反馈：原地内嵌面板不便于对照原文粘贴，2026-11-18）。
-    /// png_path = 选区裁剪 PNG（贴图进程读）；pos/scale = 贴图摆放
-    /// （选区左上角的屏幕逻辑点与缩放比，原图钉回原位）；size = 贴图
-    /// 逻辑尺寸（结果窗在贴图旁摆放用）
+    /// 覆盖层模式 OCR 成功：改走「贴图 + 面板」单进程交付并关闭覆盖层
+    /// （识别结果直接显示在贴图右侧面板，不再开独立结果窗，2026-11-18）。
+    /// png_path = 选区裁剪 PNG（贴图进程读）；text_path = 识别全文临时
+    /// 文本文件（--ocr-text 交贴图进程，None = 写失败、贴图不带文本）；
+    /// pos/scale = 贴图摆放（选区左上角的屏幕逻辑点与缩放比，原图钉回原位）
     Deliver {
-        title: String,
         items: Vec<String>,
         png_path: std::path::PathBuf,
+        text_path: Option<std::path::PathBuf>,
         pos: (f32, f32),
-        size: (f32, f32),
         scale: f32,
     },
     /// 无结果或失败，toast 提示

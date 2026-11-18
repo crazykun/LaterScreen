@@ -27,10 +27,15 @@ pub enum Kind {
     Tray,
     /// 配置面板窗口（`lscreen config`）。
     Settings,
-    /// 截图/取色/框选覆盖层（`gui` / `pick` / `record --select` /
-    /// `scroll` 框选 / `annotate` 预览）。全屏覆盖层本身就是独占式
-    /// 交互——两个热键连按叠出两层覆盖层，第二层截屏时把第一层
-    /// 也截进图里。短命（覆盖层 Esc/完成即退），静默让路。
+    /// 框选/录制/标注类独占交互（`pick` / `record --select` / `scroll`
+    /// 框选 / `annotate` 预览）。这些流程的产物以「干净的屏幕像素」为
+    /// 前提（区域采样/录屏/拼接），两层并存会把对方的 UI 截进产物，
+    /// 故仍互斥、冲突静默让路。**普通截图覆盖层（`gui`）不在此列**：
+    /// v0.15 起刻意多开（R11）——已开覆盖层时再按 F1/托盘新开一层，
+    /// 新层把旧层已绘制的内容当屏幕像素截入（「给之前的框截图」），
+    /// 各层 Esc 独立关闭。短命（覆盖层 Esc/完成即退）。gui 不持本锁，
+    /// pick/record --select 对它的感知走 per-pid 活跃标记（见
+    /// [`mark_gui_overlay`] / [`any_gui_overlay`]）。
     Overlay,
 }
 
@@ -143,12 +148,73 @@ impl FileLock {
 /// 本进程持有的单例锁句柄（按用途各存一格，进程存活期间常驻）。
 static HELD: Mutex<[Option<FileLock>; 3]> = Mutex::new([None, None, None]);
 
+/// 本进程 gui 覆盖层的活跃标记句柄（见 [`mark_gui_overlay`]），进程存活
+/// 期间常驻，drop/退出即释放 flock。
+static GUI_MARK: Mutex<Option<FileLock>> = Mutex::new(None);
+
 fn slot_index(kind: Kind) -> usize {
     match kind {
         Kind::Tray => 0,
         Kind::Settings => 1,
         Kind::Overlay => 2,
     }
+}
+
+/// gui 覆盖层活跃标记文件（per-pid，多把并存——gui 刻意多开不互斥）。
+fn gui_mark_path(pid: u32) -> PathBuf {
+    crate::config::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(format!("overlay.gui.{pid}.lock"))
+}
+
+/// gui 截图覆盖层（`gui` 子命令的 Snip 全屏覆盖层）建窗前登记活跃标记：
+/// 每个覆盖层进程持**自己的**标记文件（per-pid flock，非互斥、允许多把
+/// 并存）。它不参与 Overlay 单例锁的互斥判定——R11 起 gui 刻意多开；
+/// 存在的意义是让 pick/record --select 这类「要干净屏幕像素」的流程能
+/// 感知到 gui（gui 不持 Overlay 锁，锁冲突检测不到它，见
+/// [`any_gui_overlay`]）。句柄 drop/进程退出（含崩溃）自动释放。
+pub fn mark_gui_overlay() {
+    let path = gui_mark_path(std::process::id());
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(Some(l)) = FileLock::try_lock(&path) {
+        *GUI_MARK.lock().unwrap() = Some(l);
+    }
+}
+
+/// 是否存在**活着的** gui 覆盖层进程。pick / record --select 在截屏前
+/// 探测：gui 的调暗遮罩与选区框正显示在屏幕上，此刻抓屏会把它们一并截
+/// 进取色图/录屏首帧（这些流程的产物以干净像素为前提），探测到即静默
+/// 让路——与它们对持锁族（record/scroll/annotate）的既有互斥同语义。
+///
+/// 扫描全部 `overlay.gui.*.lock`：仍被 flock 持有的 = 活着；能拿到的 =
+/// 持有者已死的 stale 文件，drop 后顺手删除自清理。**扫完全部再返回**：
+/// 提前返回会让排在活跃标记之后的 stale 文件永远轮不到清理。
+pub fn any_gui_overlay() -> bool {
+    let Some(dir) = crate::config::cache_dir() else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return false;
+    };
+    let mut active = false;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with("overlay.gui.") || !name.ends_with(".lock") {
+            continue;
+        }
+        match FileLock::try_lock(&entry.path()) {
+            Ok(Some(l)) => {
+                drop(l); // stale：持有者已死
+                let _ = std::fs::remove_file(entry.path());
+            }
+            Ok(None) => active = true, // 被持有：有活着的 gui 覆盖层
+            Err(_) => {}               // IO 异常（权限等）：宁可放过不锁死
+        }
+    }
+    active
 }
 
 /// 抢单例锁。返回 true = 本进程是唯一实例（或本进程此前已拿过，幂等）；
@@ -259,5 +325,22 @@ mod tests {
         assert!(Kind::Tray.conflict_message().is_some());
         assert!(Kind::Settings.conflict_message().is_some());
         assert_eq!(Kind::Overlay.conflict_message(), None);
+    }
+
+    /// gui 覆盖层活跃标记：本进程 mark 后必须可被 [`any_gui_overlay`]
+    /// 探测到；无持有者的 stale 标记文件被扫描顺手清理（持有者已死 →
+    /// flock 可抢 → 删文件）。与 acquire 的测试同理串行化（共享 cache_dir）。
+    #[test]
+    fn gui_overlay_mark_is_detectable_and_stale_files_are_cleaned() {
+        let _g = serial();
+        mark_gui_overlay();
+        assert!(any_gui_overlay(), "本进程已 mark，探测必须命中");
+        // stale：写一个无人持有的标记文件，扫描应清理它（自身 mark 仍在）
+        let stale = crate::config::cache_dir()
+            .expect("cache_dir 可用")
+            .join("overlay.gui.999999999.lock");
+        std::fs::write(&stale, b"").unwrap();
+        assert!(any_gui_overlay());
+        assert!(!stale.exists(), "无持有者的 gui 标记文件应被扫描清理");
     }
 }

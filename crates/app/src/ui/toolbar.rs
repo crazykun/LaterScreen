@@ -13,19 +13,27 @@ use crate::theme::{ACCENT_FILL, SUCCESS_FILL, SUCCESS_ON_TEXT};
 
 /// 图标按钮边长（逻辑点）
 const BTN: f32 = 24.0;
-/// 宽屏工具栏的目标宽度，用于位置夹取与单/双行布局判定；实际宽度仍受窗口
-/// 可用宽度限制。24px 图标 + 2px 间距下单行实际需求约 610pt（预览模式，无
-/// 尺寸编辑）/ 740pt（覆盖层模式带尺寸编辑），900 是 32px 按钮时代的旧值，
-/// 会让 900pt 级的预览窗差几个点就折行（用户反馈「工具栏换行了」）
-const BAR_W: f32 = 760.0;
+/// 宽屏工具栏的目标宽度，用于位置夹取与单/双行布局判定；实际宽度仍受
+/// 窗口可用宽度限制。两种形态的单行需求不同（离屏实测，最坏布局 =
+/// 文本工具加已配置上传，见 tests::bar_width_consts_cover_measured_single_row）：
+/// 覆盖层模式带尺寸编辑最坏 765pt、预览标注窗（无尺寸编辑）最坏 662pt。
+/// 760 是旧值——v0.13 加入新按钮后 760 < 765，出现「判定单行却放不下」
+/// 的溢出（用户反馈「工具栏换行了」的根因之一）。
+const BAR_W: f32 = 780.0;
+/// 预览标注窗的单行判定阈值：无尺寸编辑一行，控件少一截（实测 662pt）。
+const PREVIEW_BAR_W: f32 = 680.0;
+/// 标注窗（滚动预览 / `annotate` 子命令 / Wayland 标注窗）的宽度下限 =
+/// 预览单行实测需求（662pt）+ show() 的 8pt 可用宽折减 + 余量，取整 720。
+/// 低于它工具栏折成两行（v0.13 反馈），窗宽下限由本常量保底（R10）。
+pub(crate) const MIN_SINGLE_ROW_WINDOW_W: f32 = 720.0;
 
-/// 根据窗口可用宽度决定工具栏布局行数：
-/// 宽屏（≥ [`BAR_W`]）单行放下全部控件；窄屏分两行——第一行编辑控件
-/// 自然折行，第二行固定放交付动作（保存/上传/贴图/识别/生成/退出/复制），
-/// 再窄也只增加行数，**任何动作都不收进二级菜单**（2026-09-29 用户反馈：
-/// 文字菜单与图标工具栏割裂、竖排展开遮挡操作）。
-fn single_row(available_width: f32) -> bool {
-    available_width >= BAR_W
+/// 根据窗口可用宽度决定工具栏布局行数：宽屏单行放下全部控件；窄屏分两
+/// 行——第一行编辑控件自然折行，第二行固定放交付动作（保存/上传/贴图/
+/// 识别/生成/退出/复制），再窄也只增加行数，**任何动作都不收进二级菜
+/// 单**（2026-09-29 用户反馈：文字菜单与图标工具栏割裂、竖排展开遮挡
+/// 操作）。`preview` = 标注窗形态，阈值用 [`PREVIEW_BAR_W`]（无尺寸编辑）。
+fn single_row(available_width: f32, preview: bool) -> bool {
+    available_width >= if preview { PREVIEW_BAR_W } else { BAR_W }
 }
 
 const TOOLS: &[(Tool, &str)] = &[
@@ -66,7 +74,7 @@ pub fn show(app: &mut SnipApp, ctx: &egui::Context) {
     // 窄屏分两行，行数还会随折行增加；提前为工具栏预留高度，避免贴屏底被裁。
     // Record（录屏/滚动截图框选）的调整阶段恒为单行精简条，与宽屏同高
     let record_adjust = app.mode == super::Mode::Record;
-    let bar_height = if record_adjust || single_row(available_width) {
+    let bar_height = if record_adjust || single_row(available_width, app.preview) {
         40.0
     } else if available_width < 320.0 {
         136.0
@@ -169,7 +177,8 @@ pub(crate) const DOCKED_SINGLE_H: f32 = 40.0;
 pub(crate) const DOCKED_H: f32 = 80.0;
 
 pub(crate) fn docked_height(available_width: f32) -> f32 {
-    if single_row((available_width - DOCKED_PAD_X).max(0.0)) {
+    // 停靠条只在滚动标注窗（preview 形态）出现，阈值恒取预览版
+    if single_row((available_width - DOCKED_PAD_X).max(0.0), true) {
         DOCKED_SINGLE_H
     } else {
         DOCKED_H
@@ -471,7 +480,7 @@ pub(crate) fn window_chrome(ui: &mut egui::Ui, id_seed: &str, title: &str) -> bo
 /// 交付动作固定一行（动作全为图标，折行时仍可全部展示）。
 fn bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     ui.spacing_mut().item_spacing.x = 2.0;
-    if single_row(ui.available_width()) {
+    if single_row(ui.available_width(), app.preview) {
         ui.horizontal(|ui| {
             editing_controls(app, ui);
             ui.separator();
@@ -1314,13 +1323,103 @@ fn apply_style_to_selected(app: &mut SnipApp, snapshot: bool) {
 #[cfg(test)]
 mod tests {
     use super::single_row;
+    use super::*;
+    use crate::ui::{Mode, OverlayInit};
+
+    /// 单行判定阈值必须高出实测需求的余量：阈值本身就要容得下单行（再留
+    /// 一点呼吸空间），字体回退/取整的细微差异也兜住。
+    const MEASURE_SLACK: f32 = 4.0;
 
     /// 宽屏单行、窄屏两行折行；任何宽度下都没有动作被收进二级菜单
     /// （布局函数已是「全图标常驻」，这里锁住行数切换阈值不被误改）。
+    /// 两种形态阈值不同：预览窗无尺寸编辑，620pt 在覆盖层是两行、在
+    /// 预览窗仍是单行。
     #[test]
     fn row_layout_switches_at_bar_width() {
-        assert!(single_row(1200.0), "宽屏应单行");
-        assert!(!single_row(620.0), "中窄窗口应折行两行");
-        assert!(!single_row(260.0), "极窄窗口应折行两行");
+        assert!(single_row(1200.0, false), "宽屏应单行");
+        assert!(!single_row(620.0, false), "中窄窗口应折行两行");
+        assert!(!single_row(260.0, false), "极窄窗口应折行两行");
+        assert!(single_row(700.0, true), "预览窗 700pt 应单行");
+        assert!(!single_row(620.0, true), "预览窗 620pt 应折行两行");
+    }
+
+    /// 离屏 egui 布局一次标注工具栏，返回 Frame::popup 外框实测宽度。
+    /// `tool`/`upload` 用于凑最坏布局（文本工具多一枚「文字背景」图标、
+    /// 配置了上传命令多一枚上传按钮）。会话经 [`SnipApp::from_init`]
+    /// 构造（eframe CreationContext 私有字段无法跨 crate 手工造）。
+    fn measure_bar(preview: bool, tool: Tool, upload: bool) -> f32 {
+        let mut config = crate::config::Config::load();
+        if upload {
+            config.upload.command = vec!["upload-cmd".to_string()];
+        }
+        let shot = lscreen_capture::Screenshot {
+            rgba: vec![0u8; 4 * 4],
+            width: 2,
+            height: 2,
+            origin: (0, 0),
+            scale: 1.0,
+            is_primary: true,
+        };
+        let mut app = SnipApp::from_init(OverlayInit {
+            shot,
+            font: None,
+            mode: Mode::Snip,
+            config,
+            record_region: None,
+            windows: Vec::new(),
+            initial_region: None,
+            preview,
+            span_monitors: false,
+        });
+        app.tool = tool;
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                Pos2::ZERO,
+                Vec2::new(4000.0, 120.0), // 足宽：强制走单行分支并给足横向空间
+            )),
+            ..Default::default()
+        };
+        // run_ui 的闭包无返回值，宽度经 Cell 带出
+        let bar_w = std::cell::Cell::new(0.0f32);
+        let sink = &bar_w;
+        let _ = ctx.run_ui(input, |ui| {
+            let w = egui::Frame::popup(ui.style())
+                .show(ui, |ui| bar_contents(&mut app, ui, &ctx))
+                .response
+                .rect
+                .width();
+            sink.set(w);
+        });
+        bar_w.get()
+    }
+
+    /// R10：单行判定阈值与标注窗宽度下限必须容得下**实测**的单行需求——
+    /// 否则出现「判定说单行、控件实际放不下」的溢出/折行（v0.13 用户反馈
+    /// 「工具栏换行了」的根因：阈值 760 < 加新按钮后的实测 765）。最坏
+    /// 布局 = 文本工具（多文字背景图标）+ 已配置上传命令。打印实测值供
+    /// 后续加按钮时同步调常量。
+    #[test]
+    fn bar_width_consts_cover_measured_single_row() {
+        let worst_preview = measure_bar(true, Tool::Text, true);
+        let worst_overlay = measure_bar(false, Tool::Text, true);
+        println!("实测单行外框宽：preview={worst_preview:.1}pt overlay={worst_overlay:.1}pt");
+        // 覆盖层/预览的判定阈值 ≥ 各自实测需求 + 余量：available==阈值
+        // 判单行时必须真放得下
+        assert!(
+            BAR_W >= worst_overlay + MEASURE_SLACK,
+            "覆盖层单行阈值 {BAR_W} 容不下实测 {worst_overlay:.1}pt（余量 {MEASURE_SLACK}）——加按钮后请同步上调"
+        );
+        assert!(
+            PREVIEW_BAR_W >= worst_preview + MEASURE_SLACK,
+            "预览单行阈值 {PREVIEW_BAR_W} 容不下实测 {worst_preview:.1}pt（余量 {MEASURE_SLACK}）——加按钮后请同步上调"
+        );
+        // 标注窗宽度下限：扣掉 show() 的 8pt 可用宽折减后仍容得下预览单行
+        // 需求（annotate/Wayland 标注窗按此保底，宁宽勿换行）
+        assert!(
+            MIN_SINGLE_ROW_WINDOW_W - 8.0 >= worst_preview + MEASURE_SLACK,
+            "标注窗宽度下限 {MIN_SINGLE_ROW_WINDOW_W}（扣 show() 的 8pt）容不下实测 \
+             {worst_preview:.1}pt——布局常量变了请同步上调"
+        );
     }
 }

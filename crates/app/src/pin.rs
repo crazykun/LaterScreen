@@ -4,13 +4,17 @@
 //! 传入，本进程读完即建窗。每个贴图一个轻量进程，关闭即释放全部内存。
 //!
 //! 交互：拖拽移动窗口（手动定位，见 PinApp::drag）、滚轮缩放 25%–1600%
-//! （光标下的图像点锚定不动）、**Shift+滚轮调不透明度**（20%–100%）、
-//! **R/H/V 旋转 90°/水平/垂直翻转**（纯像素置换，复制/保存的就是变换后
-//! 的画面）、高倍放大（实际显示 ≥8x）叠加像素网格、工具条**点击穿透**
-//! （图像区点击穿到下层窗口，工具条条带仍可交互——再点穿透按钮即恢复；
-//! Esc 与托盘菜单「贴图 → 关闭穿透」是备用出口。区域保留仅 X11 的
-//! XShape 输入区支持，Win/mac 整窗穿透后恢复只剩 Esc/托盘）、双击复制、
-//! Esc/Delete 关闭。
+//! （**窗口尺寸不随缩放变化**，以图像中心为锚放大/缩小，超出窗口部分
+//! 裁切）、**Shift+滚轮调不透明度**（20%–100%）、**R/H/V 旋转 90°/水平/
+//! 垂直翻转**（纯像素置换，复制/保存的就是变换后的画面）、高倍放大
+//! （实际显示 ≥8x）叠加像素网格、工具条**点击穿透**（图像区点击穿到
+//! 下层窗口，工具条条带仍可交互——再点穿透按钮即恢复；Esc 与托盘菜单
+//! 「贴图 → 关闭穿透」是备用出口。区域保留仅 X11 的 XShape 输入区支持，
+//! Win/mac 整窗穿透后恢复只剩 Esc/托盘）、双击复制、Esc/Delete 关闭。
+//!
+//! 右侧「识别结果」面板（OCR 合体窗）：工具条「识别文字」按钮或
+//! `--ocr-text`（覆盖层 OCR 交付单进程链路）打开。面板叠加在窗口右侧
+//! 新增的空间上，图像显示区域不受挤压；开合只改窗口宽度。
 
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Stroke, Vec2, ViewportCommand};
@@ -21,7 +25,8 @@ use std::path::PathBuf;
 
 const MIN_ZOOM: f32 = 0.25;
 /// 放开到 16x：像素网格（≥8x 叠加）对查看小图标/像素画才有意义；大图
-/// 受 WM 最大窗口尺寸约束自然到不了这么高（窗口 = 整图缩放，无画布平移）
+/// 受 WM 最大窗口尺寸约束自然到不了这么高（窗口尺寸不随缩放变化，无
+/// 画布平移）
 const MAX_ZOOM: f32 = 16.0;
 /// 不透明度下限：再低就基本看不见，且容易误以为贴图丢了
 const MIN_OPACITY: f32 = 0.2;
@@ -29,16 +34,23 @@ const MIN_OPACITY: f32 = 0.2;
 const PIXEL_GRID_MIN: f32 = 8.0;
 /// 缩放指示条/工具条的显示时长（秒）
 const TOAST_SECS: f64 = 1.6;
-/// 底部工具条条带高度：窗口高 = 图像显示高 + BAR_H，按钮在图像外侧，
-/// 不遮挡贴图内容（与截图覆盖层「工具栏在选区下方」同布局）
+/// 底部工具条条带高度：窗口高 = 图像显示高 + 2*PAD + BAR_H，按钮在
+/// 图像外侧，不遮挡贴图内容（与截图覆盖层「工具栏在选区下方」同布局）
 pub const BAR_H: f32 = 34.0;
+/// 图像区四周内边距（常量，不参与缩放）：让窗口看起来是个「框」而不是
+/// 紧贴图像。窗口尺寸 = 图像显示尺寸 + 2*PAD（+ 底部条带）。
+pub const PAD: f32 = 10.0;
+/// 右侧「识别结果」面板宽度：开面板时窗口宽在基准之上再加 PANEL_W，
+/// 图像显示区域不挤压（R3）。窄到只剩面板时仍可读，280pt ≈ 20 个中文字。
+pub const PANEL_W: f32 = 280.0;
 /// 工具条全量图标常驻所需的窗口逻辑宽下限（含边距）。
 /// 窗口逻辑宽低于它时按此值钳制下限——**穿透开关是工具条上的图标**，
 /// 窗口被图片宽度拖到极窄（如 40px 小图）时若不保底，穿透按钮会被挤出
 /// 条带，穿透开后无处可点恢复（2026-09-29 用户反馈的真实死锁）。
-/// 窗口宽度下限 = 完整工具条宽（无上传 10 组 ≈326pt + 边距），窄图也要
-/// 放得下全部按钮（穿透可恢复的死锁防线），见 window_size_at/show_toolbar。
-pub const MIN_TOOLBAR_W: f32 = 360.0;
+/// 窗口宽度下限 = 完整工具条宽（无上传 11 组 ≈354pt、有上传 ≈380pt 含
+/// 边距——「识别文字」按钮加入后按 384 保底），窄图也要放得下全部
+/// 按钮（穿透可恢复的死锁防线），见 window_size_at/show_toolbar。
+pub const MIN_TOOLBAR_W: f32 = 384.0;
 /// 放大用最近邻（滚轮放大像素格清晰），缩小用线性
 fn texture_options() -> egui::TextureOptions {
     egui::TextureOptions {
@@ -117,17 +129,33 @@ fn flip_rgba(rgba: &mut [u8], w: u32, h: u32, horizontal: bool) {
     }
 }
 
-/// 贴图窗口初始逻辑尺寸：图像 + 底部工具条条带。宽度保底
-/// [`MIN_TOOLBAR_W`]——再窄的图也要放得下完整工具条（穿透可恢复）。
-pub fn window_size(w: u32, h: u32, scale: f32) -> Vec2 {
-    window_size_at(Vec2::new(w as f32 / scale, h as f32 / scale))
+/// 贴图窗口初始逻辑尺寸：图像 + 四周内边距 + 底部工具条条带；`panel_open`
+/// 时宽度再加面板宽（R3/R8）。宽度保底 [`MIN_TOOLBAR_W`]——再窄的图也要
+/// 放得下完整工具条（穿透可恢复）。
+pub fn window_size(w: u32, h: u32, scale: f32, panel_open: bool) -> Vec2 {
+    window_size_at(Vec2::new(w as f32 / scale, h as f32 / scale), panel_open)
 }
 
-/// 图像显示尺寸（逻辑点） → 窗口尺寸：加条带、宽度钳 [`MIN_TOOLBAR_W`]。
-/// 建窗与缩放/旋转变换共用，保证任何尺寸下工具条完整可放。
-fn window_size_at(image: Vec2) -> Vec2 {
-    Vec2::new(image.x.max(MIN_TOOLBAR_W), image.y + BAR_H)
+/// 图像显示尺寸（逻辑点） → 窗口尺寸：加四周内边距 + 底部条带、宽度钳
+/// [`MIN_TOOLBAR_W`]；`panel_open` 再加面板宽，高度不足 [`PANEL_MIN_H`]
+/// 时抬到保底。建窗与旋转/翻转变换、面板开合共用——**窗口尺寸只由图像
+/// 基准尺寸与面板开合决定，与缩放无关**（R9）。
+fn window_size_at(image: Vec2, panel_open: bool) -> Vec2 {
+    let mut x = (image.x + 2.0 * PAD).max(MIN_TOOLBAR_W);
+    let mut y = image.y + 2.0 * PAD + BAR_H;
+    if panel_open {
+        x += PANEL_W;
+        y = y.max(PANEL_MIN_H);
+    }
+    Vec2::new(x, y)
 }
+
+/// 面板展开时的窗口高度下限：极矮贴图（几像素高的横条）按图像高度建窗
+/// 会让面板只剩一条缝——标题行（复制全部/×）被裁出可视区，正文区高度
+/// 趋近 0。保底后图像区高于图像，图像以中心锚居中（框上下留白），面板
+/// 保持可读可操作。高度按「标题行 24 + Frame 边距 20 + 分隔/间隙 12 +
+/// 正文最少 60」取整。
+const PANEL_MIN_H: f32 = 120.0;
 
 /// 窗口逻辑尺寸 → 底部条带的物理像素矩形（x, y, w, h），XShape 输入区
 /// 保留区用（穿透时条带仍可交互）。窗口比条带还矮（极端小图深缩小）时
@@ -165,6 +193,27 @@ enum ToolbarAction {
     Upload,
     /// 在独立标注窗中打开当前贴图（同滚动截图预览链路）
     Edit,
+    /// 识别文字：无结果时=后台识别并打开右侧面板；已有结果时=开/关面板
+    ToggleOcr,
+}
+
+/// 右侧「识别结果」面板的内容状态。`None`（PinApp.ocr）= 尚未识别过。
+#[derive(Clone)]
+enum OcrPanel {
+    /// 识别进行中（后台线程，UI 显示进行中状态）
+    Running,
+    /// 识别成功：全文 + 是否已自动复制过（决定提示行）
+    Done { text: String, copied: bool },
+    /// 失败（含「未识别到文字」）：面板内显示原因，可重试
+    Failed { msg: String },
+}
+
+/// 面板内部控件发出的动作（先收集、闭包外执行，避免借用冲突）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PanelAction {
+    CopyAll,
+    Retry,
+    Close,
 }
 
 /// 用户点击穿透入口后的下一步。区域穿透可直接应用；整窗穿透在本贴图窗口
@@ -215,10 +264,6 @@ pub struct PinApp {
     scale: f32,
     /// 是否置顶（工具条可切换；建窗时 with_always_on_top，初始为 true）
     topmost: bool,
-    /// 缩放手势锚点。一次滚动手势内定格：逐帧用「窗口位置 + 窗口内指针
-    /// 坐标」重算会踩「窗口移动后静止指针局部坐标陈旧」的同一坑
-    /// （见 drag 注释），表现为缩放时窗口位置抖动
-    zoom_anchor: Option<ZoomAnchor>,
     /// 原始图片文件路径（`-i` 传入时）；stdin 传入为 None。保存时据此记
     /// 历史源文件（M11），供「打开目录并选中」定位
     source: Option<PathBuf>,
@@ -254,15 +299,14 @@ pub struct PinApp {
     upload_job: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     /// 上传条目的历史副本文件名（record_file 返回值，成功后回填 url）
     upload_filename: Option<String>,
-}
-
-struct ZoomAnchor {
-    /// 指针屏幕坐标（逻辑点，取锚时定格）
-    screen: Pos2,
-    /// 锚点在图像内的比例位置（0–1，取锚时定格）
-    frac: Vec2,
-    /// 上次滚动时刻：间隔超过阈值视为新手势，重新取锚
-    at: f64,
+    /// 右侧「识别结果」面板是否展开。展开/收起会增减窗口宽度（R3），
+    /// 面板内容见 [`PinApp::ocr`]
+    panel_open: bool,
+    /// 面板内容状态：None = 尚未识别过（点「识别文字」开始）
+    ocr: Option<OcrPanel>,
+    /// 后台 OCR 任务（线程 + channel，与 upload_job 同款唤醒模式）：
+    /// Some = 识别中（按钮禁用、面板显示进行中）
+    ocr_job: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
 }
 
 struct DragState {
@@ -272,16 +316,36 @@ struct DragState {
     sent: Pos2,
 }
 
+/// 贴图启动载荷：run_pin 读图后一次性交给 PinApp（收拢 new 的参数个数）。
+pub struct PinLaunch {
+    pub rgba: Vec<u8>,
+    pub w: u32,
+    pub h: u32,
+    /// 物理像素/逻辑点（覆盖层交付时传屏幕缩放比）
+    pub scale: f32,
+    /// 系统字体字节（贴图是独立进程，必须自己挂中文字体）
+    pub font: Option<Vec<u8>>,
+    /// 原图文件路径（`-i` 传入时）；stdin 传入为 None。保存时记历史源文件
+    pub source: Option<PathBuf>,
+    /// `--ocr-text` 的启动种子（覆盖层 OCR 交付链路，手动 CLI 亦可显式
+    /// 传入）。`Some` 时面板默认展开；`Ok(全文)` 显示并由本进程复制进
+    /// 剪贴板（两条链路「已自动复制」提示都如实），`Err(原因)`（文件不
+    /// 存在/非 UTF-8）面板照常展开但显示错误文案，可点重试改走贴图内
+    /// 识别（R7）。
+    pub ocr_seed: Option<Result<String, String>>,
+}
+
 impl PinApp {
-    pub fn new(
-        cc: &eframe::CreationContext<'_>,
-        rgba: Vec<u8>,
-        w: u32,
-        h: u32,
-        scale: f32,
-        font: Option<Vec<u8>>,
-        source: Option<PathBuf>,
-    ) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, launch: PinLaunch) -> Self {
+        let PinLaunch {
+            rgba,
+            w,
+            h,
+            scale,
+            font,
+            source,
+            ocr_seed,
+        } = launch;
         crate::apply_window_class(cc);
         // 贴图是独立进程，必须自己挂中文字体，否则按钮/菜单/toast 的中文
         // 会因 egui 内置字体无 CJK 而显示为方框。先用 core Renderer 验证
@@ -304,6 +368,16 @@ impl PinApp {
         let upload_cmd = crate::config::Config::load()
             .upload_command()
             .map(|c| c.to_vec());
+        let ocr = ocr_seed.map(|r| match r {
+            // 种子全文统一由本进程复制一次：交付链路父进程已复制过（同
+            // 内容幂等无害），手动 CLI `--ocr-text` 则由此补上真实复制——
+            // 「已自动复制」提示两条链路都如实
+            Ok(text) => {
+                let copied = export::copy_text_to_clipboard(&text).is_ok();
+                OcrPanel::Done { text, copied }
+            }
+            Err(msg) => OcrPanel::Failed { msg },
+        });
         Self {
             rgba,
             w,
@@ -315,7 +389,6 @@ impl PinApp {
             drag: None,
             scale,
             topmost: true,
-            zoom_anchor: None,
             source,
             native,
             opacity: 1.0,
@@ -330,6 +403,9 @@ impl PinApp {
             upload_cmd,
             upload_job: None,
             upload_filename: None,
+            panel_open: ocr.is_some(),
+            ocr,
+            ocr_job: None,
         }
     }
 
@@ -438,6 +514,90 @@ impl PinApp {
 
     fn do_close(&mut self, ctx: &egui::Context) {
         ctx.send_viewport_cmd(ViewportCommand::Close);
+    }
+
+    /// 工具条「识别文字」按钮：无结果/上次失败 → 后台识别并展开面板；
+    /// 已有结果 → 单纯开/合面板（不重复识别）；识别中 → 忽略连点（R2）。
+    fn toggle_ocr(&mut self, ctx: &egui::Context) {
+        match &self.ocr {
+            Some(OcrPanel::Running) => {} // 识别中：防连点
+            Some(OcrPanel::Done { .. }) => self.set_panel_open(ctx, !self.panel_open),
+            // 尚未识别过、或上次失败/文件读取失败：重新识别并展开面板（R7 可重试）
+            Some(OcrPanel::Failed { .. }) | None => self.start_ocr(ctx),
+        }
+    }
+
+    /// 面板开合（R3）：展开/收起只增减窗口宽度（PANEL_W），图像显示区域
+    /// 尺寸不变。InnerSize 下一帧生效，面板与图像布局当帧即按新状态排布。
+    fn set_panel_open(&mut self, ctx: &egui::Context, open: bool) {
+        if self.panel_open == open {
+            return;
+        }
+        self.panel_open = open;
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(window_size_at(self.base, open)));
+    }
+
+    /// 后台启动 OCR（不卡 UI，线程 + channel 同 upload_job/scan_ocr 模式）。
+    /// 引擎构造/探测与推理全在 worker；完成经 request_repaint 唤醒本窗口
+    /// （贴图无输入事件时 eframe 不会再重绘）。识别成功顺手把全文复制进
+    /// 剪贴板——与覆盖层交付链路同一行为，用户预期「OCR = 结果在剪贴板」。
+    fn start_ocr(&mut self, ctx: &egui::Context) {
+        if self.ocr_job.is_some() {
+            return;
+        }
+        let (rgba, w, h) = (self.rgba.clone(), self.w, self.h);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.ocr_job = Some(rx);
+        self.ocr = Some(OcrPanel::Running);
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let out = (|| -> Result<String, String> {
+                let cfg = crate::config::Config::load();
+                let engine = lscreen_ocr::screenshot_engine(Some(&cfg.ocr.engine));
+                if !engine.available() {
+                    return Err(engine.describe());
+                }
+                let out = engine.recognize(&rgba, w, h).map_err(|e| e.to_string())?;
+                let items: Vec<String> = out
+                    .blocks
+                    .into_iter()
+                    .map(|b| b.text)
+                    .filter(|t| !t.trim().is_empty())
+                    .collect();
+                if items.is_empty() {
+                    return Err("图中未识别到文字".into());
+                }
+                Ok(items.join("\n"))
+            })();
+            let _ = tx.send(out);
+            repaint.request_repaint();
+        });
+        self.set_panel_open(ctx, true);
+    }
+
+    /// 每帧轮询后台 OCR 结果；进行中每 120ms 保活一次重绘（转圈动画）。
+    fn poll_ocr(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.ocr_job else { return };
+        ctx.request_repaint_after(std::time::Duration::from_millis(120));
+        match rx.try_recv() {
+            Ok(Ok(text)) => {
+                self.ocr_job = None;
+                // 与交付链路一致：全文自动进剪贴板，「复制全部」可随时重抄
+                let copied = export::copy_text_to_clipboard(&text).is_ok();
+                self.ocr = Some(OcrPanel::Done { text, copied });
+            }
+            Ok(Err(msg)) => {
+                self.ocr_job = None;
+                self.ocr = Some(OcrPanel::Failed { msg });
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.ocr_job = None;
+                self.ocr = Some(OcrPanel::Failed {
+                    msg: "识别线程异常退出".into(),
+                });
+            }
+        }
     }
 
     /// 处理工具条或“更多”菜单发出的穿透切换请求。输入来自当前窗口状态和
@@ -610,7 +770,8 @@ impl PinApp {
     }
 
     /// 变换（旋转/翻转）后的公共收尾：重建纹理、按新宽高重算基准尺寸并
-    /// 请求窗口尺寸更新。复制/保存直接用 self.rgba——所见即所得。
+    /// 请求窗口尺寸更新（旋转交换宽高，窗口仍=新基准尺寸+边距，与缩放
+    /// 无关，见 window_size_at）。复制/保存直接用 self.rgba——所见即所得。
     fn after_transform(&mut self, ctx: &egui::Context, rgba: Vec<u8>, w: u32, h: u32) {
         self.rgba = rgba;
         self.w = w;
@@ -622,10 +783,9 @@ impl PinApp {
                 egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &self.rgba);
             t.set(img, texture_options());
         }
-        // 锚点几何随尺寸失效，新手势重新取锚
-        self.zoom_anchor = None;
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(window_size_at(
-            self.base * self.zoom,
+            self.base,
+            self.panel_open,
         )));
     }
 
@@ -649,16 +809,14 @@ impl PinApp {
         );
     }
 
-    /// 设定缩放（工具条 −/+/百分比与键盘 +/−/0 用）。锚定窗口左上角不动
-    /// （无指针参与，无锚点换算），档位对齐 STEPS 的干净值。
+    /// 设定缩放（工具条 −/+/百分比与键盘 +/−/0 用）。只改图像绘制尺寸
+    /// （中心锚），窗口尺寸不随缩放变化（R9），无几何补偿。
     fn set_zoom(&mut self, ctx: &egui::Context, zoom: f32) {
         let z = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
         if (z - self.zoom).abs() < 1e-3 {
             return;
         }
         self.zoom = z;
-        self.zoom_anchor = None;
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(window_size_at(self.base * z)));
         let pct = (z * 100.0).round() as i32;
         self.toast(ctx, format!("{pct}%"));
     }
@@ -726,10 +884,9 @@ impl PinApp {
         self.toast = Some((msg.into(), ctx.input(|i| i.time) + TOAST_SECS));
     }
 
-    /// 滚轮缩放：光标下的图像点锚定不动（窗口尺寸与位置同步换算）。
-    /// 锚点在手势开始时定格（见 zoom_anchor 注释），手势内所有几何量
-    /// 恒定，无逐帧重算的反馈抖动。
-    fn handle_zoom(&mut self, ctx: &egui::Context, image_rect: Rect) {
+    /// 滚轮缩放：**窗口尺寸与位置都不动**（R9），以图像中心为锚放大/缩小，
+    /// 超出窗口的部分被裁掉（不滚动、不平移）。Shift+滚轮仍是不透明度。
+    fn handle_zoom(&mut self, ctx: &egui::Context) {
         // Shift+滚轮被 egui 默认归为「水平滚动」（horizontal_scroll_modifier
         // = SHIFT），值落在 delta.x——纵轴读取对 Shift 组合恒为 0，必须合成
         let (sy, sx) = ctx.input(|i| (i.smooth_scroll_delta.y, i.smooth_scroll_delta.x));
@@ -753,40 +910,6 @@ impl PinApp {
         let old_zoom = self.zoom;
         self.zoom = new_zoom;
 
-        // 手势间隔 > 0.4s 重新取锚；取锚用 QueryPointer 绝对坐标
-        // （退回 outer_rect + 局部坐标，此刻窗口静止、坐标可信）
-        let now = ctx.input(|i| i.time);
-        if self.zoom_anchor.as_ref().is_none_or(|a| now - a.at > 0.4) {
-            let outer_min = ctx.input(|i| i.viewport().outer_rect).map(|r| r.min);
-            let screen = lscreen_capture::cursor_position()
-                .map(|(x, y)| Pos2::new(x as f32 / self.scale, y as f32 / self.scale))
-                .or_else(|| {
-                    let local = ctx.input(|i| i.pointer.latest_pos())?;
-                    Some(outer_min? + local.to_vec2())
-                });
-            self.zoom_anchor = screen.zip(outer_min).map(|(screen, omin)| {
-                let local = screen - omin;
-                ZoomAnchor {
-                    screen,
-                    frac: Vec2::new(
-                        (local.x / image_rect.width().max(1.0)).clamp(0.0, 1.0),
-                        (local.y / image_rect.height().max(1.0)).clamp(0.0, 1.0),
-                    ),
-                    at: now,
-                }
-            });
-        }
-
-        let new_size = self.base * new_zoom;
-        // 窗口 = 图像 + 底部条带；宽度必须继续满足完整工具栏。
-        let window_size = window_size_at(new_size);
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(window_size));
-        if let Some(a) = &mut self.zoom_anchor {
-            a.at = now;
-            let new_min = a.screen - Vec2::new(new_size.x * a.frac.x, new_size.y * a.frac.y);
-            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(new_min));
-        }
-
         let pct = (new_zoom * 100.0).round() as i32;
         let dir = if new_zoom > old_zoom { "+" } else { "" };
         self.toast(ctx, format!("{dir}{pct}%"));
@@ -801,14 +924,14 @@ impl PinApp {
     /// 悬停即出文字提示（icon_button 自带 on_hover_text）。
     fn show_toolbar(&mut self, ctx: &egui::Context, bar: Rect) {
         use crate::ui::toolbar::{
-            action_button, draw_check, draw_close, draw_save, draw_upload, icon_button,
+            action_button, draw_check, draw_close, draw_ocr, draw_save, draw_upload, icon_button,
         };
-        // 图标总宽（与 MIN_TOOLBAR_W 的估值同源）：无上传 10 组 ≈326pt、
+        // 图标总宽（与 MIN_TOOLBAR_W 的估值同源）：无上传 11 组 ≈354pt、
         // 有上传再加 26pt。用于整排水平居中。
         let shown = if self.upload_cmd.is_some() {
-            352.0
+            380.0
         } else {
-            326.0
+            354.0
         };
         let pos = Pos2::new(bar.center().x - shown / 2.0, bar.center().y - 12.0);
         let mut action = None;
@@ -818,6 +941,7 @@ impl PinApp {
             self.zoom,
             self.upload_job.is_some(),
         );
+        let (ocr_busy, ocr_open) = (self.ocr_job.is_some(), self.panel_open);
         egui::Area::new(egui::Id::new("pin-bar"))
             .order(egui::Order::Foreground)
             .fixed_pos(pos)
@@ -872,6 +996,25 @@ impl PinApp {
                     {
                         action = Some(ToolbarAction::Edit);
                     }
+                    // 识别文字：无结果时点击=后台识别并展开右侧面板；已有
+                    // 结果=开/合面板；识别中=禁用防连点（R2）。面板展开时
+                    // 按钮高亮（选中态），语义同「面板开关」
+                    let ocr_tip = if ocr_busy {
+                        "识别中…"
+                    } else if self
+                        .ocr
+                        .as_ref()
+                        .is_some_and(|s| matches!(s, OcrPanel::Done { .. }))
+                    {
+                        "识别文字：开/合右侧结果面板（点重试按钮可重新识别）"
+                    } else {
+                        "识别文字：在贴图内识别文字，结果显示在右侧面板"
+                    };
+                    if ocr_busy {
+                        action_button(ui, false, ocr_tip, draw_ocr);
+                    } else if icon_button(ui, ocr_open, ocr_tip, draw_ocr).clicked() {
+                        action = Some(ToolbarAction::ToggleOcr);
+                    }
                     if action_button(ui, true, "保存为 PNG (Ctrl+S)", draw_save) {
                         action = Some(ToolbarAction::Save);
                     }
@@ -913,7 +1056,156 @@ impl PinApp {
             Some(ToolbarAction::ZoomIn) => self.step_zoom(ctx, true),
             Some(ToolbarAction::Upload) => self.do_upload(ctx),
             Some(ToolbarAction::Edit) => self.do_edit(ctx),
+            Some(ToolbarAction::ToggleOcr) => self.toggle_ocr(ctx),
             _ => {}
+        }
+    }
+
+    /// 右侧「识别结果」面板（R1/R6/R7）：标题行（识别结果 + 复制全部 +
+    /// 关闭×）、分隔线、可滚动可选中只读正文。面板底色与左侧分隔线由
+    /// 调用方（App::ui 的根 painter，egui 0.35 无 Context::painter）先画，
+    /// 这里只叠内容。`panel_rect` 由调用方按「窗口右侧 − 底部条带」切出，
+    /// 宽度即 [`PANEL_W`]（WM 未服从放大时为 0，见 ui() 的 side_w 反推）。
+    fn show_ocr_panel(&mut self, ctx: &egui::Context, panel_rect: Rect) {
+        // panel_rect 宽度由 ui() 按窗口实际几何反推（side_w）：WM 未服从
+        // 放大时为 0，此时面板内容一并跳过（等下一帧窗口真正变宽再画）
+        if panel_rect.width() <= 0.5 {
+            return;
+        }
+        let busy = self.ocr_job.is_some();
+        // 状态快照：闭包内不借用 self，动作收集到闭包外统一执行
+        let state = self.ocr.clone();
+        let mut act: Option<PanelAction> = None;
+        egui::Area::new(egui::Id::new("pin-ocr-panel"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(panel_rect.min)
+            .show(ctx, |ui| {
+                // 面板内容取色全部走令牌（与底部条带同一 visuals），禁止硬编码 RGB
+                let muted = ui.visuals().weak_text_color();
+                let error_fg = ui.visuals().error_fg_color;
+                ui.set_max_width(panel_rect.width());
+                ui.set_max_height(panel_rect.height());
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        // ---- 标题行：标题 +（已自动复制）+ 右侧「复制全部」「×」
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new("识别结果").strong().size(14.0),
+                                )
+                                .wrap_mode(egui::TextWrapMode::Extend),
+                            );
+                            if let Some(OcrPanel::Done { copied: true, .. }) = &state {
+                                ui.weak(egui::RichText::new("已自动复制").small().color(muted));
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .button("×")
+                                        .on_hover_text("收起面板（工具条「识别文字」可再展开）")
+                                        .clicked()
+                                    {
+                                        act = Some(PanelAction::Close);
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            matches!(state, Some(OcrPanel::Done { .. })),
+                                            egui::Button::new("复制全部"),
+                                        )
+                                        .on_hover_text("复制全文到剪贴板")
+                                        .clicked()
+                                    {
+                                        act = Some(PanelAction::CopyAll);
+                                    }
+                                },
+                            );
+                        });
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+
+                        // ---- 正文：按状态渲染
+                        match state {
+                            Some(OcrPanel::Done { text, .. }) => {
+                                egui::ScrollArea::vertical().id_salt("pin-ocr-scroll").show(
+                                    ui,
+                                    |ui| {
+                                        // 只读 = 每帧用原文重建临时副本（egui 0.35
+                                        // 已无 TextEdit::read_only，interactive(false)
+                                        // 会连选中一起禁掉）：编辑只落
+                                        // 本地副本、不回写识别结果，而选中/复制
+                                        // 完整保留（Ctrl+C 走 egui 文本复制，主
+                                        // 进程按键门控不抢：见 ui() 注释）
+                                        let mut shown = text.clone();
+                                        let fv = ui.visuals().clone();
+                                        ui.add(
+                                            egui::TextEdit::multiline(&mut shown)
+                                                .desired_width(ui.available_width())
+                                                .margin(egui::Margin::same(8))
+                                                // egui 0.35 的 frame 收 Frame 实参：
+                                                // 文本区惯例底色（extreme_bg）+
+                                                // 非交互描边，与面板整体同源
+                                                .frame(
+                                                    egui::Frame::new()
+                                                        .fill(fv.extreme_bg_color)
+                                                        .stroke(fv.widgets.noninteractive.bg_stroke)
+                                                        .corner_radius(egui::CornerRadius::same(4)),
+                                                ),
+                                        );
+                                    },
+                                );
+                            }
+                            Some(OcrPanel::Running) | None if busy => {
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(panel_rect.height() * 0.22);
+                                    ui.spinner();
+                                    ui.add_space(10.0);
+                                    ui.label(egui::RichText::new("识别中…").color(muted));
+                                });
+                            }
+                            Some(OcrPanel::Failed { msg }) => {
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(12.0);
+                                    ui.label(
+                                        egui::RichText::new("识别失败").strong().color(error_fg),
+                                    );
+                                    ui.add_space(4.0);
+                                    ui.label(egui::RichText::new(msg).color(muted));
+                                    ui.add_space(10.0);
+                                    if ui.button("重试").clicked() {
+                                        act = Some(PanelAction::Retry);
+                                    }
+                                });
+                            }
+                            Some(OcrPanel::Running) => {
+                                // 无任务且状态残留 Running（理论不可达）：按空态处理
+                                ui.label(egui::RichText::new("尚未识别").color(muted));
+                            }
+                            None => {
+                                ui.label(egui::RichText::new("尚未识别").color(muted));
+                            }
+                        }
+                    });
+            });
+        match act {
+            Some(PanelAction::Close) => self.set_panel_open(ctx, false),
+            Some(PanelAction::CopyAll) => {
+                if let Some(OcrPanel::Done { text, .. }) = &self.ocr {
+                    match export::copy_text_to_clipboard(text) {
+                        Ok(()) => {
+                            if let Some(OcrPanel::Done { copied, .. }) = &mut self.ocr {
+                                *copied = true;
+                            }
+                            self.toast(ctx, "已复制全文");
+                        }
+                        Err(e) => self.toast(ctx, format!("复制失败: {e}")),
+                    }
+                }
+            }
+            Some(PanelAction::Retry) => self.start_ocr(ctx),
+            None => {}
         }
     }
 
@@ -949,28 +1241,82 @@ impl eframe::App for PinApp {
         // 建窗期置顶补发（with_always_on_top 在部分 WM 不落地，见方法注释）
         self.ping_window_level(&ctx);
         let full = ui.max_rect();
-        // 窗口纵向切成两段：上方图像区 + 下方工具条条带
+        // 窗口切成三块：右侧识别面板（展开时）+ 上方图像区（含四周内边距
+        // 「框」）+ 下方工具条条带。图像显示区域 = 图像区减去四周 PAD，
+        // 不随面板开合与缩放变化（R3/R9）。面板宽度按窗口**实际几何**反推：
+        // 请求的 InnerSize 由 WM 落地可能延迟甚至被拒（贴图常钉在屏幕边
+        // 缘），按状态直接切分会让图像右缘被持续裁掉——实际没长出足够宽
+        // 度就按无面板布局（图像完整），WM 补上尺寸后下一帧自动展开
+        let base_w = window_size_at(self.base, false).x;
+        let side_w = if self.panel_open {
+            let grown = full.width() - base_w;
+            if grown >= PANEL_W - 1.0 {
+                PANEL_W
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
         let split_y = (full.max.y - BAR_H).max(full.min.y);
-        let image_rect = Rect::from_min_max(full.min, Pos2::new(full.max.x, split_y));
+        // 收起方向的过渡帧对齐：panel_open 已翻 false 而 WM 尚未落地
+        // InnerSize（窗口仍含面板宽度）时，图像区恒按基准宽**左锚**钳制
+        // ——否则中心锚会让图像整体右移 PANEL_W/2 再弹回一帧。展开方向
+        // 由上方 side_w 的实际几何反推保证（未落地就按无面板布局）
+        let img_w = if self.panel_open {
+            full.max.x - side_w
+        } else {
+            full.width().min(base_w)
+        };
+        let img_area = Rect::from_min_max(full.min, Pos2::new(full.min.x + img_w, split_y));
+        let image_rect = img_area.shrink(PAD);
+        let panel_rect = Rect::from_min_max(
+            Pos2::new(img_area.max.x, full.min.y),
+            Pos2::new(full.max.x, split_y),
+        );
         let bar_rect = Rect::from_min_max(Pos2::new(full.min.x, split_y), full.max);
 
-        // 滚轮缩放（先于绘制：InnerSize 下一帧生效）
-        self.handle_zoom(&ctx, image_rect);
+        // 滚轮缩放（先于绘制；窗口尺寸不随缩放变化，R9）。指针悬停右侧
+        // 面板时不应用：面板正文是 ScrollArea，对本帧滚动的消费发生在布局
+        // 阶段（晚于 handle_zoom 的读取且 handle_zoom 不消费输入），不门控
+        // 会「正文滚动 + 图像缩放 + toast」同帧双触发
+        let over_panel = self.panel_open
+            && ctx
+                .input(|i| i.pointer.latest_pos())
+                .is_some_and(|p| panel_rect.contains(p));
+        if !over_panel {
+            self.handle_zoom(&ctx);
+        }
 
         // 键盘
         use egui::{Key, Modifiers};
+        // 右侧面板的只读正文可获焦点（点击选中）：焦点在文本里时 Delete/
+        // 空格/Ctrl+C 必须留给文本（选中复制），不再当贴图快捷键——否则
+        // 在面板里选中文字按空格会把整个贴图关掉。Esc 刻意不门控：它是
+        // 贴图窗口的全局关闭键（Snipaste 惯例、单键直达），面板文本没有
+        // 需要 Esc 承担的「取消」操作（失焦/重选都无损内容），且用户按
+        // Esc 关贴图时若焦点恰好还在正文里，第一次按只失焦的体验更差
+        let text_focus = ctx.memory(|m| m.focused().is_some());
         let (esc, del, copy_k, save_k, rot_k, flip_h, flip_v) = ctx.input_mut(|i| {
             (
                 i.consume_key(Modifiers::NONE, Key::Escape),
-                i.consume_key(Modifiers::NONE, Key::Delete),
+                if text_focus {
+                    false
+                } else {
+                    i.consume_key(Modifiers::NONE, Key::Delete)
+                },
                 // Ctrl+C 的原始按键被 egui-winit 吞掉转成 Event::Copy（见 ui/mod.rs
                 // handle_keys 同款注释），consume_key 永远匹配不上，改听事件
-                i.consume_key(Modifiers::COMMAND, Key::C)
-                    || i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
-                i.consume_key(Modifiers::COMMAND, Key::S),
-                i.consume_key(Modifiers::NONE, Key::R),
-                i.consume_key(Modifiers::NONE, Key::H),
-                i.consume_key(Modifiers::NONE, Key::V),
+                !text_focus
+                    && (i.consume_key(Modifiers::COMMAND, Key::C)
+                        || i.events.iter().any(|e| matches!(e, egui::Event::Copy))),
+                !text_focus && i.consume_key(Modifiers::COMMAND, Key::S),
+                // R/H/V 同按 text_focus 门控：consume_key 全局删除匹配事件、
+                // 与控件焦点无关（对照上方 Delete 的门控），不挡的话在面板
+                // 正文里打 r/h/v（含大写）会顺带旋转/翻转贴图本体
+                !text_focus && i.consume_key(Modifiers::NONE, Key::R),
+                !text_focus && i.consume_key(Modifiers::NONE, Key::H),
+                !text_focus && i.consume_key(Modifiers::NONE, Key::V),
             )
         });
         // 缩放键走裸事件扫描而非 consume_key：主键盘 '+' 是 Shift+= 组合
@@ -987,12 +1333,14 @@ impl eframe::App for PinApp {
             })
         };
         let (zin, zout, zreset, space_copy) = (
-            key_hit(Key::Plus) || key_hit(Key::Equals),
-            key_hit(Key::Minus),
-            key_hit(Key::Num0),
+            // 缩放键与空格同样按 text_focus 门控：面板正文是可编辑态的
+            // TextEdit，在正文里键入 -/+/0 不能顺带步进贴图缩放
+            !text_focus && (key_hit(Key::Plus) || key_hit(Key::Equals)),
+            !text_focus && key_hit(Key::Minus),
+            !text_focus && key_hit(Key::Num0),
             // 空格 = 复制（与双击/Ctrl+C 同语义，不关窗）：贴图最常用的
             // 单手动作，走裸事件扫描与缩放键同款（不区分修饰符）
-            key_hit(Key::Space),
+            !text_focus && key_hit(Key::Space),
         );
         // 确认窗显示时 Esc/Delete 只取消本次开启；穿透中则先退出穿透
         // （窗口若仍持键盘焦点；区域穿透下点条带即拿回焦点，整窗穿透
@@ -1018,15 +1366,25 @@ impl eframe::App for PinApp {
         }
         // 上传结果轮询（线程完成时 request_repaint 唤醒本循环）
         self.poll_upload(&ctx);
+        // 后台 OCR 结果轮询（同上，识别中顺带保活重绘出转圈动画）
+        self.poll_ocr(&ctx);
 
-        // 图像区响应窗口拖动/双击复制；底部条带不属于本 Response，按钮
-        // 点击不会卷入拖动态（此前整窗 click_and_drag 在 Wayland 拖动一次
-        // 后，stale drag 会把工具栏点击当成继续移动，按钮全部点不了）
-        let response = ui.allocate_rect(image_rect, egui::Sense::click_and_drag());
+        // 图像区（含内边距「框」）响应窗口拖动/双击复制；右侧面板与底部
+        // 条带不属于本 Response——面板区不触发拖动（R3），按钮点击也不会
+        // 卷入拖动态（此前整窗 click_and_drag 在 Wayland 拖动一次后，
+        // stale drag 会把工具栏点击当成继续移动，按钮全部点不了）
+        let response = ui.allocate_rect(img_area, egui::Sense::click_and_drag());
+        // 内边距「框」底色：与条带同色，图像浮在框上（R8）
+        ui.painter()
+            .rect_filled(img_area, 0.0, ui.visuals().panel_fill);
+        // 图像按 zoom 绘制，以图像区中心为锚（R9）；窗口尺寸不变，超出
+        // 部分裁掉——裁剪矩形钉在 image_rect，放大出界的边角不会越出「框」
+        let shown = Rect::from_center_size(image_rect.center(), self.base * self.zoom);
+        let paint = ui.painter().with_clip_rect(image_rect);
         if let Some(tex) = &self.texture {
-            ui.painter().image(
+            paint.image(
                 tex.id(),
-                image_rect,
+                shown,
                 egui::Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
             );
@@ -1034,36 +1392,35 @@ impl eframe::App for PinApp {
         // 像素网格：实际显示比例 ≥8x（每个图像像素 ≥8 逻辑像素）时叠加。
         // 交互层装饰，不进复制/保存的位图（那些走 self.rgba）。只画可见
         // 部分（clip 交集），大图深放大时限流线条数量
-        let px_per_img = image_rect.width() / self.w.max(1) as f32;
+        let px_per_img = shown.width() / self.w.max(1) as f32;
         if px_per_img >= PIXEL_GRID_MIN && self.w > 0 && self.h > 0 {
-            let clip = ui.clip_rect().intersect(image_rect);
+            let clip = image_rect.intersect(shown);
             let step = px_per_img;
             let grid = Stroke::new(1.0, Color32::from_rgba_unmultiplied(128, 128, 128, 110));
-            let mut i = (((clip.min.x - image_rect.min.x) / step).ceil() as usize).max(1);
+            let mut i = (((clip.min.x - shown.min.x) / step).ceil() as usize).max(1);
             while i < self.w as usize {
-                let x = image_rect.min.x + i as f32 * step;
+                let x = shown.min.x + i as f32 * step;
                 if x > clip.max.x {
                     break;
                 }
-                ui.painter()
-                    .line_segment([Pos2::new(x, clip.min.y), Pos2::new(x, clip.max.y)], grid);
+                paint.line_segment([Pos2::new(x, clip.min.y), Pos2::new(x, clip.max.y)], grid);
                 i += 1;
             }
-            let mut j = (((clip.min.y - image_rect.min.y) / step).ceil() as usize).max(1);
+            let mut j = (((clip.min.y - shown.min.y) / step).ceil() as usize).max(1);
             while j < self.h as usize {
-                let y = image_rect.min.y + j as f32 * step;
+                let y = shown.min.y + j as f32 * step;
                 if y > clip.max.y {
                     break;
                 }
-                ui.painter()
-                    .line_segment([Pos2::new(clip.min.x, y), Pos2::new(clip.max.x, y)], grid);
+                paint.line_segment([Pos2::new(clip.min.x, y), Pos2::new(clip.max.x, y)], grid);
                 j += 1;
             }
         }
-        // 图像区 1px 中性细线：与相近背景略作区隔。底部条带已承担
-        // 贴图辨识职责，醒目蓝框叠在图像内容上反而突兀，弃用
-        ui.painter().rect_stroke(
-            image_rect,
+        // 图像 1px 中性细线（围实际显示区域而非整个图像区）：与相近背景
+        // 略作区隔。底部条带已承担贴图辨识职责，醒目蓝框叠在图像内容上
+        // 反而突兀，弃用
+        paint.rect_stroke(
+            shown,
             0.0,
             Stroke::new(1.0, Color32::from_black_alpha(90)),
             egui::StrokeKind::Inside,
@@ -1075,6 +1432,19 @@ impl eframe::App for PinApp {
             [bar_rect.left_top(), bar_rect.right_top()],
             Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
         );
+        // 右侧识别面板底 + 左分隔线（内容由 show_ocr_panel 的 Area 叠放；
+        // egui 0.35 无 Context::painter，底色统一在根 ui 画）。按 panel_rect
+        // 实宽判定：面板展开稳态与「收起方向过渡帧」（窗口尚未缩回基准宽，
+        // 见上方 img_w 钳制）都铺底——后者铺的是空面板底色，避免窗口右侧
+        // 露出一帧未绘背景；两个稳态及展开方向过渡帧该区宽度为 0 自然跳过
+        if panel_rect.width() > 0.5 {
+            ui.painter()
+                .rect_filled(panel_rect, 0.0, ui.visuals().panel_fill);
+            ui.painter().line_segment(
+                [panel_rect.left_top(), panel_rect.left_bottom()],
+                Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+            );
+        }
 
         if lscreen_capture::is_wayland() {
             // Wayland：协议禁止客户端自设窗口坐标（OuterPosition 是 no-op，
@@ -1135,6 +1505,7 @@ impl eframe::App for PinApp {
         }
 
         self.show_toolbar(&ctx, bar_rect);
+        self.show_ocr_panel(&ctx, panel_rect);
         self.show_through_confirmation(&ctx);
         self.show_toast(&ctx);
 
@@ -1402,15 +1773,34 @@ mod tests {
 
     #[test]
     fn window_width_never_shrinks_below_toolbar_floor() {
-        // 大图：原样（图像宽就是窗口宽）
-        assert_eq!(window_size(800, 600, 1.0), Vec2::new(800.0, 634.0));
+        // 大图：原样 + 四周内边距（R8：窗口 = 图像 + 2*PAD + 条带）
+        assert_eq!(window_size(800, 600, 1.0, false), Vec2::new(820.0, 654.0));
         // 40px 小图：窗口宽钳到工具条保底宽——穿透按钮必须始终在条带上
-        assert_eq!(window_size(40, 40, 1.0), Vec2::new(MIN_TOOLBAR_W, 74.0));
+        assert_eq!(
+            window_size(40, 40, 1.0, false),
+            Vec2::new(MIN_TOOLBAR_W, 40.0 + 2.0 * PAD + BAR_H)
+        );
         // 深缩放同理：0.25x 的 800px 图也保底
         assert_eq!(
-            window_size_at(Vec2::new(200.0, 150.0)),
-            Vec2::new(MIN_TOOLBAR_W.max(200.0), 184.0)
+            window_size_at(Vec2::new(200.0, 150.0), false),
+            Vec2::new(MIN_TOOLBAR_W.max(220.0), 150.0 + 2.0 * PAD + BAR_H)
         );
+    }
+
+    #[test]
+    fn ocr_panel_widens_window_without_changing_height() {
+        // R3：面板开合只在基准之上加/减 PANEL_W（叠加在 R8 基准之上），
+        // 正常高度图像的面板开合高度不变
+        let closed = window_size_at(Vec2::new(300.0, 200.0), false);
+        let open = window_size_at(Vec2::new(300.0, 200.0), true);
+        assert_eq!(open.x, closed.x + PANEL_W);
+        assert_eq!(open.y, closed.y);
+        // 极矮贴图（几像素高的横条）开面板：高度抬到 PANEL_MIN_H 保底，
+        // 否则面板标题行（复制全部/×）被裁出可视区
+        let tiny_closed = window_size_at(Vec2::new(300.0, 4.0), false);
+        let tiny_open = window_size_at(Vec2::new(300.0, 4.0), true);
+        assert_eq!(tiny_closed.y, 4.0 + 2.0 * PAD + BAR_H);
+        assert_eq!(tiny_open.y, PANEL_MIN_H);
     }
 
     #[test]

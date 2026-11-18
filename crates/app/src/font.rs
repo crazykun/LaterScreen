@@ -2,7 +2,9 @@
 //! 不在二进制里捆绑字体（CJK 字体动辄 10MB+），运行时从系统读取。
 
 use eframe::egui;
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::path::Path;
+use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use std::process::Command;
 
@@ -109,7 +111,9 @@ fn candidates() -> Vec<PathBuf> {
 /// 过细（Thin/Light/DemiLight，浅色主题下笔画稀释显「发白」，用户多轮反馈）
 /// 与过重（Black/Bold/Heavy，标注正文观感差）都降档，Medium 加一档最稳；
 /// 衬线（Serif）降档；同分取先出现者；无已知家族时任取第一个（列表本身
-/// 已保证支持中文）。
+/// 已保证支持中文）。仅 Linux 候选链使用（fc-list 输出），非 Linux 平台
+/// 走固定路径列表不经过本函数。
+#[cfg(any(target_os = "linux", test))]
 fn pick_cjk_font(files: &[String]) -> Option<String> {
     const KNOWN: [&str; 7] = [
         "cjk",

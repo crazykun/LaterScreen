@@ -344,16 +344,11 @@ enum Cmd {
         /// 屏幕缩放比（物理像素/逻辑点），用于换算窗口初始尺寸；缺省 1.0
         #[arg(long, default_value_t = 1.0, allow_hyphen_values = true)]
         scale: f32,
-    },
-    /// 识别结果独立窗口：文本经 stdin 传入（覆盖层 OCR/扫码成功后自动弹出，
-    /// 与贴图配套——原图钉回原位、文本单独成窗方便复制）
-    OcrShow {
-        /// 窗口标题
-        #[arg(long, default_value = "识别结果")]
-        title: String,
-        /// 窗口左上角屏幕坐标（逻辑点），格式 X,Y；缺省由系统摆放
-        #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
-        pos: Option<String>,
+        /// OCR 识别全文的 UTF-8 文本文件：传入时右侧「识别结果」面板默认
+        /// 展开并显示该文本（覆盖层 OCR 交付单进程链路；文件缺失/非 UTF-8
+        /// 不崩，面板展开但显示错误文案）
+        #[arg(long, value_name = "PATH")]
+        ocr_text: Option<PathBuf>,
     },
     /// 滚动长截图：框选区域后自动滚动内容并拼接为长图（v0.8.0 起三平台；
     /// Wayland 除外）
@@ -666,14 +661,12 @@ fn main() {
                 },
             }
         }
-        Some(Cmd::Pin { input, pos, scale }) => run_pin(input, pos, scale),
-        Some(Cmd::OcrShow { title, pos }) => match pos {
-            Some(s) => match parse_pos(&s) {
-                Ok(p) => run_ocr_show(title, Some(p)),
-                Err(e) => Err(e),
-            },
-            None => run_ocr_show(title, None),
-        },
+        Some(Cmd::Pin {
+            input,
+            pos,
+            scale,
+            ocr_text,
+        }) => run_pin(input, pos, scale, ocr_text),
         Some(Cmd::Config) => run_settings(),
         Some(Cmd::History) => run_history(),
         Some(Cmd::Upload { file }) => run_upload(file),
@@ -832,9 +825,15 @@ fn reexec_after_pick(sub: &str, region: &str, extra: &[String]) -> Result<(), St
 /// 交互框选录制区域：复用截图覆盖层（Mode::Record），框完即关窗；
 /// 返回绝对物理坐标的 "X,Y,W,H"；用户 Esc 取消返回 None。
 fn pick_region_interactive() -> Result<Option<String>, String> {
-    // 覆盖层单例：已有截图/框选交互在跑时静默让路（返回「取消」语义），
-    // 避免两层全屏覆盖层叠罗汉、第二层把第一层截进图里。
+    // 框选/录制族（pick/record --select/scroll）维持互斥（R11 未放开）：
+    // 产物要干净屏幕像素，两层并存会把对方的 UI 截进图。
     if !instance::acquire(instance::Kind::Overlay) {
+        return Ok(None);
+    }
+    // gui 覆盖层不持 Overlay 锁（R11 多开），单例锁感知不到它——另查
+    // per-pid 活跃标记：它的调暗遮罩/选区框正显示在屏幕上，此刻抓屏会
+    // 把它们截进框选背景，污染产物。静默让路（与上行的取消语义一致）
+    if instance::any_gui_overlay() {
         return Ok(None);
     }
     // Wayland 无自绘覆盖层，portal 也只能回选区图像拿不到绝对坐标，
@@ -937,7 +936,10 @@ fn ensure_screen_capture_authorized() -> Result<(), String> {
         return Ok(());
     }
     lscreen_capture::open_screen_capture_settings();
-    Err("尚未授权「屏幕录制」：已打开 系统设置 ▸ 隐私与安全性 ▸ 屏幕录制，允许后重新触发即可".into())
+    Err(
+        "尚未授权「屏幕录制」：已打开 系统设置 ▸ 隐私与安全性 ▸ 屏幕录制，允许后重新触发即可"
+            .into(),
+    )
 }
 
 fn capture_overlay() -> Result<OverlayShot, String> {
@@ -1012,11 +1014,12 @@ fn wait_delay(delay: Option<f64>) -> Result<bool, String> {
 }
 
 fn run_gui_delayed(mode: ui::Mode, delay: Option<f64>) -> Result<(), String> {
-    // 覆盖层单例要连倒计时窗一起算进去：延时截图期间再按热键，第二层
-    // 覆盖层会把倒计时窗截进图里。冲突时静默让路（第一层交互仍在进行）。
-    if !instance::acquire(instance::Kind::Overlay) {
-        return Ok(());
-    }
+    // 普通截图覆盖层（gui）刻意不抢覆盖层单例锁（v0.15 多开，R11）：已开
+    // 覆盖层时再按 F1/托盘 = 新开一层，新层截屏会把旧层已绘制的内容当
+    // 屏幕像素截入（「给之前的框截图」正是需求）。倒计时窗同理——延时
+    // 期间再按热键就再开一层，各层 Esc 独立关闭。建窗时登记 per-pid
+    // 活跃标记（run_gui 内），供 pick/record --select 探测让路——它们
+    // 的产物要干净像素，不能把本层遮罩截进图。
     if !wait_delay(delay)? {
         return Ok(()); // 取消 = 静默退出，与覆盖层 Esc 同语义
     }
@@ -1024,9 +1027,15 @@ fn run_gui_delayed(mode: ui::Mode, delay: Option<f64>) -> Result<(), String> {
 }
 
 fn run_gui(mode: ui::Mode) -> Result<(), String> {
-    // 覆盖层单例（`pick` 子命令直达这里；`gui` 经 run_gui_delayed 已抢过，
-    // 同进程幂等）。冲突 = 已有截图/取色交互在跑，静默让路。
-    if !instance::acquire(instance::Kind::Overlay) {
+    // R11 只放开普通截图覆盖层（Snip）：允许多层并存（新层截入旧层已绘制
+    // 内容），多层各自 Esc 独立关闭，Dock 图标 shows_windows=false 不受影响。
+    // Pick（取色）仍维持互斥——它的截图发生在开窗前（capture_overlay），
+    // 与 record/scroll/annotate 等持锁族并存会把对方覆盖层的调暗 UI 截进
+    // 取色图，锁冲突时静默让路；gui 不持 Overlay 锁（R11 多开），对它的
+    // 感知走 per-pid 活跃标记，见下方 Pick 分支。
+    if mode == ui::Mode::Pick
+        && (instance::any_gui_overlay() || !instance::acquire(instance::Kind::Overlay))
+    {
         return Ok(());
     }
     // Wayland：合成器禁止自绘覆盖层抓屏/框选，改走交互式 portal——由合成器
@@ -1074,6 +1083,10 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
         viewport,
         ..Default::default()
     };
+    // 登记活跃标记（per-pid flock，gui 多开各持一把）：pick/record
+    // --select 靠它感知本覆盖层并静默让路——gui 不持 Overlay 单例锁
+    // （R11 多开），而它们的产物要干净像素、不能把本层的调暗遮罩截进图
+    instance::mark_gui_overlay();
     run_eframe(
         "lscreen",
         false,
@@ -1118,10 +1131,11 @@ fn run_gui_wayland() -> Result<(), String> {
         return Ok(());
     }
     let config = config::Config::load();
+    // 宽度下限 = 标注窗单行工具栏实测需求（MIN_SINGLE_ROW_WINDOW_W，R10）：
+    // 窄窗停靠条会折成两行（设计如此），但这里窗口宽度自己可控，不该折
+    let min_vw = ui::toolbar::MIN_SINGLE_ROW_WINDOW_W;
     let (vw, vh) = (
-        // 宽度下限 ≥ toolbar::BAR_W(760)+8+窗口边距：工具栏单行放下——
-        // 窄窗会折成两行（设计如此），但这里窗口宽度自己可控，不该折
-        (shot.width as f32 * 0.6).clamp(800.0, 960.0),
+        (shot.width as f32 * 0.6).clamp(min_vw, 960.0),
         (shot.height as f32 * 0.5).clamp(420.0, 720.0),
     );
     let viewport = eframe::egui::ViewportBuilder::default()
@@ -1132,7 +1146,7 @@ fn run_gui_wayland() -> Result<(), String> {
         // 均无害
         .with_decorations(false)
         .with_inner_size([vw, vh])
-        .with_min_inner_size([640.0, 360.0])
+        .with_min_inner_size([min_vw, 360.0])
         .with_title("lscreen 截图 - 标注");
     let options = eframe::NativeOptions {
         viewport,
@@ -2286,23 +2300,31 @@ pub(crate) fn spawn_annotate_stdin(png: &[u8]) -> Result<(), String> {
 }
 
 /// 把 PNG 文件交给独立贴图进程（OCR 识别成功后的贴图交付，见 ui::scan_ocr）：
-/// 原图钉回选区原位，方便对照识别文本。pin 多开是刻意语义（M9），单例不拦。
+/// 原图钉回选区原位，识别全文经 `ocr_text`（临时文本文件，见
+/// `--ocr-text`）一并带入——贴图右侧面板默认展开显示结果，单进程交付。
+/// pin 多开是刻意语义（M9），单例不拦。
 pub(crate) fn spawn_pin_file(
     path: &std::path::Path,
     pos: (f32, f32),
     scale: f32,
+    ocr_text: Option<&std::path::Path>,
 ) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut args = vec![
+        "pin".to_string(),
+        "-i".to_string(),
+        path.to_string_lossy().to_string(),
+        "--pos".to_string(),
+        format!("{},{}", pos.0, pos.1),
+        "--scale".to_string(),
+        format!("{scale}"),
+    ];
+    if let Some(t) = ocr_text {
+        args.push("--ocr-text".to_string());
+        args.push(t.to_string_lossy().to_string());
+    }
     let mut child = std::process::Command::new(exe)
-        .args([
-            "pin",
-            "-i",
-            &path.to_string_lossy(),
-            "--pos",
-            &format!("{},{}", pos.0, pos.1),
-            "--scale",
-            &format!("{scale}"),
-        ])
+        .args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .spawn()
@@ -2313,128 +2335,14 @@ pub(crate) fn spawn_pin_file(
     Ok(())
 }
 
-/// 识别文本独立窗口：全文经 stdin 交子进程（同 spawn_annotate_stdin 的
-/// 「先读完再开窗」防死锁约定）。pos = 窗口左上角逻辑点（贴图旁摆放）。
-pub(crate) fn spawn_ocr_show(title: &str, text: &str, pos: (f32, f32)) -> Result<(), String> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let mut child = Command::new(exe)
-        .args([
-            "ocr-show",
-            "--title",
-            title,
-            "--pos",
-            &format!("{},{}", pos.0, pos.1),
-        ])
-        .stdin(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("启动结果窗进程失败: {e}"))?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| "无法写入结果窗进程".to_string())?
-        .write_all(text.as_bytes())
-        .map_err(|e| format!("写入结果窗进程失败: {e}"))?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
-}
-
-/// 识别结果独立窗口：全文可选中、可整体复制（与贴图配套的 OCR 交付，
-/// 见 ui::scan_ocr）。
-struct OcrResultApp {
-    text: String,
-    copied: bool,
-}
-
-impl eframe::App for OcrResultApp {
-    fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
-        eframe::egui::CentralPanel::default()
-            .frame(eframe::egui::Frame::central_panel(ui.style()).inner_margin(12.0))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.strong("识别结果");
-                    ui.weak("全文已自动复制，可直接粘贴");
-                    ui.with_layout(
-                        eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
-                        |ui| {
-                            if self.copied {
-                                ui.weak("已复制");
-                            }
-                            if ui.button("复制全部").clicked() {
-                                let _ = crate::export::copy_text_to_clipboard(&self.text);
-                                self.copied = true;
-                            }
-                        },
-                    );
-                });
-                ui.add_space(6.0);
-                ui.separator();
-                ui.add_space(2.0);
-                eframe::egui::ScrollArea::vertical().show(ui, |ui| {
-                    eframe::egui::TextEdit::multiline(&mut self.text)
-                        .desired_width(ui.available_width())
-                        .desired_rows(12)
-                        .show(ui);
-                });
-            });
-    }
-
-    fn clear_color(&self, visuals: &eframe::egui::Visuals) -> [f32; 4] {
-        let c = visuals.panel_fill;
-        [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0, 1.0]
-    }
-}
-
-/// 识别结果窗入口：全文经 stdin 读入（spawn_ocr_show 对端），打开即自动
-/// 复制一份到剪贴板（「复制全部」可随时重抄）。
-fn run_ocr_show(title: String, pos: Option<eframe::egui::Pos2>) -> Result<(), String> {
-    if is_stdin_tty() {
-        return Err("缺少识别文本：经管道传入（覆盖层识别成功后自动走此通道）".into());
-    }
-    use std::io::Read;
-    let mut text = String::new();
-    std::io::stdin()
-        .read_to_string(&mut text)
-        .map_err(|e| format!("读取识别文本失败: {e}"))?;
-    let _ = crate::export::copy_text_to_clipboard(&text);
-    let mut viewport = eframe::egui::ViewportBuilder::default()
-        .with_title(title)
-        .with_inner_size(eframe::egui::vec2(440.0, 520.0));
-    if let Some(p) = pos {
-        viewport = viewport.with_position(p);
-    }
-    let options = eframe::NativeOptions {
-        viewport,
-        ..Default::default()
-    };
-    run_eframe(
-        "lscreen-ocr-result",
-        true,
-        options,
-        Box::new(move |cc| {
-            // 结果窗会显示中文识别文本，必须先装系统字体（同 countdown/pin，
-            // 缺字体时 CJK 全是方块——「乱码」的真身）
-            if let Some(bytes) = crate::font::load_system_font() {
-                crate::font::setup_egui_fonts(&cc.egui_ctx, bytes);
-            }
-            Ok(Box::new(OcrResultApp {
-                text,
-                copied: true,
-            }) as Box<dyn eframe::App>)
-        }),
-    )
-}
-
 /// 标注预览窗口：把已有图片开进带完整工具栏的标注窗（保存/复制/贴图/
 /// OCR/二维码）。滚动截图拼接结果的内部预览入口——独立进程跑，因为拼接
 /// 进程已消耗过自己的事件循环额度（macOS 限制），见 run_scroll。
 fn run_annotate(input: Option<PathBuf>) -> Result<(), String> {
-    // 标注窗也走覆盖层单例：它带着完整工具栏，与截图覆盖层同为独占式
-    // 标注交互；冲突时静默让路。stdin 场景（滚动拼接转交）必须**先读完
-    // 再判断**——父进程 write_all 阻塞在对端，提前退出会把父进程卡死。
+    // 标注窗仍走覆盖层单例（pick/record/scroll/annotate 族互斥，R11 未
+    // 放开——拼接产物同样要干净像素；普通截图覆盖层 gui 不持锁）。
+    // stdin 场景（滚动拼接转交）必须**先读完再判断**——父进程 write_all
+    // 阻塞在对端，提前退出会把父进程卡死。
     let img = match input {
         Some(path) => image::open(&path)
             .map_err(|e| format!("无法读取 {}: {e}", path.display()))?
@@ -2457,12 +2365,9 @@ fn run_annotate(input: Option<PathBuf>) -> Result<(), String> {
     }
     let rgba = img.into_raw();
     // 窗口尺寸与原先进程内预览同款：缩到 60%/50% 并夹到可用范围；宽度
-    // 下限要容得下底部标注工具栏（预览模式约 560 逻辑点）
-    let min_vw = if lscreen_capture::is_wayland() {
-        800.0
-    } else {
-        640.0
-    };
+    // 下限 = 单行工具栏实测需求（toolbar::MIN_SINGLE_ROW_WINDOW_W，R10
+    // 实测兜底，宁宽勿换行——v0.13 的 640/800 双值已容不下现按钮集合）
+    let min_vw = ui::toolbar::MIN_SINGLE_ROW_WINDOW_W;
     let (vw, vh) = (
         (w as f32 * 0.6).clamp(min_vw, 960.0),
         (h as f32 * 0.5).clamp(420.0, 720.0),
@@ -2471,14 +2376,7 @@ fn run_annotate(input: Option<PathBuf>) -> Result<(), String> {
         .with_app_id("lscreen")
         .with_decorations(!lscreen_capture::is_wayland())
         .with_inner_size([vw, vh])
-        .with_min_inner_size([
-            if lscreen_capture::is_wayland() {
-                800.0
-            } else {
-                640.0
-            },
-            360.0,
-        ])
+        .with_min_inner_size([min_vw, 360.0])
         .with_title("lscreen 滚动截图 - 标注");
     let options = eframe::NativeOptions {
         viewport,
@@ -2516,8 +2414,15 @@ fn run_annotate(input: Option<PathBuf>) -> Result<(), String> {
     )
 }
 
-/// 贴图入口：读图（文件或 stdin）→ 置顶无边框窗口。
-fn run_pin(input: Option<PathBuf>, pos: Option<String>, scale: f32) -> Result<(), String> {
+/// 贴图入口：读图（文件或 stdin）→ 置顶无边框窗口。`ocr_text` 传入时
+/// 右侧「识别结果」面板默认展开（覆盖层 OCR 交付单进程链路，R4）；交付
+/// 链路命名的临时全文文件在窗口退出后清理（手动 CLI 的其他输入文件不动）。
+fn run_pin(
+    input: Option<PathBuf>,
+    pos: Option<String>,
+    scale: f32,
+    ocr_text: Option<PathBuf>,
+) -> Result<(), String> {
     // 参数校验前置：避免交互式调用在 stdin 上阻塞等待 EOF
     if !scale.is_finite() || scale <= 0.0 {
         return Err("无效的 --scale（应为正数）".into());
@@ -2529,50 +2434,79 @@ fn run_pin(input: Option<PathBuf>, pos: Option<String>, scale: f32) -> Result<()
     if input.is_none() && is_stdin_tty() {
         return Err("缺少图片：用 -i 指定 PNG 文件，或经管道传入（覆盖层自动走此通道）".into());
     }
-    // 源文件路径（-i 传入时）：保存时记历史 source，供「打开目录并选中」
-    let source = input.clone();
-    let img = match input {
-        Some(path) => image::open(&path)
-            .map_err(|e| format!("无法读取 {}: {e}", path.display()))?
-            .into_rgba8(),
-        None => {
-            // stdin 由父进程写完才退出，读到的就是完整 PNG
-            let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)
-                .map_err(|e| format!("读取 stdin 失败: {e}"))?;
-            image::load_from_memory(&buf)
-                .map_err(|e| format!("stdin 不是有效图片: {e}（贴图仅支持 PNG）"))?
-                .into_rgba8()
+    // OCR 种子文本（R7）：文件不存在/非 UTF-8 都不崩——种子转成 Err 文案，
+    // 面板照常展开显示错误，用户可点重试改走贴图内识别
+    let ocr_seed = ocr_text.as_ref().map(|p| match std::fs::read_to_string(p) {
+        Ok(t) => Ok(t),
+        Err(e) => Err(format!("无法读取识别文本 {}: {e}", p.display())),
+    });
+    // 种子已消费：之后任何出口（建窗失败、run_eframe 出错等）都清理交付
+    // 链路的临时全文（temp_dir/lscreen-ocr-text-*.txt，识别全文可能敏感，
+    // 不留共享临时目录残留）。手动 CLI 传入的其他路径是用户自己的输入
+    // 文件，不删。闭包包住主体以便统一出口
+    let result = (|| -> Result<(), String> {
+        // 源文件路径（-i 传入时）：保存时记历史 source，供「打开目录并选中」
+        let source = input.clone();
+        let img = match input {
+            Some(path) => image::open(&path)
+                .map_err(|e| format!("无法读取 {}: {e}", path.display()))?
+                .into_rgba8(),
+            None => {
+                // stdin 由父进程写完才退出，读到的就是完整 PNG
+                let mut buf = Vec::new();
+                std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)
+                    .map_err(|e| format!("读取 stdin 失败: {e}"))?;
+                image::load_from_memory(&buf)
+                    .map_err(|e| format!("stdin 不是有效图片: {e}（贴图仅支持 PNG）"))?
+                    .into_rgba8()
+            }
+        };
+        let (w, h) = (img.width(), img.height());
+        let rgba = img.into_raw();
+        if w == 0 || h == 0 {
+            return Err("空图片".into());
         }
-    };
-    let (w, h) = (img.width(), img.height());
-    let rgba = img.into_raw();
-    if w == 0 || h == 0 {
-        return Err("空图片".into());
+        let panel_open = ocr_seed.is_some();
+        let viewport = eframe::egui::ViewportBuilder::default()
+            .with_app_id("lscreen")
+            .with_position(pos)
+            // 窗口尺寸 = 图像 + 四周内边距 + 底部条带；面板展开时宽度再加面板
+            .with_inner_size(pin::window_size(w, h, scale, panel_open))
+            .with_decorations(false)
+            .with_always_on_top()
+            .with_resizable(false);
+        let options = eframe::NativeOptions {
+            viewport,
+            ..Default::default()
+        };
+        run_eframe(
+            "lscreen-pin",
+            true,
+            options,
+            Box::new(move |cc| {
+                let launch = pin::PinLaunch {
+                    rgba,
+                    w,
+                    h,
+                    scale,
+                    font: font::load_system_font(),
+                    source,
+                    ocr_seed,
+                };
+                Ok(Box::new(pin::PinApp::new(cc, launch)))
+            }),
+        )
+    })();
+    if let Some(p) = ocr_text {
+        let tmp = std::env::temp_dir();
+        if p.starts_with(&tmp)
+            && p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("lscreen-ocr-text-"))
+        {
+            let _ = std::fs::remove_file(p);
+        }
     }
-    let viewport = eframe::egui::ViewportBuilder::default()
-        .with_app_id("lscreen")
-        .with_position(pos)
-        // 窗口高度含底部工具条条带（pin::BAR_H）
-        .with_inner_size(pin::window_size(w, h, scale))
-        .with_decorations(false)
-        .with_always_on_top()
-        .with_resizable(false);
-    let options = eframe::NativeOptions {
-        viewport,
-        ..Default::default()
-    };
-    run_eframe(
-        "lscreen-pin",
-        true,
-        options,
-        Box::new(move |cc| {
-            let font = font::load_system_font();
-            Ok(Box::new(pin::PinApp::new(
-                cc, rgba, w, h, scale, font, source,
-            )))
-        }),
-    )
+    result
 }
 
 /// stdin 是否为交互终端（tty）：是则没有管道数据可读，直接报错而非阻塞。
