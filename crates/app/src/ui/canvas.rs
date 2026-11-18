@@ -119,6 +119,18 @@ pub fn show_scrolled(app: &mut SnipApp, ui: &mut egui::Ui, texture: &TextureHand
         });
 }
 
+/// 数字/文字基线校准用的 cap 高比例（cap/em）：由本进程加载的系统字体经
+/// core::Renderer::digit_cap_ratio 实测（与导出层 text_ink_box 同一字体、
+/// 同一度量），进程内只测一次。
+fn cap_ratio() -> f32 {
+    static R: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *R.get_or_init(|| {
+        crate::font::load_system_font()
+            .map(|b| lscreen_core::render::Renderer::digit_cap_ratio(&b))
+            .unwrap_or(0.72)
+    })
+}
+
 fn show_in(app: &mut SnipApp, ui: &mut egui::Ui, rect: Rect, texture: &TextureHandle) {
     let view = View {
         origin: rect.min,
@@ -1170,14 +1182,7 @@ fn draw_element(
                 .first()
                 .and_then(|r| r.glyphs.first().map(|g| g.pos.y))
                 .unwrap_or_else(|| galley.size().y * 0.5);
-            static CAP_RATIO: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-            let cap_ratio =
-                *CAP_RATIO.get_or_init(|| {
-                    crate::font::load_system_font()
-                        .map(|b| lscreen_core::render::Renderer::digit_cap_ratio(&b))
-                        .unwrap_or(0.72)
-                });
-            let baseline_target = c.y + cap_ratio * size_pt * 0.5;
+            let baseline_target = c.y + cap_ratio() * size_pt * 0.5;
             painter.galley(
                 egui::Pos2::new(
                     c.x - galley.size().x * 0.5,
@@ -1366,7 +1371,16 @@ pub fn show_text_editor(app: &mut SnipApp, ctx: &egui::Context) {
     };
     // 预览模式画布 rect ≠ ctx.content_rect，用画布帧缓存的 last_view
     let view = app.last_view;
-    let anchor = view.to_pt(pos);
+    // 编辑态文字与提交后渲染对齐（WYSIWYG）：popup 的 menu_margin + TextEdit
+    // 的 text_edit_padding 让编辑文字比提交位置（pos）低/右一截，提交后文字
+    // 「跳上去」——用户感知为绘制靠上（2026-11-18）。编辑框反向扣除这层
+    // chrome，两边同字体同排版，文字主体逐像素重合。
+    let sp = &ctx.style().spacing;
+    let chrome = egui::vec2(
+        sp.menu_margin.left + sp.text_edit_padding.x,
+        sp.menu_margin.top + sp.text_edit_padding.y,
+    );
+    let anchor = view.to_pt(pos) - chrome;
     let font_pt = view.len_pt(style.font_size);
 
     let mut commit = false;

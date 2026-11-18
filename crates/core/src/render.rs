@@ -327,6 +327,26 @@ impl Renderer {
         (max_x > min_x && max_y > min_y).then_some((min_x, min_y, max_x - min_x, max_y - min_y))
     }
 
+    /// 数字字形的 cap 高比例（cap/em）："0" 的 outline 墨水高在 size=1000
+    /// 下实测（与 draw_text/text_ink_box 同源 API），无字形或异常按 0.72
+    /// 估计。覆盖层（egui 无墨水度量）用同一字体文件取此值，把基线校准到
+    /// 「圆心 + cap/2」——与导出层 text_ink_box 的墨水居中同源一致。
+    pub fn digit_cap_ratio(font: &[u8]) -> f32 {
+        let Ok(font) = ab_glyph::FontRef::try_from_slice(font) else {
+            return 0.72;
+        };
+        let scaled = font.as_scaled(1000.0);
+        let gid = scaled.glyph_id('0');
+        let glyph = gid.with_scale_and_position(1000.0, ab_glyph::point(0.0, 0.0));
+        if let Some(outlined) = font.outline_glyph(glyph) {
+            let h = outlined.px_bounds().height();
+            if h > 0.0 {
+                return (h / 1000.0).clamp(0.4, 1.0);
+            }
+        }
+        0.72
+    }
+
     /// 在 (x, y)（文本框左上角）绘制多行文本。
     fn draw_text(&self, canvas: &mut Pixmap, text: &str, x: f32, y: f32, size: f32, color: Rgba) {
         let Some(font) = &self.font else { return };
