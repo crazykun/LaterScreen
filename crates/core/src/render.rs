@@ -132,11 +132,19 @@ impl Renderer {
                 // （mac 自选中文字体尤甚，用户反馈 2026-11-18）。无字形时
                 // 退回整行居中。
                 if let Some((ix, iy, iw, ih)) = self.text_ink_box(&label, size) {
+                    // y 是文本框顶（内部 baseline = y + ascent）：墨水顶 =
+                    // y + ascent + iy，令其 = 圆心 - ih/2 反解 y——漏掉
+                    // ascent 会让数字整体下坠一个 ascent（真机翻车一次）
+                    let ascent = self
+                        .font
+                        .as_ref()
+                        .map(|f| f.as_scaled(size).ascent())
+                        .unwrap_or(0.0);
                     self.draw_text(
                         canvas,
                         &label,
                         center.x - ix - iw / 2.0,
-                        center.y - iy - ih / 2.0,
+                        center.y - ih / 2.0 - iy - ascent,
                         size,
                         Rgba([255, 255, 255, 255]),
                     );
@@ -573,6 +581,58 @@ mod tests {
 
     fn blank(w: u32, h: u32) -> Vec<u8> {
         vec![255u8; (w * h * 4) as usize]
+    }
+
+    #[test]
+    fn marker_digit_ink_centered_on_circle() {
+        // 回归：数字按墨水盒居中（公式漏 ascent 时数字坠出圆外，真机
+        // 2026-11-18）。黑底渲染 marker：白色像素即数字墨水，其包围盒中心
+        // 必须落在圆心附近。无系统字体的环境（极端无头 CI）只保 render
+        // 不 panic，跳过断言。
+        let font = [
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/PingFang.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        ]
+        .iter()
+        .find_map(|p| std::fs::read(p).ok());
+        let Some(font) = font else {
+            eprintln!("跳过：环境无系统字体");
+            return;
+        };
+        let r = Renderer::new(Some(font));
+        let (w, h) = (160u32, 160u32);
+        let src = vec![0u8; (w * h * 4) as usize];
+        let elems = vec![Element {
+            id: 1,
+            kind: ElementKind::Marker {
+                center: P2::new(80.0, 80.0),
+                number: 7,
+            },
+            style: Style::default(),
+        }];
+        let out = r.render(&src, w, h, &elems);
+        let (mut minx, mut miny) = (i32::MAX, i32::MAX);
+        let (mut maxx, mut maxy) = (i32::MIN, i32::MIN);
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let i = ((y * w as i32 + x) * 4) as usize;
+                if out[i] > 240 && out[i + 1] > 240 && out[i + 2] > 240 {
+                    minx = minx.min(x);
+                    miny = miny.min(y);
+                    maxx = maxx.max(x);
+                    maxy = maxy.max(y);
+                }
+            }
+        }
+        assert!(maxx >= minx, "未检出数字墨水（字体未生效？）");
+        let cx = (minx + maxx) as f32 / 2.0;
+        let cy = (miny + maxy) as f32 / 2.0;
+        assert!(
+            (cx - 80.0).abs() < 6.0 && (cy - 80.0).abs() < 6.0,
+            "数字墨水盒中心 ({cx},{cy}) 偏离圆心 (80,80)"
+        );
     }
 
     #[test]
