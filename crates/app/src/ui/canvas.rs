@@ -1371,16 +1371,7 @@ pub fn show_text_editor(app: &mut SnipApp, ctx: &egui::Context) {
     };
     // 预览模式画布 rect ≠ ctx.content_rect，用画布帧缓存的 last_view
     let view = app.last_view;
-    // 编辑态文字与提交后渲染对齐（WYSIWYG）：popup 的 menu_margin + TextEdit
-    // 的 text_edit_padding 让编辑文字比提交位置（pos）低/右一截，提交后文字
-    // 「跳上去」——用户感知为绘制靠上（2026-11-18）。编辑框反向扣除这层
-    // chrome，两边同字体同排版，文字主体逐像素重合。
-    let sp = &ctx.style().spacing;
-    let chrome = egui::vec2(
-        sp.menu_margin.left + sp.text_edit_padding.x,
-        sp.menu_margin.top + sp.text_edit_padding.y,
-    );
-    let anchor = view.to_pt(pos) - chrome;
+    let anchor = view.to_pt(pos);
     let font_pt = view.len_pt(style.font_size);
 
     let mut commit = false;
@@ -1388,13 +1379,20 @@ pub fn show_text_editor(app: &mut SnipApp, ctx: &egui::Context) {
     egui::Area::new(egui::Id::new("text-editor"))
         .fixed_pos(anchor)
         .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                let te = egui::TextEdit::multiline(&mut edit.buffer)
-                    .font(FontId::proportional(font_pt))
-                    .text_color(egui_color(style.color))
-                    .desired_rows(1)
-                    .desired_width(320.0)
-                    .hint_text("输入文本…");
+            // 编辑态与提交后渲染对齐（WYSIWYG）：popup 与 TextEdit 边距全
+            // 部显式置 0，编辑文字的排版起点 = 提交渲染起点（pos），提交后
+            // 文字不跳位。此前编辑框自带 menu_margin+TextEdit margin（约
+            // 10px），提交后文字上跳——用户感知为「绘制靠上」（2026-11-18）
+            egui::Frame::popup(ui.style())
+                .inner_margin(egui::Margin::same(0))
+                .show(ui, |ui| {
+                    let te = egui::TextEdit::multiline(&mut edit.buffer)
+                        .font(FontId::proportional(font_pt))
+                        .text_color(egui_color(style.color))
+                        .margin(egui::Margin::same(0))
+                        .desired_rows(1)
+                        .desired_width(320.0)
+                        .hint_text("输入文本…");
                 let r = ui.add(te);
                 // 只在未持有焦点时请求：egui 的 request_focus 会无条件
                 // interrupt_ime，每帧调用等于每帧销毁 IME 上下文，
