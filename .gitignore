@@ -5,3 +5,4 @@
 /dist
 !packaging/icon.png
 .workbuddy/*
+.zcode/*

@@ -142,7 +142,7 @@ brew install --cask crazykun/ailater/lscreen
 | Windows 10+ | `-setup.exe` / `.zip` | 安装器 per-user 免 UAC，zip 解压即用（不支持 Win7/8） |
 | macOS | `.dmg` | 拖入 Applications（未签名，首次右键 → 打开） |
 
-> **macOS 权限提示（升级后重新弹窗）**：产物未做代码签名，macOS 按二进制内容识别应用，每次 `brew upgrade`（或换装新版 dmg / `cargo install` 重装）都会被当作新应用，「屏幕录制 / 麦克风」授权失效重新弹窗。处理：完全退出 lscreen（托盘菜单退出或 `pkill lscreen`）→ 系统设置 ▸ 隐私与安全性 ▸ 屏幕录制 / 麦克风，删除旧条目 → 重启 lscreen 触发一次截图重新授权 → **授权后再重启一次 lscreen**（常驻进程只在启动时读取授权，不重启会一直弹）。
+> **macOS 权限提示**：自 v0.15.0 起产物以自签名证书做密封签名（无 Apple 开发者账号、未公证），TCC 授权绑定证书身份——**升级后不再需要重新授权**「屏幕录制 / 麦克风」。仅两类一次性行为：① 首次安装（或从 v0.14.3 及更早升级，签名身份变更）需授权一次：完全退出 lscreen → 重启触发截图 → 系统弹窗允许；裸 F 键热键在 系统设置 ▸ 隐私与安全性 ▸ 辅助功能 添加 LaterScreen。② macOS 15+ 会对所有截屏应用周期性弹「继续允许」确认，属系统行为，点一次即可。若授权后仍反复弹窗且截图黑屏：系统设置删除旧条目 → 完全重启 lscreen → 重新授权。
 
 <details>
 <summary><b>从源码构建</b></summary>
