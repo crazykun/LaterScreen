@@ -99,6 +99,29 @@ pub fn capture_interactive() -> Result<Option<Screenshot>> {
     platform::capture_interactive()
 }
 
+// ---------------------------------------------------------------- mac 屏幕录制授权（v0.15.1）
+
+/// 屏幕录制授权预检（macOS）：已授权返回 true。无副作用、不弹窗。
+#[cfg(target_os = "macos")]
+pub fn screen_capture_authorized() -> bool {
+    platform::screen_capture_authorized()
+}
+
+/// 触发系统「屏幕录制」授权弹窗并返回当前是否已授权。仅「未决定」状态会
+/// 真弹；已拒绝时静默返回 false，调用方应改走 [`open_screen_capture_settings`]。
+/// 必须在建全屏覆盖层之前调用（详见 other.rs 文档）。仅 macOS。
+#[cfg(target_os = "macos")]
+pub fn request_screen_capture() -> bool {
+    platform::request_screen_capture()
+}
+
+/// 直达 系统设置 ▸ 隐私与安全性 ▸ 屏幕录制 面板（已拒绝状态下的唯一出路）。
+/// 仅 macOS。
+#[cfg(target_os = "macos")]
+pub fn open_screen_capture_settings() {
+    platform::open_screen_capture_settings()
+}
+
 /// 一条要注册的全局热键（Wayland GlobalShortcuts 用）。
 #[cfg(target_os = "linux")]
 pub use platform::ShortcutSpec;

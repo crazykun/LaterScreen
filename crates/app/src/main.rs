@@ -894,7 +894,26 @@ struct OverlayShot {
 /// 采集覆盖层截图。多显示器（仅 Linux X11，scale 恒 1，单缓冲即可覆盖整个
 /// 虚拟桌面）优先走跨屏路径，可跨两块屏框选/取色/吸附窗口；不可用时
 /// （单屏 / Wayland / Win/mac / 失败）回退到「截鼠标所在屏 + fullscreen」。
+/// mac：截屏类功能（覆盖层/CLI 截屏）开跑前的权限预检。未授权时先弹系统
+/// 授权窗——此时无全屏覆盖层遮挡，系统弹窗可见可点（覆盖层是菜单栏之上
+/// 的整屏窗，先建窗会把它压在下面，用户只见黑框，2026-11-18 用户反馈）；
+/// 弹窗被无视或处于已拒绝状态时直达系统设置对应面板并返回错误文案。
+#[cfg(target_os = "macos")]
+fn ensure_screen_capture_authorized() -> Result<(), String> {
+    if lscreen_capture::screen_capture_authorized() {
+        return Ok(());
+    }
+    lscreen_capture::request_screen_capture();
+    if lscreen_capture::screen_capture_authorized() {
+        return Ok(());
+    }
+    lscreen_capture::open_screen_capture_settings();
+    Err("尚未授权「屏幕录制」：已打开 系统设置 ▸ 隐私与安全性 ▸ 屏幕录制，允许后重新触发即可".into())
+}
+
 fn capture_overlay() -> Result<OverlayShot, String> {
+    #[cfg(target_os = "macos")]
+    ensure_screen_capture_authorized()?;
     #[cfg(target_os = "linux")]
     if let Some(span) = capture_span() {
         return Ok(span);
@@ -1302,6 +1321,10 @@ fn run_shot(
     output: Option<PathBuf>,
     clipboard: bool,
 ) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    // CLI 无界面截屏同样先预检：避免默默产出一张黑 PNG（无覆盖层遮挡时
+    // request 能正常弹系统窗，见 ensure_screen_capture_authorized 文档）
+    ensure_screen_capture_authorized()?;
     let renderer = lscreen_core::render::Renderer::new(None);
     let (rgba, w, h) = if window || window_at.is_some() {
         // 窗口模式：直接按窗口矩形抓虚拟桌面（capture_region 内部会钳到屏幕
@@ -1426,6 +1449,9 @@ fn run_record(
     audio: Option<String>,
     output: Option<PathBuf>,
 ) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    // --region 直连无覆盖层，仍需预检：未授权时录制是全程黑帧
+    ensure_screen_capture_authorized()?;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -1894,6 +1920,8 @@ fn run_scroll(
     pause_ms: u64,
     output: Option<PathBuf>,
 ) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    ensure_screen_capture_authorized()?;
     if !(1..=1000).contains(&steps) {
         return Err("无效的 --steps（应为 1-1000）".into());
     }

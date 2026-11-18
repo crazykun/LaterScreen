@@ -200,6 +200,10 @@ mod mac {
         ) -> *mut core::ffi::c_void;
         pub fn CGEventPost(tap: u32, event: *mut core::ffi::c_void);
         pub fn CGWarpMouseCursorPosition(new_position: CGPoint) -> i32;
+        // 屏幕录制授权预检/申请（macOS 10.14+）：预检无副作用；申请仅「未
+        // 决定」状态会真弹系统窗，已拒绝时静默返回 false
+        pub fn CGPreflightScreenCaptureAccess() -> u8;
+        pub fn CGRequestScreenCaptureAccess() -> u8;
         // CGEventSourceButtonState（全局硬件按键查询）刻意不声明：macOS 15.3
         // 真机低频查询即触发 SkyLight 事件源注册表死锁，mac 的 pointer_state
         // 已降级返回 None（详见其文档），声明留着只会引诱后人踩坑
@@ -549,6 +553,31 @@ mod mac {
 /// Win/mac 无 Wayland 概念，恒 false。
 pub fn is_wayland() -> bool {
     false
+}
+
+/// 屏幕录制授权预检：已授权返回 true。无副作用、不弹窗、不切线程。
+#[cfg(target_os = "macos")]
+pub fn screen_capture_authorized() -> bool {
+    unsafe { mac::CGPreflightScreenCaptureAccess() != 0 }
+}
+
+/// 触发系统「屏幕录制」授权弹窗并返回当前是否已授权。**必须在建全屏
+/// 覆盖层之前调用**：覆盖层是菜单栏之上的整屏窗，会把系统弹窗压在下面，
+/// 用户只能看到黑框（2026-11-18 用户反馈）。仅「未决定」状态会真弹；
+/// 已拒绝（含拒绝过一次后再触发）时静默返回 false，调用方应改走
+/// [`open_screen_capture_settings`]。
+#[cfg(target_os = "macos")]
+pub fn request_screen_capture() -> bool {
+    unsafe { mac::CGRequestScreenCaptureAccess() != 0 }
+}
+
+/// 直达 系统设置 ▸ 隐私与安全性 ▸ 屏幕录制 面板（已拒绝状态下的唯一出路，
+/// 此时系统不再弹授权窗）。
+#[cfg(target_os = "macos")]
+pub fn open_screen_capture_settings() {
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+        .spawn();
 }
 
 /// 交互式截图仅 Wayland 需要；Win/mac 走自绘覆盖层。
