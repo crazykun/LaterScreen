@@ -351,6 +351,9 @@ enum Cmd {
         /// 窗口标题
         #[arg(long, default_value = "识别结果")]
         title: String,
+        /// 窗口左上角屏幕坐标（逻辑点），格式 X,Y；缺省由系统摆放
+        #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
+        pos: Option<String>,
     },
     /// 滚动长截图：框选区域后自动滚动内容并拼接为长图（v0.8.0 起三平台；
     /// Wayland 除外）
@@ -664,7 +667,13 @@ fn main() {
             }
         }
         Some(Cmd::Pin { input, pos, scale }) => run_pin(input, pos, scale),
-        Some(Cmd::OcrShow { title }) => run_ocr_show(title),
+        Some(Cmd::OcrShow { title, pos }) => match pos {
+            Some(s) => match parse_pos(&s) {
+                Ok(p) => run_ocr_show(title, Some(p)),
+                Err(e) => Err(e),
+            },
+            None => run_ocr_show(title, None),
+        },
         Some(Cmd::Config) => run_settings(),
         Some(Cmd::History) => run_history(),
         Some(Cmd::Upload { file }) => run_upload(file),
@@ -2305,13 +2314,19 @@ pub(crate) fn spawn_pin_file(
 }
 
 /// 识别文本独立窗口：全文经 stdin 交子进程（同 spawn_annotate_stdin 的
-/// 「先读完再开窗」防死锁约定）。
-pub(crate) fn spawn_ocr_show(title: &str, text: &str) -> Result<(), String> {
+/// 「先读完再开窗」防死锁约定）。pos = 窗口左上角逻辑点（贴图旁摆放）。
+pub(crate) fn spawn_ocr_show(title: &str, text: &str, pos: (f32, f32)) -> Result<(), String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut child = Command::new(exe)
-        .args(["ocr-show", "--title", title])
+        .args([
+            "ocr-show",
+            "--title",
+            title,
+            "--pos",
+            &format!("{},{}", pos.0, pos.1),
+        ])
         .stdin(Stdio::piped())
         .spawn()
         .map_err(|e| format!("启动结果窗进程失败: {e}"))?;
@@ -2336,30 +2351,35 @@ struct OcrResultApp {
 
 impl eframe::App for OcrResultApp {
     fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
-        eframe::egui::CentralPanel::default().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("识别结果");
-                ui.with_layout(
-                    eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
-                    |ui| {
-                        if ui.button("复制全部").clicked() {
-                            let _ = crate::export::copy_text_to_clipboard(&self.text);
-                            self.copied = true;
-                        }
-                        if self.copied {
-                            ui.weak("已复制");
-                        }
-                    },
-                );
+        eframe::egui::CentralPanel::default()
+            .frame(eframe::egui::Frame::central_panel(ui.style()).inner_margin(12.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("识别结果");
+                    ui.weak("全文已自动复制，可直接粘贴");
+                    ui.with_layout(
+                        eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
+                        |ui| {
+                            if self.copied {
+                                ui.weak("已复制");
+                            }
+                            if ui.button("复制全部").clicked() {
+                                let _ = crate::export::copy_text_to_clipboard(&self.text);
+                                self.copied = true;
+                            }
+                        },
+                    );
+                });
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(2.0);
+                eframe::egui::ScrollArea::vertical().show(ui, |ui| {
+                    eframe::egui::TextEdit::multiline(&mut self.text)
+                        .desired_width(ui.available_width())
+                        .desired_rows(12)
+                        .show(ui);
+                });
             });
-            ui.separator();
-            eframe::egui::ScrollArea::vertical().show(ui, |ui| {
-                eframe::egui::TextEdit::multiline(&mut self.text)
-                    .desired_width(ui.available_width())
-                    .desired_rows(12)
-                    .show(ui);
-            });
-        });
     }
 
     fn clear_color(&self, visuals: &eframe::egui::Visuals) -> [f32; 4] {
@@ -2369,8 +2389,8 @@ impl eframe::App for OcrResultApp {
 }
 
 /// 识别结果窗入口：全文经 stdin 读入（spawn_ocr_show 对端），打开即自动
-/// 复制一份到剪贴板（标题栏「复制全部」可随时重抄）。
-fn run_ocr_show(title: String) -> Result<(), String> {
+/// 复制一份到剪贴板（「复制全部」可随时重抄）。
+fn run_ocr_show(title: String, pos: Option<eframe::egui::Pos2>) -> Result<(), String> {
     if is_stdin_tty() {
         return Err("缺少识别文本：经管道传入（覆盖层识别成功后自动走此通道）".into());
     }
@@ -2380,10 +2400,14 @@ fn run_ocr_show(title: String) -> Result<(), String> {
         .read_to_string(&mut text)
         .map_err(|e| format!("读取识别文本失败: {e}"))?;
     let _ = crate::export::copy_text_to_clipboard(&text);
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_title(title)
+        .with_inner_size(eframe::egui::vec2(440.0, 520.0));
+    if let Some(p) = pos {
+        viewport = viewport.with_position(p);
+    }
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title(title)
-            .with_inner_size(eframe::egui::vec2(440.0, 520.0)),
+        viewport,
         ..Default::default()
     };
     run_eframe(

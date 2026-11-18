@@ -1153,16 +1153,37 @@ fn draw_element(
         ElementKind::Marker { center, number } => {
             let c = view.to_pt(*center);
             painter.circle_filled(c, view.len_pt(e.marker_radius()), color);
-            // 数字往下补偿居中：galley 行高含字体大上伸/下伸，CENTER_CENTER
-            // 按整行居中会让数字偏高（mac 自选中文字体尤甚，用户反馈
-            // 2026-11-18）。系数按真机目测校准（0.12em）；导出层走
-            // text_ink_box 逐字形实测，两边视觉一致。
-            let shift = view.len_pt(e.style.font_size) * 0.12;
-            painter.text(
-                c + egui::vec2(0.0, shift),
-                Align2::CENTER_CENTER,
+            // 数字基线校准居中：把基线放在「圆心 + cap/2」（数字墨水盒中点）。
+            // cap 由同一字体文件经 core::Renderer::digit_cap_ratio 实测；
+            // egui 无墨水度量，但 Glyph::pos.y 暴露行内基线位置，按基线摆放
+            // 即可。导出层走 text_ink_box 逐字形墨水居中，两路同源一致
+            // （v0.15.0 的 CENTER_CENTER 整行居中会让数字偏高，用户反馈
+            // 2026-11-18）。
+            let size_pt = view.len_pt(e.style.font_size);
+            let galley = painter.layout_no_wrap(
                 number.to_string(),
-                FontId::proportional(view.len_pt(e.style.font_size)),
+                FontId::proportional(size_pt),
+                Color32::WHITE,
+            );
+            let baseline_in_row = galley
+                .rows
+                .first()
+                .and_then(|r| r.glyphs.first().map(|g| g.pos.y))
+                .unwrap_or_else(|| galley.size().y * 0.5);
+            static CAP_RATIO: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+            let cap_ratio =
+                *CAP_RATIO.get_or_init(|| {
+                    crate::font::load_system_font()
+                        .map(|b| lscreen_core::render::Renderer::digit_cap_ratio(&b))
+                        .unwrap_or(0.72)
+                });
+            let baseline_target = c.y + cap_ratio * size_pt * 0.5;
+            painter.galley(
+                egui::Pos2::new(
+                    c.x - galley.size().x * 0.5,
+                    baseline_target - baseline_in_row,
+                ),
+                galley,
                 Color32::WHITE,
             );
         }

@@ -937,6 +937,7 @@ impl SnipApp {
                             items,
                             png_path,
                             pos: deliver_pos,
+                            size: (w as f32 / deliver_scale, h as f32 / deliver_scale),
                             scale: deliver_scale,
                         }
                     } else {
@@ -978,6 +979,7 @@ impl SnipApp {
                 items,
                 png_path,
                 pos,
+                size,
                 scale,
             }) => {
                 self.scan_job = None;
@@ -985,10 +987,30 @@ impl SnipApp {
                 // 全文先进剪贴板：粘贴到别处一步到位（结果窗内仍可手动复制）
                 let text = items.join("\n");
                 let _ = export::copy_text_to_clipboard(&text);
-                // 选区原图钉回原位（贴图进程，多开语义）
+                // 选区原图钉回原位（贴图进程，多开语义）。贴图是置顶窗，
+                // 结果窗必须摆在它旁边而不是同位——否则被压在下面，看起来
+                // 「关了贴图才出来」（用户反馈 2026-11-18）
                 let _ = crate::spawn_pin_file(&png_path, pos, scale);
+                // 结果窗摆位：贴图右侧 12pt，越出所在显示器则贴右缘内收，
+                // 显示器过窄时退居显示器中央
+                let (mon_x, mon_y) = (
+                    self.shot.origin.0 as f32 / scale,
+                    self.shot.origin.1 as f32 / scale,
+                );
+                let (mon_w, mon_h) = (
+                    self.shot.width as f32 / scale,
+                    self.shot.height as f32 / scale,
+                );
+                const WIN: egui::Vec2 = egui::vec2(440.0, 520.0);
+                let rx = (pos.0 + size.0 + 12.0).max(mon_x + 8.0);
+                let rx = if rx + WIN.x > mon_x + mon_w - 8.0 {
+                    (mon_x + (mon_w - WIN.x) * 0.5).max(mon_x + 8.0)
+                } else {
+                    rx
+                };
+                let ry = pos.1.clamp(mon_y + 8.0, (mon_y + mon_h - WIN.y - 8.0).max(mon_y + 8.0));
                 // 识别文本独立窗口（全文经 stdin 交子进程）
-                let _ = crate::spawn_ocr_show(&title, &text);
+                let _ = crate::spawn_ocr_show(&title, &text, (rx, ry));
                 // 覆盖层使命完成：关窗（与 Esc 同通道，close_requested 在
                 // update 尾部兜底，viewport 关闭事件双保险）
                 self.close_requested = true;
@@ -1250,12 +1272,14 @@ enum ScanOutcome {
     /// 覆盖层模式 OCR 成功：改走「贴图 + 独立结果窗」交付并关闭覆盖层
     /// （用户反馈：原地内嵌面板不便于对照原文粘贴，2026-11-18）。
     /// png_path = 选区裁剪 PNG（贴图进程读）；pos/scale = 贴图摆放
-    /// （选区左上角的屏幕逻辑点与缩放比，原图钉回原位）
+    /// （选区左上角的屏幕逻辑点与缩放比，原图钉回原位）；size = 贴图
+    /// 逻辑尺寸（结果窗在贴图旁摆放用）
     Deliver {
         title: String,
         items: Vec<String>,
         png_path: std::path::PathBuf,
         pos: (f32, f32),
+        size: (f32, f32),
         scale: f32,
     },
     /// 无结果或失败，toast 提示
