@@ -77,6 +77,10 @@ jobs:
           security unlock-keychain -p lscreen-build build.keychain
           security import "$RUNNER_TEMP/lscreen-key.pem" -k build.keychain -T /usr/bin/codesign
           security import "$RUNNER_TEMP/lscreen-cert.pem" -k build.keychain -T /usr/bin/codesign
+          # 新建 keychain 默认 5 分钟无操作自动上锁：构建（fat LTO 约 8 分钟）
+          # 结束时已锁，codesign 在无头 runner 上会弹看不见的 GUI 解锁框无限
+          # 等待（v0.15.0 两连卡死的真因）。禁用自动上锁兜底。
+          security set-keychain-settings -t 43200 build.keychain
           # 自签名根必须进信任域，codesign 才认这个身份（-d 管理域免 GUI，
           # runner 有免密 sudo；本机操作走用户域会弹密码框）
           sudo security add-trusted-cert -d -r trustRoot -p codeSign \
@@ -87,7 +91,12 @@ jobs:
           echo "LSCREEN_SIGN_KEYCHAIN=$PWD/build.keychain" >> "$GITHUB_ENV"
       - name: 构建并打包
         shell: bash
-        run: bash scripts/package.sh "${{ matrix.target }}"
+        timeout-minutes: 45
+        run: |
+          # 签名前显式解锁（防 keychain 在构建期间上锁，见导入步骤注释）
+          [ -z "${LSCREEN_SIGN_KEYCHAIN:-}" ] || \
+            security unlock-keychain -p lscreen-build "$LSCREEN_SIGN_KEYCHAIN"
+          bash scripts/package.sh "${{ matrix.target }}"
       - name: 体积门槛（单产物 ≤ 30MB 硬约束）
         shell: bash
         run: |
