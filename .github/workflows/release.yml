@@ -88,7 +88,8 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -k lscreen-build build.keychain
           rm -f "$RUNNER_TEMP/lscreen-key.pem"
           echo "LSCREEN_SIGN_IDENTITY=LaterScreen" >> "$GITHUB_ENV"
-          echo "LSCREEN_SIGN_KEYCHAIN=$PWD/build.keychain" >> "$GITHUB_ENV"
+          # create-keychain 实际落盘在 ~/Library/Keychains/ 下（非工作区）
+          echo "LSCREEN_SIGN_KEYCHAIN=$HOME/Library/Keychains/build.keychain" >> "$GITHUB_ENV"
       - name: 构建并打包
         shell: bash
         timeout-minutes: 45
