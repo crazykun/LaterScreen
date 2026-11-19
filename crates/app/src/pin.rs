@@ -1248,25 +1248,24 @@ impl PinApp {
                         ui.separator();
                         ui.add_space(4.0);
 
-                        // ---- 正文：按状态渲染
+                        // ---- 正文：按状态渲染。尺寸一律由 panel_rect 绝对
+                        // 几何算：Frame 内部的 available_height() 会收缩到内容
+                        // 高度甚至无界，之前靠它算出的 min_size 只有 120pt，
+                        // 正文框撑不满面板（用户反复反馈 2026-11-19）。
+                        const PAD: f32 = 12.0;
+                        const HEADER_H: f32 =
+                            crate::ui::toolbar::BTN + 4.0 + 6.0 + 1.0 + 4.0;
+                        let body_w = (panel_rect.width() - 2.0 * PAD).max(80.0);
+                        let body_h = (panel_rect.height() - 2.0 * PAD - HEADER_H).max(80.0);
                         match state {
                             Some(OcrPanel::Done { text, .. }) => {
-                                // ScrollArea 默认 auto_shrink=true：内容短时会把滚动区
-                                // 收缩到文字高度，TextEdit 的 min_size 也随之失去布局
-                                // 约束，右侧留下大片空白。关闭两个方向 shrink，并
-                                // 明确给滚动区当前面板剩余高度。
-                                let body_size = egui::vec2(
-                                    ui.available_width(),
-                                    ui.available_height().max(120.0),
-                                );
                                 ui.allocate_ui_with_layout(
-                                    body_size,
+                                    egui::vec2(body_w, body_h),
                                     *ui.layout(),
                                     |ui| {
                                         egui::ScrollArea::vertical()
                                             .id_salt("pin-ocr-scroll")
                                             .auto_shrink([false, false])
-                                            .max_height(body_size.y)
                                             .show(ui, |ui| {
                                         // 只读 = 每帧用原文重建临时副本（egui 0.35
                                         // 已无 TextEdit::read_only，interactive(false)
@@ -1276,10 +1275,8 @@ impl PinApp {
                                         // 进程按键门控不抢：见 ui() 注释）
                                         let mut shown = text.clone();
                                         let fv = ui.visuals().clone();
-                                        // 高度用外层算好的固定值：ScrollArea 内部的
-                                        // available_height 是无界的，取不到面板剩余高
-                                        let text_w = body_size.x;
-                                        let text_h = body_size.y;
+                                        let text_w = body_w;
+                                        let text_h = body_h;
                                         ui.add(
                                             egui::TextEdit::multiline(&mut shown)
                                                 .desired_width(text_w)
@@ -1287,14 +1284,14 @@ impl PinApp {
                                                 // 正文框内边距：文字离边框留足呼吸
                                                 // 空间（用户 2026-11-19），且撑满高度
                                                 .margin(egui::Margin::same(14))
-                                                // egui 0.35 的 frame 收 Frame 实参：
-                                                // 文本区惯例底色（extreme_bg）+
-                                                // 非交互描边，与面板整体同源
+                                                // 卡片底色用 noninteractive.bg_fill：
+                                                // 与面板底色拉开一档 + 明确描边，
+                                                // padding 才有「卡片」的视觉感
                                                 .frame(
                                                     egui::Frame::new()
-                                                        .fill(fv.extreme_bg_color)
+                                                        .fill(fv.widgets.noninteractive.bg_fill)
                                                         .stroke(fv.widgets.noninteractive.bg_stroke)
-                                                        .corner_radius(egui::CornerRadius::same(4)),
+                                                        .corner_radius(egui::CornerRadius::same(6)),
                                                 ),
                                         );
                                         });
