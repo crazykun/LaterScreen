@@ -637,6 +637,31 @@ impl SnipApp {
         }
     }
 
+    /// 贴图交付的落点（屏幕逻辑点）与缩放比。
+    /// 从贴图「编辑」接力来的标注窗沿用**原贴图**的位置/缩放——本窗的
+    /// shot.origin = (0,0)、region 从 (0,0) 起、scale = 1.0，按选区换算会
+    /// 把贴图钉到屏幕左上角（2026-11-19 真机反馈「框的位置老跑」）。「贴图」
+    /// 按钮与 OCR 交付两条路径共用这一处，避免只修一边。
+    /// 其余情况按选区屏幕坐标换算（显示器原点 + 选区内偏移）。
+    fn pin_placement(&self) -> ((f32, f32), f32) {
+        if let Some((x, y, s)) = self.pin_handoff {
+            return ((x, y), s);
+        }
+        let scale = if self.shot.scale > 0.0 {
+            self.shot.scale
+        } else {
+            1.0
+        };
+        let (ox, oy) = self.shot.origin;
+        (
+            (
+                (ox as f32 + self.region.min.x) / scale,
+                (oy as f32 + self.region.min.y) / scale,
+            ),
+            scale,
+        )
+    }
+
     /// 贴图：把当前选区钉在屏幕上（独立进程），本窗口随即退出。
     /// 图片经 stdin 以 PNG 传入子进程，免临时文件与清理问题；
     /// 写完再退出，保证子进程读到完整数据。
@@ -660,17 +685,7 @@ impl SnipApp {
             self.toast(ctx, format!("编码失败: {e}"));
             return;
         }
-        let scale = if self.shot.scale > 0.0 {
-            self.shot.scale
-        } else {
-            1.0
-        };
-        // 屏幕坐标 = 显示器原点 + 选区内偏移（region 是图像像素坐标）
-        let (ox, oy) = self.shot.origin;
-        let (x, y) = (
-            (ox as f32 + self.region.min.x) / scale,
-            (oy as f32 + self.region.min.y) / scale,
-        );
+        let ((x, y), scale) = self.pin_placement();
         // 本会话做过 OCR（覆盖层内嵌面板或标注窗结果）时，把识别全文带进
         // 贴图（--ocr-text，面板自动展开）——与覆盖层 OCR 交付的单进程合体
         // 语义一致；临时文件由贴图进程读完自清理（run_pin 尾部）
@@ -979,18 +994,8 @@ impl SnipApp {
         // 「贴图 + 面板」单进程交付：贴图钉回原位（原图对照），识别全文经
         // --ocr-text 带进贴图右侧面板（不再开独立结果窗）
         let deliver = !self.preview || self.pin_handoff.is_some();
-        // 接力窗的落点沿用原贴图的位置/缩放（其 shot.origin = (0,0)、
-        // scale = 1.0，按选区换算会把合体窗钉到屏幕左上角）
-        let (deliver_pos, deliver_scale) = match self.pin_handoff {
-            Some((x, y, s)) => ((x, y), s),
-            None => (
-                (
-                    (self.shot.origin.0 as f32 + self.region.min.x) / self.shot.scale,
-                    (self.shot.origin.1 as f32 + self.region.min.y) / self.shot.scale,
-                ),
-                self.shot.scale,
-            ),
-        };
+        // 落点与「贴图」按钮共用同一计算：接力窗沿用原贴图位置/缩放
+        let (deliver_pos, deliver_scale) = self.pin_placement();
         self.spawn_scan(ctx, move || {
             // 已打开的标注窗也读取最新保存值；构造/探测（含 tesseract 子进程）、
             // 首次模型下载与推理全部留在 worker，不能阻塞 UI 线程。
@@ -1440,4 +1445,58 @@ fn truncate(s: &str, max: usize) -> String {
 
 pub fn egui_color(c: Rgba) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), c.a())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app_with(shot: Screenshot, handoff: Option<(f32, f32, f32)>) -> SnipApp {
+        SnipApp::from_init(OverlayInit {
+            shot,
+            font: None,
+            mode: Mode::Snip,
+            config: crate::config::Config::default(),
+            record_region: None,
+            windows: Vec::new(),
+            initial_region: None,
+            preview: true,
+            span_monitors: false,
+            pin_handoff: handoff,
+        })
+    }
+
+    /// 从贴图「编辑」接力的标注窗：「贴图」按钮与 OCR 交付都必须回到原贴图
+    /// 位置（2026-11-19 真机反馈「框的位置老跑」——只修 OCR 那条不够）。
+    /// 本窗 shot.origin = (0,0)、region 从 (0,0) 起，按选区换算必为 (0,0)
+    #[test]
+    fn pin_handoff_reuses_original_pin_placement() {
+        let shot = Screenshot {
+            rgba: vec![0; 2 * 2 * 4],
+            width: 2,
+            height: 2,
+            origin: (0, 0),
+            scale: 1.0,
+            is_primary: true,
+        };
+        let app = app_with(shot, Some((420.0, 260.0, 2.0)));
+        assert_eq!(app.pin_placement(), ((420.0, 260.0), 2.0));
+    }
+
+    /// 非接力场景仍按选区屏幕坐标换算：(显示器原点 + 选区内偏移) / scale
+    #[test]
+    fn pin_placement_from_selection() {
+        let shot = Screenshot {
+            rgba: vec![0; 8 * 8 * 4],
+            width: 8,
+            height: 8,
+            origin: (100, 50),
+            scale: 2.0,
+            is_primary: true,
+        };
+        let mut app = app_with(shot, None);
+        app.region = RectF::from_points(P2::new(20.0, 10.0), P2::new(60.0, 40.0));
+        assert_eq!(app.pin_placement(), ((60.0, 30.0), 2.0));
+    }
 }
