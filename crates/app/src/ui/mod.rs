@@ -646,7 +646,20 @@ impl SnipApp {
             (ox as f32 + self.region.min.x) / scale,
             (oy as f32 + self.region.min.y) / scale,
         );
-        match spawn_pin(&png, x, y, scale) {
+        // 本会话做过 OCR（覆盖层内嵌面板或标注窗结果）时，把识别全文带进
+        // 贴图（--ocr-text，面板自动展开）——与覆盖层 OCR 交付的单进程合体
+        // 语义一致；临时文件由贴图进程读完自清理（run_pin 尾部）
+        let ocr_text = self.results_panel.as_ref().map(|(_, items)| {
+            let text = items.join("\n");
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let path = std::env::temp_dir().join(format!("lscreen-ocr-text-{nanos}.txt"));
+            let _ = std::fs::write(&path, text);
+            path
+        });
+        match spawn_pin(&png, x, y, scale, ocr_text.as_deref()) {
             Ok(()) => self.request_close(ctx),
             Err(e) => self.toast(ctx, format!("贴图失败: {e}")),
         }
@@ -1307,20 +1320,31 @@ pub type MosaicCache = HashMap<u64, (u64, Vec<MosaicCell>)>;
 pub type ImageTextureCache = HashMap<usize, TextureHandle>;
 
 /// 拉起独立的贴图进程：stdin 写入 PNG 后即返回（不 wait——
-/// 贴图进程独立存活，父进程退出后被 init 收养）。
-pub(crate) fn spawn_pin(png: &[u8], x: f32, y: f32, scale: f32) -> Result<(), String> {
+/// 贴图进程独立存活，父进程退出后被 init 收养）。ocr_text 传入时贴图
+/// 打开右侧识别结果面板（内容为该文件全文，贴图进程读完自清理）。
+pub(crate) fn spawn_pin(
+    png: &[u8],
+    x: f32,
+    y: f32,
+    scale: f32,
+    ocr_text: Option<&std::path::Path>,
+) -> Result<(), String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let mut child = Command::new(exe)
-        .args([
-            "pin",
-            "--pos",
-            &format!("{x},{y}"),
-            "--scale",
-            &scale.to_string(),
-        ])
+    let mut cmd = Command::new(exe);
+    cmd.args([
+        "pin",
+        "--pos",
+        &format!("{x},{y}"),
+        "--scale",
+        &scale.to_string(),
+    ]);
+    if let Some(t) = ocr_text {
+        cmd.arg("--ocr-text").arg(t);
+    }
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
