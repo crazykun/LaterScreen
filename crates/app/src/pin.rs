@@ -1155,7 +1155,8 @@ impl PinApp {
                 egui::Frame::new()
                     .inner_margin(egui::Margin::same(10))
                     .show(ui, |ui| {
-                        // ---- 标题行：标题 +（已自动复制）+ 右侧「复制全部」「×」
+                        // ---- 标题行：固定槽高，标题/状态/复制/关闭统一按槽位基线
+                        ui.set_min_height(crate::ui::toolbar::BTN + 4.0);
                         ui.horizontal(|ui| {
                             ui.add(
                                 egui::Label::new(
@@ -1169,8 +1170,41 @@ impl PinApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui
-                                        .button("×")
+                                    let (close_rect, close_resp) = ui.allocate_exact_size(
+                                        egui::vec2(crate::ui::toolbar::BTN, crate::ui::toolbar::BTN),
+                                        egui::Sense::click(),
+                                    );
+                                    let close_vis = ui.style().interact(&close_resp);
+                                    ui.painter().rect_filled(
+                                        close_rect,
+                                        4.0,
+                                        if close_resp.hovered() {
+                                            close_vis.weak_bg_fill
+                                        } else {
+                                            ui.style().visuals.extreme_bg_color
+                                        },
+                                    );
+                                    let close_galley = ui.painter().layout_no_wrap(
+                                        "×".into(),
+                                        egui::FontId::proportional(15.0),
+                                        close_vis.fg_stroke.color,
+                                    );
+                                    let close_base = close_rect.center().y
+                                        + crate::ui::cap_ratio() * 15.0 * 0.5;
+                                    let close_y = close_galley
+                                        .rows
+                                        .first()
+                                        .and_then(|r| r.glyphs.first().map(|g| g.pos.y))
+                                        .unwrap_or(close_galley.size().y * 0.5);
+                                    ui.painter().galley(
+                                        egui::Pos2::new(
+                                            close_rect.center().x - close_galley.size().x * 0.5,
+                                            close_base - close_y,
+                                        ),
+                                        close_galley,
+                                        close_vis.fg_stroke.color,
+                                    );
+                                    if close_resp
                                         .on_hover_text("收起面板（工具条「识别文字」可再展开）")
                                         .clicked()
                                     {
@@ -1240,12 +1274,19 @@ impl PinApp {
                                 // 收缩到文字高度，TextEdit 的 min_size 也随之失去布局
                                 // 约束，右侧留下大片空白。关闭两个方向 shrink，并
                                 // 明确给滚动区当前面板剩余高度。
-                                let body_h = ui.available_height().max(120.0);
-                                egui::ScrollArea::vertical()
-                                    .id_salt("pin-ocr-scroll")
-                                    .auto_shrink([false, false])
-                                    .max_height(body_h)
-                                    .show(ui, |ui| {
+                                let body_size = egui::vec2(
+                                    ui.available_width(),
+                                    ui.available_height().max(120.0),
+                                );
+                                ui.allocate_ui_with_layout(
+                                    body_size,
+                                    *ui.layout(),
+                                    |ui| {
+                                        egui::ScrollArea::vertical()
+                                            .id_salt("pin-ocr-scroll")
+                                            .auto_shrink([false, false])
+                                            .max_height(body_size.y)
+                                            .show(ui, |ui| {
                                         // 只读 = 每帧用原文重建临时副本（egui 0.35
                                         // 已无 TextEdit::read_only，interactive(false)
                                         // 会连选中一起禁掉）：编辑只落
@@ -1271,6 +1312,7 @@ impl PinApp {
                                                         .corner_radius(egui::CornerRadius::same(4)),
                                                 ),
                                         );
+                                        });
                                     },
                                 );
                             }
