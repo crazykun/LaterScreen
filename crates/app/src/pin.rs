@@ -1236,9 +1236,16 @@ impl PinApp {
                         // ---- 正文：按状态渲染
                         match state {
                             Some(OcrPanel::Done { text, .. }) => {
-                                egui::ScrollArea::vertical().id_salt("pin-ocr-scroll").show(
-                                    ui,
-                                    |ui| {
+                                // ScrollArea 默认 auto_shrink=true：内容短时会把滚动区
+                                // 收缩到文字高度，TextEdit 的 min_size 也随之失去布局
+                                // 约束，右侧留下大片空白。关闭两个方向 shrink，并
+                                // 明确给滚动区当前面板剩余高度。
+                                let body_h = ui.available_height().max(120.0);
+                                egui::ScrollArea::vertical()
+                                    .id_salt("pin-ocr-scroll")
+                                    .auto_shrink([false, false])
+                                    .max_height(body_h)
+                                    .show(ui, |ui| {
                                         // 只读 = 每帧用原文重建临时副本（egui 0.35
                                         // 已无 TextEdit::read_only，interactive(false)
                                         // 会连选中一起禁掉）：编辑只落
