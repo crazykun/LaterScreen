@@ -227,6 +227,12 @@ pub struct SnipApp {
     /// 归零即停。None 或 0 = 不跨屏。
     span_wid: Option<u32>,
     span_retries: u8,
+    /// 原生窗口句柄：交付淡出（整窗 set_opacity 1→0 再关窗）用。None =
+    /// 平台/句柄不可得，关闭退回立即关窗
+    native: Option<lscreen_capture::NativeWindow>,
+    /// 交付淡出开始时刻：Some = 淡出中（约 120ms，期间不绘不收输入），
+    /// 结束后真正关闭。消除「全屏遮罩瞬间消失」的闪动
+    fade: Option<std::time::Instant>,
 }
 
 impl SnipApp {
@@ -244,6 +250,13 @@ impl SnipApp {
         let font = init.font.clone();
         let mut app = Self::from_init(init);
         app.span_wid = span_wid;
+        // 交付淡出用的原生句柄（mac/win 由窗口创建即可得；拿不到则关闭
+        // 退回立即关窗）
+        use raw_window_handle::HasWindowHandle as _;
+        app.native = cc
+            .window_handle()
+            .ok()
+            .and_then(|h| lscreen_capture::NativeWindow::from_raw(h.as_raw()));
         // 重发泵开关与 wid 成对回填：from_init 恒置 0（离屏测量构造无窗口），
         // 漏掉它 pump_span 首行就会短路，跨屏覆盖层静默退化成单屏 fullscreen
         app.span_retries = if span_wid.is_some() { 8 } else { 0 };
@@ -309,6 +322,8 @@ impl SnipApp {
         Self {
             shot,
             texture: None,
+            native: None,
+            fade: None,
             doc: Document::default(),
             renderer,
             mode,
@@ -667,6 +682,21 @@ impl SnipApp {
     }
 
     pub fn request_close(&mut self, ctx: &egui::Context) {
+        // 交付淡出：整窗 set_opacity 1→0（约 120ms）后真正关窗，避免全屏
+        // 遮罩+标注瞬间消失的闪动。无原生句柄的平台退回立即关窗
+        if self.fade.is_none() {
+            if self.native.is_none() {
+                self.close_requested = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+            self.fade = Some(std::time::Instant::now());
+            if let Some(nw) = &self.native {
+                let _ = nw.set_opacity(0.0);
+            }
+            ctx.request_repaint();
+            return;
+        }
         self.close_requested = true;
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
@@ -1031,10 +1061,8 @@ impl SnipApp {
                 // 识别结果显示在贴图右侧面板（贴图与结果从此同窗，不再有
                 // 「结果窗摆位」问题）
                 let _ = crate::spawn_pin_file(&png_path, pos, scale, text_path.as_deref());
-                // 覆盖层使命完成：关窗（与 Esc 同通道，close_requested 在
-                // update 尾部兜底，viewport 关闭事件双保险）
-                self.close_requested = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                // 覆盖层使命完成：关窗（淡出后关闭，与各交付出口同通道）
+                self.request_close(ctx);
             }
             Ok(ScanOutcome::Empty(msg)) => {
                 self.scan_job = None;
@@ -1248,6 +1276,22 @@ impl eframe::App for SnipApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         if self.close_requested {
+            return;
+        }
+        // 交付淡出中：整窗透明度渐降，期间不绘不收输入；到时真正关窗。
+        // 无原生句柄（set_opacity 不可用）时不会进入淡出，直接关闭
+        if let Some(t0) = self.fade {
+            let el = t0.elapsed().as_millis() as f32;
+            let a = (1.0 - el / 120.0).clamp(0.0, 1.0);
+            if let Some(nw) = &self.native {
+                let _ = nw.set_opacity(a);
+            }
+            if a <= 0.0 {
+                self.close_requested = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
             return;
         }
         self.pump_span(&ctx);
