@@ -1014,12 +1014,8 @@ fn wait_delay(delay: Option<f64>) -> Result<bool, String> {
 }
 
 fn run_gui_delayed(mode: ui::Mode, delay: Option<f64>) -> Result<(), String> {
-    // 普通截图覆盖层（gui）刻意不抢覆盖层单例锁（v0.15 多开，R11）：已开
-    // 覆盖层时再按 F1/托盘 = 新开一层，新层截屏会把旧层已绘制的内容当
-    // 屏幕像素截入（「给之前的框截图」正是需求）。倒计时窗同理——延时
-    // 期间再按热键就再开一层，各层 Esc 独立关闭。建窗时登记 per-pid
-    // 活跃标记（run_gui 内），供 pick/record --select 探测让路——它们
-    // 的产物要干净像素，不能把本层遮罩截进图。
+    // 截图覆盖层恢复单例：准备阶段也由 run_gui 统一抢锁，避免多个延时
+    // 子进程同时倒计时后一起建窗。按 F1 的重复启动会静默让路。
     if !wait_delay(delay)? {
         return Ok(()); // 取消 = 静默退出，与覆盖层 Esc 同语义
     }
@@ -1027,12 +1023,14 @@ fn run_gui_delayed(mode: ui::Mode, delay: Option<f64>) -> Result<(), String> {
 }
 
 fn run_gui(mode: ui::Mode) -> Result<(), String> {
-    // R11 只放开普通截图覆盖层（Snip）：允许多层并存（新层截入旧层已绘制
-    // 内容），多层各自 Esc 独立关闭，Dock 图标 shows_windows=false 不受影响。
-    // Pick（取色）仍维持互斥——它的截图发生在开窗前（capture_overlay），
-    // 与 record/scroll/annotate 等持锁族并存会把对方覆盖层的调暗 UI 截进
-    // 取色图，锁冲突时静默让路；gui 不持 Overlay 锁（R11 多开），对它的
-    // 感知走 per-pid 活跃标记，见下方 Pick 分支。
+    // 普通截图覆盖层恢复单实例：覆盖层建窗前抢锁，覆盖层存活期间再次
+    // 按 F1 静默让路，避免准备阶段多个进程卡住后成群弹出。Pick 下面
+    // 仍额外探测 gui 标记，避免取色截入截图覆盖层。
+    if mode == ui::Mode::Snip && !instance::acquire(instance::Kind::Overlay) {
+        return Ok(());
+    }
+    // Pick 仍维持互斥：它的截图发生在开窗前（capture_overlay），与
+    // gui/record/scroll/annotate 并存会把对方覆盖层的调暗 UI 截进取色图。
     if mode == ui::Mode::Pick
         && (instance::any_gui_overlay() || !instance::acquire(instance::Kind::Overlay))
     {
