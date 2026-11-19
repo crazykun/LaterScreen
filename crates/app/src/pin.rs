@@ -951,17 +951,16 @@ impl PinApp {
         use crate::ui::toolbar::{
             action_button, draw_check, draw_close, draw_ocr, draw_save, draw_upload, icon_button,
         };
-        // 图标总宽（与 MIN_TOOLBAR_W 的估值同源）：无上传 11 组 ≈354pt、
-        // 有上传再加 26pt。OCR 面板打开时最右 +「收起 |←」26pt，识别完成
-        // 再 +「复制」46pt。用于整排水平居中。
+        // 主排宽度（与 MIN_TOOLBAR_W 同源）：无上传 11 组 ≈354pt、有上传
+        // 再加 26pt。OCR 的「|← 收起」「复制」两个按钮不进主排，单独右对齐
+        // 到条带最右缘（用户 2026-11-19 要求），主排保持图像区中心不变。
         let ocr_copy_ready =
             self.panel_open && matches!(&self.ocr, Some(OcrPanel::Done { .. }));
-        let shown = (if self.upload_cmd.is_some() {
+        let shown = if self.upload_cmd.is_some() {
             380.0
         } else {
             354.0
-        }) + if self.panel_open { 26.0 } else { 0.0 }
-            + if ocr_copy_ready { 46.0 } else { 0.0 };
+        };
         // 锚定图像区中心；图像窄于整排时钳回条带内（不越出窗口）
         let pos = Pos2::new(
             (anchor_x - shown / 2.0).clamp(
@@ -1102,58 +1101,77 @@ impl PinApp {
                     if action_button(ui, true, "复制并关闭 (空格 同款；Ctrl+C/双击 仅复制)", draw_check) {
                         action = Some(ToolbarAction::CopyAndClose);
                     }
-                    // OCR 面板打开时：|← 收起文字识别（下载图标旋转 90°：
-                    // 左竖线 = 边界，左箭头 = 把面板推回去收起）
-                    if self.panel_open
-                        && action_button(ui, true, "收起文字识别结果面板", draw_collapse_ocr)
-                    {
-                        action = Some(ToolbarAction::CollapseOcr);
-                    }
-                    // OCR 面板打开且识别完成：最右侧「复制全文」——操作全部
-                    // 收进工具栏，面板本体只留内容（用户反馈 2026-11-19）
-                    if ocr_copy_ready {
-                        let (slot, resp) = ui.allocate_exact_size(
-                            egui::vec2(44.0, crate::ui::toolbar::BTN),
-                            egui::Sense::click(),
-                        );
-                        let slot_vis = ui.style().interact(&resp);
-                        ui.painter().rect_filled(
-                            slot,
-                            4.0,
-                            if resp.hovered() {
-                                slot_vis.weak_bg_fill
-                            } else {
-                                ui.style().visuals.extreme_bg_color
-                            },
-                        );
-                        let galley = ui.painter().layout_no_wrap(
-                            "复制".into(),
-                            egui::FontId::proportional(12.0),
-                            slot_vis.fg_stroke.color,
-                        );
-                        let base = slot.center().y + crate::ui::cap_ratio() * 12.0 * 0.5;
-                        let ink_y = galley
-                            .rows
-                            .first()
-                            .and_then(|r| r.glyphs.first().map(|g| g.pos.y))
-                            .unwrap_or(galley.size().y * 0.5);
-                        ui.painter().galley(
-                            egui::Pos2::new(
-                                slot.center().x - galley.size().x * 0.5,
-                                base - ink_y,
-                            ),
-                            galley,
-                            slot_vis.fg_stroke.color,
-                        );
-                        if resp.on_hover_text("复制识别全文").clicked() {
-                            if let Some(OcrPanel::Done { text, .. }) = &self.ocr {
-                                let _ = crate::export::copy_text_to_clipboard(text);
-                                self.toast(ctx, "已复制全文");
-                            }
-                        }
-                    }
                 });
             });
+
+        // OCR 的两个操作按钮单独右对齐到条带最右缘（用户 2026-11-19）：
+        // 主排仍居中，|← 收起 + 复制 贴窗口右边，顺序 = 复制在最右。
+        let ocr_actions_w = (if self.panel_open { 26.0 } else { 0.0 })
+            + (if ocr_copy_ready { 46.0 } else { 0.0 });
+        if ocr_actions_w > 0.0 {
+            let right = Pos2::new(
+                (bar.max.x - ocr_actions_w - 8.0).max(bar.min.x + 8.0),
+                bar.center().y - crate::ui::toolbar::BTN / 2.0,
+            );
+            egui::Area::new(egui::Id::new("pin-bar-ocr-actions"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(right)
+                .interactable(true)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::splat(2.0);
+                        // |← 收起文字识别（下载图标旋转 90°：左竖线=边界，
+                        // 左箭头=把面板推回去收起）
+                        if self.panel_open
+                            && action_button(ui, true, "收起文字识别结果面板", draw_collapse_ocr)
+                        {
+                            action = Some(ToolbarAction::CollapseOcr);
+                        }
+                        // 识别完成：最右侧「复制全文」，面板本体只留内容
+                        if ocr_copy_ready {
+                            let (slot, resp) = ui.allocate_exact_size(
+                                egui::vec2(44.0, crate::ui::toolbar::BTN),
+                                egui::Sense::click(),
+                            );
+                            let slot_vis = ui.style().interact(&resp);
+                            ui.painter().rect_filled(
+                                slot,
+                                4.0,
+                                if resp.hovered() {
+                                    slot_vis.weak_bg_fill
+                                } else {
+                                    ui.style().visuals.extreme_bg_color
+                                },
+                            );
+                            let galley = ui.painter().layout_no_wrap(
+                                "复制".into(),
+                                egui::FontId::proportional(12.0),
+                                slot_vis.fg_stroke.color,
+                            );
+                            let base = slot.center().y + crate::ui::cap_ratio() * 12.0 * 0.5;
+                            let ink_y = galley
+                                .rows
+                                .first()
+                                .and_then(|r| r.glyphs.first().map(|g| g.pos.y))
+                                .unwrap_or(galley.size().y * 0.5);
+                            ui.painter().galley(
+                                egui::Pos2::new(
+                                    slot.center().x - galley.size().x * 0.5,
+                                    base - ink_y,
+                                ),
+                                galley,
+                                slot_vis.fg_stroke.color,
+                            );
+                            if resp.on_hover_text("复制识别全文").clicked() {
+                                if let Some(OcrPanel::Done { text, .. }) = &self.ocr {
+                                    let _ = crate::export::copy_text_to_clipboard(text);
+                                    self.toast(ctx, "已复制全文");
+                                }
+                            }
+                        }
+                    });
+                });
+        }
         match action {
             Some(ToolbarAction::Save) => self.do_save(ctx),
             Some(ToolbarAction::Close) => self.do_close(ctx),
@@ -1210,7 +1228,7 @@ impl PinApp {
                 ui.set_max_width(panel_rect.width());
                 ui.set_max_height(panel_rect.height());
                 egui::Frame::new()
-                    .inner_margin(egui::Margin::same(10))
+                    .inner_margin(egui::Margin::same(12))
                     .show(ui, |ui| {
                         // ---- 标题行：固定槽高，标题/状态/复制/关闭统一按槽位基线
                         ui.set_min_height(crate::ui::toolbar::BTN + 4.0);
@@ -1266,7 +1284,9 @@ impl PinApp {
                                             egui::TextEdit::multiline(&mut shown)
                                                 .desired_width(text_w)
                                                 .min_size(egui::vec2(text_w, text_h))
-                                                .margin(egui::Margin::same(8))
+                                                // 正文框内边距：文字离边框留足呼吸
+                                                // 空间（用户 2026-11-19），且撑满高度
+                                                .margin(egui::Margin::same(14))
                                                 // egui 0.35 的 frame 收 Frame 实参：
                                                 // 文本区惯例底色（extreme_bg）+
                                                 // 非交互描边，与面板整体同源
