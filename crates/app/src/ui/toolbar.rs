@@ -1056,15 +1056,15 @@ pub(crate) fn draw_save(p: &egui::Painter, r: Rect, c: Color32) {
 /// 白；v0.11.5 起底是绿不是强调色，白勾 5.13:1）。此前绿色对号画在强调色底
 /// 上只有 1.79:1（v0.11.4 修复），两者在色弱下也不可辨。
 pub(crate) fn draw_check(p: &egui::Painter, r: Rect, c: Color32) {
-    // 与其他线稿图标同视觉重量：不满格（原满格 2.0 描边显得又大又沉，
-    // 用户反馈「按钮高低不一」2026-11-18），内收到 0.1..0.9、描边 1.5
+    // 与其他线稿图标同视觉重量，且与 draw_close 等大（用户反馈两者不一致
+    // 2026-11-18）：墨水盒 y 跨 0.10..0.90、x 跨 0.08..0.92，描边 1.5
     let s = Stroke::new(1.5, c);
     let (w, h) = (r.width(), r.height());
     p.add(Shape::line(
         vec![
             Pos2::new(r.min.x + w * 0.08, r.min.y + h * 0.52),
-            Pos2::new(r.min.x + w * 0.40, r.max.y - h * 0.12),
-            Pos2::new(r.max.x - w * 0.08, r.min.y + h * 0.14),
+            Pos2::new(r.min.x + w * 0.42, r.max.y - h * 0.10),
+            Pos2::new(r.max.x - w * 0.08, r.min.y + h * 0.10),
         ],
         s,
     ));
@@ -1149,11 +1149,13 @@ fn draw_qr_gen(p: &egui::Painter, r: Rect, c: Color32) {
 }
 
 pub(crate) fn draw_ocr(p: &egui::Painter, r: Rect, c: Color32) {
+    // 字号收小 + 光学下移：原 0.9 倍高锚在 0.38h，A 的墨水顶出按钮框
+    // （用户反馈「顶着上面、显大」2026-11-18）；下划线保持在底部
     p.text(
-        Pos2::new(r.center().x, r.min.y + r.height() * 0.38),
+        Pos2::new(r.center().x, r.center().y + r.height() * 0.06),
         egui::Align2::CENTER_CENTER,
         "A",
-        egui::FontId::proportional(r.height() * 0.9),
+        egui::FontId::proportional(r.height() * 0.72),
         c,
     );
     p.line_segment(

@@ -122,7 +122,7 @@ pub fn show_scrolled(app: &mut SnipApp, ui: &mut egui::Ui, texture: &TextureHand
 /// 数字/文字基线校准用的 cap 高比例（cap/em）：由本进程加载的系统字体经
 /// core::Renderer::digit_cap_ratio 实测（与导出层 text_ink_box 同一字体、
 /// 同一度量），进程内只测一次。
-fn cap_ratio() -> f32 {
+pub(crate) fn cap_ratio() -> f32 {
     static R: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
     *R.get_or_init(|| {
         crate::font::load_system_font()

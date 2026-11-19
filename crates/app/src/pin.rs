@@ -1001,11 +1001,27 @@ impl PinApp {
                         ui.style().visuals.extreme_bg_color
                     };
                     ui.painter().rect_filled(slot, 4.0, zoom_bg);
-                    ui.painter().text(
-                        slot.center(),
-                        egui::Align2::CENTER_CENTER,
+                    // 垂直居中带 cap 校准（与标号同源问题）：egui 整行居中
+                    // 含下伸部，数字会偏高——基线放到「槽位中心 + cap/2」
+                    let font_id = egui::FontId::proportional(12.0);
+                    let galley = ui.painter().layout_no_wrap(
                         format!("{pct}%"),
-                        egui::FontId::proportional(12.0),
+                        font_id,
+                        zoom_vis.fg_stroke.color,
+                    );
+                    let baseline_in_row = galley
+                        .rows
+                        .first()
+                        .and_then(|r| r.glyphs.first().map(|g| g.pos.y))
+                        .unwrap_or_else(|| galley.size().y * 0.5);
+                    let baseline =
+                        slot.center().y + crate::ui::canvas::cap_ratio() * 12.0 * 0.5;
+                    ui.painter().galley(
+                        egui::Pos2::new(
+                            slot.center().x - galley.size().x * 0.5,
+                            baseline - baseline_in_row,
+                        ),
+                        galley,
                         zoom_vis.fg_stroke.color,
                     );
                     if resp
@@ -1587,6 +1603,11 @@ impl eframe::App for PinApp {
 const ICON_W: f32 = 1.5;
 
 /// 置顶图标：顶部横线 + 向上箭头（推到最上层）。激活态由 icon_button 高亮。
+/// 以中心等比放大墨水盒：个别手调图标偏小时整体放大，比例坐标不变
+fn grow(r: Rect, k: f32) -> Rect {
+    Rect::from_center_size(r.center(), r.size() * k)
+}
+
 fn draw_topmost(p: &egui::Painter, r: Rect, c: Color32) {
     let s = Stroke::new(ICON_W, c);
     let w = r.width();
@@ -1619,6 +1640,8 @@ fn draw_through(p: &egui::Painter, r: Rect, c: Color32) {
 /// 旋转图标：小方块画面 + 一道掠过右上角的贝塞尔弧，末端箭头指向
 /// 顺时针切线方向（与 R 键一致）。
 fn draw_rotate(p: &egui::Painter, r: Rect, c: Color32) {
+    // 旋转图标原稿偏小（用户反馈 2026-11-18）：墨水盒以中心放大 1.2 倍
+    let r = grow(r, 1.2);
     let s = Stroke::new(ICON_W, c);
     let w = r.width();
     let at = |fx: f32, fy: f32| Pos2::new(r.min.x + w * fx, r.min.y + w * fy);
@@ -1678,6 +1701,8 @@ fn dashed_mirror_axis(p: &egui::Painter, r: Rect, c: Color32, vertical: bool) {
 
 /// 编辑图标：圆角方框内的一支铅笔，作为贴图编辑 Logo。
 fn draw_edit(p: &egui::Painter, r: Rect, c: Color32) {
+    // 编辑图标原稿偏小（用户反馈 2026-11-18）：同 rotate 放大墨水盒
+    let r = grow(r, 1.18);
     let w = r.width();
     let at = |fx: f32, fy: f32| Pos2::new(r.min.x + w * fx, r.min.y + w * fy);
     // 外框扩大到绘图区边缘，内部留出清晰安全区。
