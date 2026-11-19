@@ -1256,10 +1256,23 @@ impl PinApp {
                                 egui::Label::new(
                                     egui::RichText::new("识别结果").strong().size(14.0),
                                 )
-                                .wrap_mode(egui::TextWrapMode::Extend),
+                                .wrap_mode(egui::TextWrapMode::Extend)
+                                // 面板里的说明性文字一律不可选：egui 的 Label
+                                // 默认 selectable（style.interaction.
+                                // selectable_labels = true），sense 会并入
+                                // click_and_drag，把「拖动窗口」抢成「选中这
+                                // 几个字」（2026-11-19 真机反馈「识别结果
+                                // 已自动复制」那一行拖不动）。只有下方正文的
+                                // TextEdit 保留文本选择
+                                .selectable(false),
                             );
                             if let Some(OcrPanel::Done { copied: true, .. }) = &state {
-                                ui.weak(egui::RichText::new("已自动复制").small().color(muted));
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new("已自动复制").small().color(muted),
+                                    )
+                                    .selectable(false),
+                                );
                             }
                         });
                         ui.add_space(6.0);
@@ -1323,21 +1336,32 @@ impl PinApp {
                             ui.add_space(body_rect.height() * 0.22);
                             ui.spinner();
                             ui.add_space(10.0);
-                            ui.label(
-                                egui::RichText::new("识别中…").color(fv.weak_text_color()),
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new("识别中…").color(fv.weak_text_color()),
+                                )
+                                .selectable(false),
                             );
                         });
                     }
                     Some(OcrPanel::Failed { msg }) => {
                         ui.vertical_centered(|ui| {
                             ui.add_space(12.0);
-                            ui.label(
-                                egui::RichText::new("识别失败")
-                                    .strong()
-                                    .color(fv.error_fg_color),
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new("识别失败")
+                                        .strong()
+                                        .color(fv.error_fg_color),
+                                )
+                                .selectable(false),
                             );
                             ui.add_space(4.0);
-                            ui.label(egui::RichText::new(msg).color(fv.weak_text_color()));
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(msg).color(fv.weak_text_color()),
+                                )
+                                .selectable(false),
+                            );
                             ui.add_space(10.0);
                             if ui.button("重试").clicked() {
                                 act = Some(PanelAction::Retry);
@@ -1345,8 +1369,11 @@ impl PinApp {
                         });
                     }
                     Some(OcrPanel::Running) | None => {
-                        ui.label(
-                            egui::RichText::new("尚未识别").color(fv.weak_text_color()),
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new("尚未识别").color(fv.weak_text_color()),
+                            )
+                            .selectable(false),
                         );
                     }
                 }
@@ -1376,7 +1403,8 @@ impl PinApp {
                         // 不换行：窄贴图里 "+150%" 会被折成两行
                         ui.add(
                             egui::Label::new(egui::RichText::new(msg).color(Color32::WHITE))
-                                .wrap_mode(egui::TextWrapMode::Extend),
+                                .wrap_mode(egui::TextWrapMode::Extend)
+                                .selectable(false),
                         );
                     });
             });
