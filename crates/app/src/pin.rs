@@ -983,29 +983,26 @@ impl PinApp {
                     if action_button(ui, true, "缩小（键盘 -）", draw_minus) {
                         action = Some(ToolbarAction::ZoomOut);
                     }
-                    // 百分比 = 缩放预览，点击重置 100%。用与图标按钮同槽位
-                    // 的画法（定尺寸 + 悬停淡底 + 居中文字），替代 egui 自带
-                    // Button 的常亮底框——否则整排就它一个「凸起」，高低不一
+                    // 百分比 = 缩放预览，点击重置 100%。与图标按钮同槽位、
+                    // 同分层底色（静置淡底/悬停亮底），整排视觉一致
                     let pct = (zoom * 100.0).round() as i32;
                     let (slot, resp) = ui.allocate_exact_size(
                         Vec2::new(44.0, crate::ui::toolbar::BTN),
                         egui::Sense::click(),
                     );
-                    if resp.hovered() {
-                        let vis = ui.style().interact(&resp);
-                        ui.painter()
-                            .rect_filled(slot, 4.0, vis.bg_fill);
-                    }
+                    let zoom_vis = ui.style().interact(&resp);
+                    let zoom_bg = if resp.hovered() {
+                        zoom_vis.weak_bg_fill
+                    } else {
+                        ui.style().visuals.extreme_bg_color
+                    };
+                    ui.painter().rect_filled(slot, 4.0, zoom_bg);
                     ui.painter().text(
                         slot.center(),
                         egui::Align2::CENTER_CENTER,
                         format!("{pct}%"),
                         egui::FontId::proportional(12.0),
-                        if resp.hovered() {
-                            ui.style().interact(&resp).fg_stroke.color
-                        } else {
-                            ui.visuals().text_color()
-                        },
+                        zoom_vis.fg_stroke.color,
                     );
                     if resp
                         .on_hover_text("缩放预览，点击重置为 100%（键盘 0）")

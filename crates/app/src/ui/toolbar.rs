@@ -823,9 +823,16 @@ pub(crate) fn icon_button(
 ) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(BTN), Sense::click());
     let vis = ui.style().interact_selectable(&resp, active);
-    if active || resp.hovered() {
-        ui.painter().rect_filled(rect, 4.0, vis.bg_fill);
-    }
+    // 槽位底色常驻分层：静置淡底 / 悬停亮底 / 选中强调底——整排读作同规格
+    // 方块，不再「哪个按钮被悬停哪个就鼓一块」（用户反馈高低不一 2026-11-18）
+    let bg = if active {
+        vis.bg_fill
+    } else if resp.hovered() {
+        vis.weak_bg_fill
+    } else {
+        ui.style().visuals.extreme_bg_color
+    };
+    ui.painter().rect_filled(rect, 4.0, bg);
     draw(ui.painter(), rect.shrink(6.0), vis.fg_stroke.color);
     resp.on_hover_text(tip)
 }
@@ -844,9 +851,15 @@ pub(crate) fn action_button(
     } else {
         &ui.style().visuals.widgets.noninteractive
     };
-    if enabled && resp.hovered() {
-        ui.painter().rect_filled(rect, 4.0, vis.bg_fill);
-    }
+    // 槽位底色常驻分层（同 icon_button 注释）：禁用态用最淡底
+    let bg = if !enabled {
+        ui.style().visuals.widgets.noninteractive.bg_fill
+    } else if resp.hovered() {
+        vis.weak_bg_fill
+    } else {
+        ui.style().visuals.extreme_bg_color
+    };
+    ui.painter().rect_filled(rect, 4.0, bg);
     let color = if enabled {
         vis.fg_stroke.color
     } else {
