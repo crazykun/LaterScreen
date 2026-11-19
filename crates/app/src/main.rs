@@ -1046,7 +1046,7 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
         return Ok(());
     }
     // Pick 仍维持互斥：它的截图发生在开窗前（capture_overlay），与
-    // gui/record/scroll/annotate 并存会把对方覆盖层的调暗 UI 截进取色图。
+    // gui/record/scroll 并存会把对方覆盖层的调暗 UI 截进取色图。
     if mode == ui::Mode::Pick
         && (instance::any_gui_overlay() || !instance::acquire(instance::Kind::Overlay))
     {
@@ -2381,9 +2381,12 @@ fn run_annotate(
         }
         _ => None,
     };
-    // 标注窗仍走覆盖层单例（pick/record/scroll/annotate 族互斥，R11 未
-    // 放开——拼接产物同样要干净像素；普通截图覆盖层 gui 不持锁）。
-    // stdin 场景（滚动拼接转交）必须**先读完再判断**——父进程 write_all
+    // 标注窗**不持 Overlay 锁**（2026-11-19 起）：它的产物是「已有图片 +
+    // 标注」，不像 pick/record/scroll 那样以干净屏幕像素为前提，无需与截图
+    // 覆盖层互斥。之前持锁导致「标注窗开着时按 F1 毫无反应」——F1 的 gui
+    // 抢同一把锁失败便静默退出。现在两者分离，标注窗可与截图覆盖层并存，
+    // 多个标注窗之间也不互斥（与 pin 多开一致）。
+    // stdin 场景（滚动拼接转交）仍必须先读完再建窗——父进程 write_all
     // 阻塞在对端，提前退出会把父进程卡死。
     let img = match input {
         Some(path) => image::open(&path)
@@ -2398,9 +2401,6 @@ fn run_annotate(
                 .into_rgba8()
         }
     };
-    if !instance::acquire(instance::Kind::Overlay) {
-        return Ok(());
-    }
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 {
         return Err("空图片".into());
