@@ -627,18 +627,37 @@ impl PinApp {
         }
 
         let response = egui::Modal::new(egui::Id::new("pin-through-confirm")).show(ctx, |ui| {
-            ui.set_max_width(360.0);
-            ui.heading("开启整窗点击穿透？");
+            ui.set_min_width(380.0);
+            ui.set_max_width(380.0);
+            ui.strong(egui::RichText::new("开启整窗点击穿透？").size(16.0));
+            ui.add_space(6.0);
             ui.label("开启后，整张贴图（包括底部工具条）都不再接收鼠标点击。");
             ui.add_space(4.0);
-            ui.label("恢复方式：按 Esc（窗口仍有焦点时），或从托盘选择“贴图 → 关闭穿透”。");
+            ui.label(
+                egui::RichText::new(
+                    "恢复方式：按 Esc（窗口仍有焦点时），或从托盘选择「贴图 → 关闭穿透」。",
+                )
+                .weak(),
+            );
+            ui.add_space(14.0);
+            ui.separator();
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                let cancel = ui.button("取消").clicked();
-                let confirm = ui.button("我已了解，开启").clicked();
-                (confirm, cancel)
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let confirm = ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("我已了解，开启").strong().size(13.5),
+                            )
+                            .fill(ui.visuals().selection.bg_fill)
+                            .min_size(egui::vec2(124.0, 26.0)),
+                        )
+                        .clicked();
+                    let cancel = ui.button("取消").clicked();
+                    (confirm, cancel)
+                })
+                .inner
             })
-            .inner
         });
         let (confirm, mut cancel) = response.inner;
         if response.should_close() {
@@ -1107,7 +1126,7 @@ impl PinApp {
     /// 调用方（App::ui 的根 painter，egui 0.35 无 Context::painter）先画，
     /// 这里只叠内容。`panel_rect` 由调用方按「窗口右侧 − 底部条带」切出，
     /// 宽度即 [`PANEL_W`]（WM 未服从放大时为 0，见 ui() 的 side_w 反推）。
-    fn show_ocr_panel(&mut self, ctx: &egui::Context, panel_rect: Rect) {
+    fn show_ocr_panel(&mut self, ctx: &egui::Context, panel_rect: Rect, reveal: f32) {
         // panel_rect 宽度由 ui() 按窗口实际几何反推（side_w）：WM 未服从
         // 放大时为 0，此时面板内容一并跳过（等下一帧窗口真正变宽再画）
         if panel_rect.width() <= 0.5 {
@@ -1121,6 +1140,12 @@ impl PinApp {
             .order(egui::Order::Foreground)
             .fixed_pos(panel_rect.min)
             .show(ctx, |ui| {
+                // 从左往右揭示：内容固定在最终位置，裁剪窗自分隔线向右
+                // 长出（宽度 = 已揭示宽度），文字不闪不跳
+                ui.set_clip_rect(Rect::from_min_max(
+                    panel_rect.min,
+                    Pos2::new(panel_rect.min.x + reveal.max(1.0), panel_rect.max.y),
+                ));
                 // 面板内容取色全部走令牌（与底部条带同一 visuals），禁止硬编码 RGB
                 let muted = ui.visuals().weak_text_color();
                 let error_fg = ui.visuals().error_fg_color;
@@ -1310,7 +1335,8 @@ impl eframe::App for PinApp {
         if (target - self.panel_anim).abs() > 0.005 {
             ctx.request_repaint_after(std::time::Duration::from_millis(8));
         }
-        let slide = (1.0 - self.panel_anim) * side_w;
+        // 从左往右揭示（用户偏好）：内容不移动，裁剪窗自分隔线向右长出
+        let reveal = side_w * self.panel_anim;
         // 收起方向的过渡帧对齐：panel_open 已翻 false 而 WM 尚未落地
         // InnerSize（窗口仍含面板宽度）时，图像区恒按基准宽**左锚**钳制
         // ——否则中心锚会让图像整体右移 PANEL_W/2 再弹回一帧。展开方向
@@ -1323,8 +1349,8 @@ impl eframe::App for PinApp {
         let img_area = Rect::from_min_max(full.min, Pos2::new(full.min.x + img_w, split_y));
         let image_rect = img_area.shrink(PAD);
         let panel_rect = Rect::from_min_max(
-            Pos2::new(img_area.max.x + slide, full.min.y),
-            Pos2::new(img_area.max.x + slide + side_w, split_y),
+            Pos2::new(img_area.max.x, full.min.y),
+            Pos2::new(full.max.x, split_y),
         );
         let bar_rect = Rect::from_min_max(Pos2::new(full.min.x, split_y), full.max);
         // 工具栏锚定**图像区**中心：面板开合改变全宽，若按全宽居中，
@@ -1511,20 +1537,36 @@ impl eframe::App for PinApp {
             // 拖拽：StartDrag 在 X11 有「未激活窗口第一次拖不住」的坑（见
             // drag 字段注释）。
             crate::drag::start_drag(&ctx, &response);
-        } else if response.drag_started() {
-            if let (Some(outer), Some(origin)) = (
-                ctx.input(|i| i.viewport().outer_rect),
-                ctx.input(|i| i.pointer.press_origin()),
-            ) {
-                self.drag = Some(DragState {
-                    grab_offset: origin.to_vec2(),
-                    sent: outer.min,
-                });
+        } else {
+            // 手动拖拽（X11/Win/mac）：改听**全局指针**而非主 response——
+            // 按住工具条按钮起手的拖动此前被按钮吃掉 press，窗口纹丝不动
+            // （用户反馈 2026-11-19）。现在窗口内任意非面板位置按下拖动都
+            // 移动窗口；egui 拖远后松手 click=None（context.rs 只在
+            // click.is_some() 时置 CLICKED），按钮动作不会被误触发。起手
+            // 在右侧面板正文 = 面板滚动，排除
+            let (press, latest) = ctx.input(|i| (i.pointer.press_origin(), i.pointer.latest_pos()));
+            if let (Some(origin), Some(cur)) = (press, latest) {
+                let on_panel = panel_rect.contains(origin);
+                if origin.distance(cur) > 3.0 && !on_panel && self.drag.is_none() {
+                    if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
+                        self.drag = Some(DragState {
+                            grab_offset: origin.to_vec2(),
+                            sent: outer.min,
+                        });
+                    }
+                }
             }
         }
         let scale = self.scale;
         if let Some(d) = &mut self.drag {
-            if response.dragged() {
+            // 拖动中 = 按键仍按下且起手不在面板里（面板起手 = 滚动正文）
+            let dragging = ctx.input(|i| {
+                i.pointer.any_down()
+                    && i.pointer
+                        .press_origin()
+                        .is_some_and(|o| !panel_rect.contains(o))
+            });
+            if dragging {
                 // 优先 X11 QueryPointer：绝对屏幕坐标，与窗口移动解耦，
                 // 无自激回路（见 drag 字段注释）。Win/mac 拿不到时退回
                 // egui 局部坐标换算，且仅在指针真实移动的帧重算，
@@ -1551,7 +1593,7 @@ impl eframe::App for PinApp {
                     }
                 }
             }
-            if response.drag_stopped() {
+            if ctx.input(|i| !i.pointer.any_down()) {
                 self.drag = None;
                 self.through_shape = None;
             }
@@ -1561,7 +1603,7 @@ impl eframe::App for PinApp {
         }
 
         self.show_toolbar(&ctx, bar_rect, toolbar_anchor_x);
-        self.show_ocr_panel(&ctx, panel_rect);
+        self.show_ocr_panel(&ctx, panel_rect, reveal);
         self.show_through_confirmation(&ctx);
         self.show_toast(&ctx);
 
