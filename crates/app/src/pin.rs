@@ -933,7 +933,7 @@ impl PinApp {
         } else {
             354.0
         };
-        let pos = Pos2::new(bar.center().x - shown / 2.0, bar.center().y - 12.0);
+        let pos = Pos2::new(bar.center().x - shown / 2.0, bar.center().y - crate::ui::toolbar::BTN / 2.0);
         let mut action = None;
         let (topmost, through, zoom, upload_busy) = (
             self.topmost,
@@ -976,13 +976,31 @@ impl PinApp {
                     if action_button(ui, true, "缩小（键盘 -）", draw_minus) {
                         action = Some(ToolbarAction::ZoomOut);
                     }
-                    // 百分比 = 缩放预览，点击重置 100%
+                    // 百分比 = 缩放预览，点击重置 100%。用与图标按钮同槽位
+                    // 的画法（定尺寸 + 悬停淡底 + 居中文字），替代 egui 自带
+                    // Button 的常亮底框——否则整排就它一个「凸起」，高低不一
                     let pct = (zoom * 100.0).round() as i32;
-                    let btn =
-                        egui::Button::new(egui::RichText::new(format!("{pct}%")).strong().size(12.0))
-                            .min_size(Vec2::new(40.0, 24.0));
-                    if ui
-                        .add(btn)
+                    let (slot, resp) = ui.allocate_exact_size(
+                        Vec2::new(44.0, crate::ui::toolbar::BTN),
+                        egui::Sense::click(),
+                    );
+                    if resp.hovered() {
+                        let vis = ui.style().interact(&resp);
+                        ui.painter()
+                            .rect_filled(slot, 4.0, vis.bg_fill);
+                    }
+                    ui.painter().text(
+                        slot.center(),
+                        egui::Align2::CENTER_CENTER,
+                        format!("{pct}%"),
+                        egui::FontId::proportional(12.0),
+                        if resp.hovered() {
+                            ui.style().interact(&resp).fg_stroke.color
+                        } else {
+                            ui.visuals().text_color()
+                        },
+                    );
+                    if resp
                         .on_hover_text("缩放预览，点击重置为 100%（键盘 0）")
                         .clicked()
                     {

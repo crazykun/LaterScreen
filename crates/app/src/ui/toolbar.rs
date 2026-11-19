@@ -12,7 +12,7 @@ use super::{egui_color, SnipApp, View};
 use crate::theme::{ACCENT_FILL, SUCCESS_FILL, SUCCESS_ON_TEXT};
 
 /// 图标按钮边长（逻辑点）
-const BTN: f32 = 24.0;
+pub(crate) const BTN: f32 = 24.0;
 /// 宽屏工具栏的目标宽度，用于位置夹取与单/双行布局判定；实际宽度仍受
 /// 窗口可用宽度限制。两种形态的单行需求不同（离屏实测，最坏布局 =
 /// 文本工具加已配置上传，见 tests::bar_width_consts_cover_measured_single_row）：
@@ -1043,13 +1043,15 @@ pub(crate) fn draw_save(p: &egui::Painter, r: Rect, c: Color32) {
 /// 白；v0.11.5 起底是绿不是强调色，白勾 5.13:1）。此前绿色对号画在强调色底
 /// 上只有 1.79:1（v0.11.4 修复），两者在色弱下也不可辨。
 pub(crate) fn draw_check(p: &egui::Painter, r: Rect, c: Color32) {
-    let s = Stroke::new(2.0, c);
-    let w = r.width();
+    // 与其他线稿图标同视觉重量：不满格（原满格 2.0 描边显得又大又沉，
+    // 用户反馈「按钮高低不一」2026-11-18），内收到 0.1..0.9、描边 1.5
+    let s = Stroke::new(1.5, c);
+    let (w, h) = (r.width(), r.height());
     p.add(Shape::line(
         vec![
-            Pos2::new(r.min.x, r.min.y + w * 0.55),
-            Pos2::new(r.min.x + w * 0.38, r.max.y),
-            Pos2::new(r.max.x, r.min.y + w * 0.08),
+            Pos2::new(r.min.x + w * 0.08, r.min.y + h * 0.52),
+            Pos2::new(r.min.x + w * 0.40, r.max.y - h * 0.12),
+            Pos2::new(r.max.x - w * 0.08, r.min.y + h * 0.14),
         ],
         s,
     ));
