@@ -317,6 +317,17 @@ mod tests {
         SERIAL.lock().unwrap()
     }
 
+    /// 释放本进程持有的全部单例锁句柄（仅测试）。生产进程从不释放——锁
+    /// 句柄常驻到退出。测试需要它还原「本进程未持锁」的初始状态：CI 上
+    /// 没有外部托盘，acquire_is_idempotent 先跑并持有各用途锁后，后续
+    /// 测试的 acquire 全走幂等快路径（不清信号），「接锁清残留信号」
+    /// 分支就再也覆盖不到——本地开发机因常驻真实托盘恰好测不出来
+    /// （三平台 CI 同时翻车、本机全绿的根因，v0.15.2）。
+    #[cfg(test)]
+    pub(crate) fn release_held_for_tests() {
+        *HELD.lock().unwrap() = [None, None, None];
+    }
+
     /// 两个进程抢同一用途：先拿者胜，后者 false 且留下 raise 信号（可唤起
     /// 用途）。测试内用子进程模拟「别的持有者」不现实（锁是进程级语义），
     /// 这里验证的是「已持锁时重复 acquire 幂等」与「未持锁时能拿到」。
@@ -354,6 +365,9 @@ mod tests {
     #[test]
     fn quit_signal_consumed_once_and_cleared_on_acquire() {
         let _g = serial();
+        // 先还原「本进程未持锁」：先跑的测试若已持有 Settings 锁，acquire
+        // 会走幂等快路径（不清信号），下面的清残留断言就失真
+        release_held_for_tests();
         std::fs::create_dir_all(quit_path(Kind::Settings).parent().unwrap()).unwrap();
         // 无窗口时留下的残留 quit 信号
         std::fs::write(quit_path(Kind::Settings), b"1").unwrap();
