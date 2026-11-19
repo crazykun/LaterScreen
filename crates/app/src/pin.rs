@@ -264,6 +264,9 @@ pub struct PinApp {
     drag: Option<DragState>,
     /// 屏幕缩放比（物理像素/逻辑点），QueryPointer 物理坐标换算逻辑点用
     scale: f32,
+    /// 窗口左上角的屏幕逻辑点，随拖动更新。「编辑」→ 标注窗 → OCR 交付
+    /// 合体窗时钉回这里（Wayland 由合成器接管拖动，这里只保留启动值）
+    pos: (f32, f32),
     /// 是否置顶（工具条可切换；建窗时 with_always_on_top，初始为 true）
     topmost: bool,
     /// 原始图片文件路径（`-i` 传入时）；stdin 传入为 None。保存时据此记
@@ -328,6 +331,9 @@ pub struct PinLaunch {
     pub h: u32,
     /// 物理像素/逻辑点（覆盖层交付时传屏幕缩放比）
     pub scale: f32,
+    /// 窗口左上角的屏幕逻辑点（`--pos`）。「编辑」接力给标注窗，OCR 交付时
+    /// 把合体窗钉回同一位置；拖动窗口时同步更新
+    pub pos: (f32, f32),
     /// 系统字体字节（贴图是独立进程，必须自己挂中文字体）
     pub font: Option<Vec<u8>>,
     /// 原图文件路径（`-i` 传入时）；stdin 传入为 None。保存时记历史源文件
@@ -347,6 +353,7 @@ impl PinApp {
             w,
             h,
             scale,
+            pos,
             font,
             source,
             ocr_seed,
@@ -393,6 +400,7 @@ impl PinApp {
             toast: None,
             drag: None,
             scale,
+            pos,
             topmost: true,
             source,
             native,
@@ -447,7 +455,10 @@ impl PinApp {
             self.toast(ctx, format!("编码 PNG 失败: {e}"));
             return;
         }
-        match crate::spawn_annotate_stdin(&png) {
+        // 带上当前落点与缩放：标注窗里点 OCR 后，「贴图+识别结果面板」
+        // 合体窗会钉回这里（见 ui::SnipApp::scan_ocr 的 pin_handoff 分支）
+        let from_pin = Some((self.pos.0, self.pos.1, self.scale));
+        match crate::spawn_annotate_stdin(&png, from_pin) {
             Ok(()) => {
                 self.toast(ctx, "已进入标注窗");
                 // 编辑是窗口接力：标注窗成功启动后关闭当前贴图，避免两个
@@ -1647,6 +1658,8 @@ impl eframe::App for PinApp {
                     if target != d.sent {
                         ctx.send_viewport_cmd(ViewportCommand::OuterPosition(target));
                         d.sent = target;
+                        // 记录实时落点：「编辑」接力时把合体窗钉回当前位置
+                        self.pos = (target.x, target.y);
                         // 移动可能伴随 WM 的 ConfigureNotify 重置输入形状，
                         // 强制下一帧按最新 client 几何重发底部条带
                         self.through_shape = None;

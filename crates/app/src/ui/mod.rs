@@ -149,6 +149,11 @@ pub struct OverlayInit {
     /// 跨屏覆盖层（仅 Linux X11）：建窗后设 _NET_WM_FULLSCREEN_MONITORS，
     /// 让 fullscreen 窗口从单屏扩展到全部显示器，可跨屏框选
     pub span_monitors: bool,
+    /// 从贴图「编辑」接力的标注窗：原贴图窗口位置（屏幕逻辑点）+ 缩放比。
+    /// Some 时 OCR 成功不再开独立结果窗口，改交付「贴图 + 识别结果面板」
+    /// 合体窗钉回原贴图位置，并关闭本标注窗（与覆盖层 OCR 同一交付语义，
+    /// 2026-11-19 真机反馈「结果是个单独的窗口」）。
+    pub pin_handoff: Option<(f32, f32, f32)>,
 }
 
 pub struct SnipApp {
@@ -212,6 +217,8 @@ pub struct SnipApp {
     pub config: Config,
     /// Mode::Record 专用：框选完成后的输出通道
     pub record_region: Option<SharedRegion>,
+    /// 从贴图「编辑」接力：OCR 交付回原贴图位置（见 [`OverlayInit::pin_handoff`]）
+    pin_handoff: Option<(f32, f32, f32)>,
     /// 标注预览模式（滚动长截图）：窗口非全屏、画布可滚动、工具栏锚窗口底部
     pub preview: bool,
     /// 预览画布缩放；0.0 = 首帧按窗口宽自适应（≤100%）
@@ -283,6 +290,7 @@ impl SnipApp {
             initial_region,
             preview,
             span_monitors: _,
+            pin_handoff,
         } = init;
         let renderer = Renderer::new(font);
         // 默认工具与样式来自配置（M8）
@@ -355,6 +363,7 @@ impl SnipApp {
             close_requested: false,
             config,
             record_region,
+            pin_handoff,
             preview,
             preview_zoom: 0.0,
             last_view: View {
@@ -949,25 +958,39 @@ impl SnipApp {
             self.toast(ctx, "识别进行中…");
             return;
         }
-        let Some((rgba, w, h)) = export::crop_rgba(
-            &self.shot.rgba,
-            self.shot.width,
-            self.shot.height,
-            self.region,
-        ) else {
+        // 从贴图「编辑」接力来的标注窗：识别与交付都用合成后的图（含标注），
+        // 与「贴图」按钮同一产物；覆盖层/滚动预览保持原图裁剪（识别精度优先）
+        let composed = if self.pin_handoff.is_some() {
+            self.compose_for_export()
+        } else {
+            export::crop_rgba(
+                &self.shot.rgba,
+                self.shot.width,
+                self.shot.height,
+                self.region,
+            )
+        };
+        let Some((rgba, w, h)) = composed else {
             self.toast(ctx, "选区为空");
             return;
         };
         self.remember_selection();
-        // 覆盖层模式（preview=false）识别成功改走「贴图 + 面板」单进程交付：
-        // 贴图钉回选区原位（原图对照），识别全文经 --ocr-text 带进贴图右侧
-        // 面板（不再开独立结果窗）
-        let deliver = !self.preview;
-        let deliver_pos = (
-            (self.shot.origin.0 as f32 + self.region.min.x) / self.shot.scale,
-            (self.shot.origin.1 as f32 + self.region.min.y) / self.shot.scale,
-        );
-        let deliver_scale = self.shot.scale;
+        // 覆盖层模式（preview=false）与「贴图编辑接力」标注窗识别成功都改走
+        // 「贴图 + 面板」单进程交付：贴图钉回原位（原图对照），识别全文经
+        // --ocr-text 带进贴图右侧面板（不再开独立结果窗）
+        let deliver = !self.preview || self.pin_handoff.is_some();
+        // 接力窗的落点沿用原贴图的位置/缩放（其 shot.origin = (0,0)、
+        // scale = 1.0，按选区换算会把合体窗钉到屏幕左上角）
+        let (deliver_pos, deliver_scale) = match self.pin_handoff {
+            Some((x, y, s)) => ((x, y), s),
+            None => (
+                (
+                    (self.shot.origin.0 as f32 + self.region.min.x) / self.shot.scale,
+                    (self.shot.origin.1 as f32 + self.region.min.y) / self.shot.scale,
+                ),
+                self.shot.scale,
+            ),
+        };
         self.spawn_scan(ctx, move || {
             // 已打开的标注窗也读取最新保存值；构造/探测（含 tesseract 子进程）、
             // 首次模型下载与推理全部留在 worker，不能阻塞 UI 线程。

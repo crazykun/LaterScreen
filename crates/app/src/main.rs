@@ -414,6 +414,14 @@ enum Cmd {
         /// 图片文件路径（PNG）；缺省从 stdin 读 PNG
         #[arg(short, long)]
         input: Option<PathBuf>,
+        /// 从贴图「编辑」接力：原贴图窗口位置（屏幕逻辑点，"x,y"）。与
+        /// --from-pin-scale 同时给出时，OCR 成功交付「贴图+识别结果面板」
+        /// 合体窗钉回原位，而不是开独立结果窗口
+        #[arg(long)]
+        from_pin_pos: Option<String>,
+        /// 原贴图的屏幕缩放比（物理像素/逻辑点），同 --from-pin-pos
+        #[arg(long)]
+        from_pin_scale: Option<f32>,
     },
 }
 
@@ -673,7 +681,11 @@ fn main() {
         Some(Cmd::Config) => run_settings(),
         Some(Cmd::History) => run_history(),
         Some(Cmd::Upload { file }) => run_upload(file),
-        Some(Cmd::Annotate { input }) => run_annotate(input),
+        Some(Cmd::Annotate {
+            input,
+            from_pin_pos,
+            from_pin_scale,
+        }) => run_annotate(input, from_pin_pos, from_pin_scale),
     };
     if let Err(e) = result {
         report_fatal(&format!("lscreen: {e}"));
@@ -895,6 +907,7 @@ fn pick_region_interactive() -> Result<Option<String>, String> {
                     initial_region: initial,
                     preview: false,
                     span_monitors: spanning,
+                    pin_handoff: None,
                 },
             )))
         }),
@@ -1106,6 +1119,7 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
                     initial_region: initial,
                     preview: false,
                     span_monitors: spanning,
+                    pin_handoff: None,
                 },
             )))
         }),
@@ -1170,6 +1184,7 @@ fn run_gui_wayland() -> Result<(), String> {
                     initial_region: None,
                     preview: true,
                     span_monitors: false,
+                    pin_handoff: None,
                 },
             )))
         }),
@@ -2272,19 +2287,30 @@ fn run_scroll(
             let mut png = Vec::new();
             full.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
                 .map_err(|e| format!("编码预览 PNG 失败: {e}"))?;
-            spawn_annotate_stdin(&png)
+            spawn_annotate_stdin(&png, None)
         }
     }
 }
 
 /// 把拼接结果 PNG 经 stdin 交给独立的标注预览进程（见 run_annotate）。
 /// 子进程先读完 stdin 再开窗，write_all 阻塞到对端读走为止，无死锁。
-pub(crate) fn spawn_annotate_stdin(png: &[u8]) -> Result<(), String> {
+/// `from_pin` = 从贴图「编辑」接力时的原贴图位置（屏幕逻辑点）与缩放比：
+/// 标注窗 OCR 成功后按它把「贴图 + 结果面板」合体窗钉回原位；滚动拼接
+/// 预览传 None（OCR 仍走独立结果窗口）。
+pub(crate) fn spawn_annotate_stdin(
+    png: &[u8],
+    from_pin: Option<(f32, f32, f32)>,
+) -> Result<(), String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let mut child = Command::new(exe)
-        .arg("annotate")
+    let mut cmd = Command::new(exe);
+    cmd.arg("annotate");
+    if let Some((x, y, scale)) = from_pin {
+        cmd.arg("--from-pin-pos").arg(format!("{x},{y}"));
+        cmd.arg("--from-pin-scale").arg(scale.to_string());
+    }
+    let mut child = cmd
         .stdin(Stdio::piped())
         .spawn()
         .map_err(|e| format!("启动预览进程失败: {e}"))?;
@@ -2339,7 +2365,22 @@ pub(crate) fn spawn_pin_file(
 /// 标注预览窗口：把已有图片开进带完整工具栏的标注窗（保存/复制/贴图/
 /// OCR/二维码）。滚动截图拼接结果的内部预览入口——独立进程跑，因为拼接
 /// 进程已消耗过自己的事件循环额度（macOS 限制），见 run_scroll。
-fn run_annotate(input: Option<PathBuf>) -> Result<(), String> {
+fn run_annotate(
+    input: Option<PathBuf>,
+    from_pin_pos: Option<String>,
+    from_pin_scale: Option<f32>,
+) -> Result<(), String> {
+    // 从贴图「编辑」接力：位置与缩放必须成对给出，否则不是接力场景
+    let from_pin = match (from_pin_pos, from_pin_scale) {
+        (Some(pos), Some(scale)) => {
+            let p = parse_pos(&pos)?;
+            if !scale.is_finite() || scale <= 0.0 {
+                return Err("无效的 --from-pin-scale（应为正数）".into());
+            }
+            Some((p.x, p.y, scale))
+        }
+        _ => None,
+    };
     // 标注窗仍走覆盖层单例（pick/record/scroll/annotate 族互斥，R11 未
     // 放开——拼接产物同样要干净像素；普通截图覆盖层 gui 不持锁）。
     // stdin 场景（滚动拼接转交）必须**先读完再判断**——父进程 write_all
@@ -2409,6 +2450,7 @@ fn run_annotate(input: Option<PathBuf>) -> Result<(), String> {
                     initial_region: None,
                     preview: true,
                     span_monitors: false,
+                    pin_handoff: from_pin,
                 },
             )))
         }),
@@ -2537,6 +2579,7 @@ fn run_pin(
                     w,
                     h,
                     scale,
+                    pos: (pos.x, pos.y),
                     font: font::load_system_font(),
                     source,
                     ocr_seed,

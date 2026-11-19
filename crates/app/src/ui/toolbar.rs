@@ -105,19 +105,28 @@ pub fn show(app: &mut SnipApp, ctx: &egui::Context) {
         (x, y)
     };
 
-    egui::Area::new(egui::Id::new("toolbar"))
-        .fixed_pos(Pos2::new(x, y))
-        .order(egui::Order::Foreground)
-        .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                if record_adjust {
-                    record_bar_contents(app, ui, ctx);
-                } else {
-                    ui.set_max_width(bar_width);
-                    bar_contents(app, ui, ctx);
-                }
-            });
+    // 标注/预览窗：工具条按**自身内容宽度**在窗口底部居中。anchor 只改定位
+    // 不改尺寸——Area 的 content_ui 宽 = 上一帧内容宽（state.rect），单行判定
+    // 与 fixed_pos 时完全一致，不会因此换行；约束矩形默认 ctx.content_rect()
+    // （本窗口），所以是相对窗口底部居中而非整屏。原来的 fixed_pos 用 BAR_W
+    // 估算宽度居中，窗口窄于 BAR_W 时工具条几乎铺满窗口，内容又左对齐，视觉
+    // 上贴着左边框（2026-11-19 真机反馈）
+    let area = egui::Area::new(egui::Id::new("toolbar")).order(egui::Order::Foreground);
+    let area = if app.preview {
+        area.anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -6.0))
+    } else {
+        area.fixed_pos(Pos2::new(x, y))
+    };
+    area.show(ctx, |ui| {
+        egui::Frame::popup(ui.style()).show(ui, |ui| {
+            if record_adjust {
+                record_bar_contents(app, ui, ctx);
+            } else {
+                ui.set_max_width(bar_width);
+                bar_contents(app, ui, ctx);
+            }
         });
+    });
 }
 
 /// Record（录屏/滚动截图框选）调整阶段的精简条：操作提示 + 取消/确认。
@@ -1399,6 +1408,7 @@ mod tests {
             initial_region: None,
             preview,
             span_monitors: false,
+            pin_handoff: None,
         });
         app.tool = tool;
         let ctx = egui::Context::default();
