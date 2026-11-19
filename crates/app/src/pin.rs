@@ -1176,13 +1176,53 @@ impl PinApp {
                                     {
                                         act = Some(PanelAction::Close);
                                     }
-                                    if ui
-                                        .add_enabled(
-                                            matches!(state, Some(OcrPanel::Done { .. })),
-                                            egui::Button::new("复制全部"),
-                                        )
+                                    let copy_enabled = matches!(state, Some(OcrPanel::Done { .. }));
+                                    let (copy_rect, copy_resp) = ui.allocate_exact_size(
+                                        egui::vec2(68.0, crate::ui::toolbar::BTN),
+                                        egui::Sense::click(),
+                                    );
+                                    let copy_vis = if copy_enabled {
+                                        ui.style().interact(&copy_resp)
+                                    } else {
+                                        &ui.style().visuals.widgets.noninteractive
+                                    };
+                                    ui.painter().rect_filled(
+                                        copy_rect,
+                                        4.0,
+                                        if copy_resp.hovered() && copy_enabled {
+                                            copy_vis.weak_bg_fill
+                                        } else {
+                                            ui.style().visuals.extreme_bg_color
+                                        },
+                                    );
+                                    let copy_galley = ui.painter().layout_no_wrap(
+                                        "复制全部".into(),
+                                        egui::FontId::proportional(12.0),
+                                        if copy_enabled {
+                                            copy_vis.fg_stroke.color
+                                        } else {
+                                            ui.visuals().weak_text_color()
+                                        },
+                                    );
+                                    let copy_base = copy_rect.center().y
+                                        + crate::ui::cap_ratio() * 12.0 * 0.5;
+                                    let copy_y = copy_galley
+                                        .rows
+                                        .first()
+                                        .and_then(|r| r.glyphs.first().map(|g| g.pos.y))
+                                        .unwrap_or(copy_galley.size().y * 0.5);
+                                    ui.painter().galley(
+                                        egui::Pos2::new(
+                                            copy_rect.center().x - copy_galley.size().x * 0.5,
+                                            copy_base - copy_y,
+                                        ),
+                                        copy_galley,
+                                        copy_vis.fg_stroke.color,
+                                    );
+                                    if copy_resp
                                         .on_hover_text("复制全文到剪贴板")
                                         .clicked()
+                                        && copy_enabled
                                     {
                                         act = Some(PanelAction::CopyAll);
                                     }
@@ -1207,9 +1247,12 @@ impl PinApp {
                                         // 进程按键门控不抢：见 ui() 注释）
                                         let mut shown = text.clone();
                                         let fv = ui.visuals().clone();
+                                        let text_w = ui.available_width();
+                                        let text_h = ui.available_height().max(120.0);
                                         ui.add(
                                             egui::TextEdit::multiline(&mut shown)
-                                                .desired_width(ui.available_width())
+                                                .desired_width(text_w)
+                                                .min_size(egui::vec2(text_w, text_h))
                                                 .margin(egui::Margin::same(8))
                                                 // egui 0.35 的 frame 收 Frame 实参：
                                                 // 文本区惯例底色（extreme_bg）+
