@@ -1014,8 +1014,7 @@ impl PinApp {
                         .first()
                         .and_then(|r| r.glyphs.first().map(|g| g.pos.y))
                         .unwrap_or_else(|| galley.size().y * 0.5);
-                    let baseline =
-                        slot.center().y + crate::ui::canvas::cap_ratio() * 12.0 * 0.5;
+                    let baseline = slot.center().y + crate::ui::cap_ratio() * 12.0 * 0.5;
                     ui.painter().galley(
                         egui::Pos2::new(
                             slot.center().x - galley.size().x * 0.5,
