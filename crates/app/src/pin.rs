@@ -1214,7 +1214,8 @@ impl PinApp {
     /// 调用方（App::ui 的根 painter，egui 0.35 无 Context::painter）先画，
     /// 这里只叠内容。`panel_rect` 由调用方按「窗口右侧 − 底部条带」切出，
     /// 宽度即 [`PANEL_W`]（WM 未服从放大时为 0，见 ui() 的 side_w 反推）。
-    fn show_ocr_panel(&mut self, ctx: &egui::Context, panel_rect: Rect, reveal: f32) {
+    fn show_ocr_panel(&mut self, ui: &mut egui::Ui, panel_rect: Rect, reveal: f32) {
+        let ctx = ui.ctx().clone();
         // 关闭方向不做淡出：panel_open 翻 false 的同一帧立即不绘内容
         if !self.panel_open || panel_rect.width() <= 0.5 || reveal <= 0.5 {
             return;
@@ -1238,12 +1239,14 @@ impl PinApp {
             ),
         );
 
-        // ---- 标题区：只一行状态文字，与正文彻底解耦
-        egui::Area::new(egui::Id::new("pin-ocr-header"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(panel_rect.min)
-            .movable(false)
-            .show(ctx, |ui| {
+        // ---- 标题区：只一行状态文字，与正文彻底解耦。
+        // 不开独立 layer 的 Area：Area 的 move_response 会在命中搜索里阻断
+        // 下层（egui hit_test.rs「指针被覆盖即停止向下查找」），面板区域永远
+        // 收不到窗口拖动——movable(false)、Label selectable(false) 都绕不开
+        // （2026-11-19 三轮真机反馈「拖不动」）。改在根 Ui 内按绝对矩形建子
+        // Ui（scope_builder），没有额外汇 layer，拖动自然落回根响应；回归
+        // 测试见 tests::panel_overlay_does_not_block_root_drag
+        ui.scope_builder(egui::UiBuilder::new().max_rect(panel_rect), |ui| {
                 ui.set_clip_rect(clip);
                 ui.set_max_width(panel_rect.width());
                 let muted = ui.visuals().weak_text_color();
@@ -1280,15 +1283,12 @@ impl PinApp {
                     });
             });
 
-        // ---- 正文区：独立绝对定位 Area。卡片背景按 body_rect 画（必然撑满
-        // 面板剩余高度），文字在卡片内滚动，padding 由 TextEdit margin 提供。
-        // 之前把 TextEdit 放在 Frame 布局流内，available_height 收缩到内容
-        // 高度，min_size 被吞掉——所以一直撑不满（2026-11-19 反复反馈）。
-        egui::Area::new(egui::Id::new("pin-ocr-body"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(body_rect.min)
-            .movable(false)
-            .show(ctx, |ui| {
+        // ---- 正文区：根 Ui 内的绝对定位子 Ui（同标题区，不用 Area）。卡片
+        // 背景按 body_rect 画（必然撑满面板剩余高度），文字在卡片内滚动，
+        // padding 由 TextEdit frame 提供。之前把 TextEdit 放在 Frame 布局流
+        // 内，available_height 收缩到内容高度，min_size 被吞掉——所以一直
+        // 撑不满（2026-11-19 反复反馈）。
+        ui.scope_builder(egui::UiBuilder::new().max_rect(body_rect), |ui| {
                 ui.set_clip_rect(clip);
                 ui.set_min_width(body_rect.width());
                 ui.set_max_width(body_rect.width());
@@ -1379,7 +1379,7 @@ impl PinApp {
                 }
             });
         match act {
-            Some(PanelAction::Retry) => self.start_ocr(ctx),
+            Some(PanelAction::Retry) => self.start_ocr(&ctx),
             None => {}
         }
     }
@@ -1716,7 +1716,7 @@ impl eframe::App for PinApp {
         }
 
         self.show_toolbar(&ctx, bar_rect, toolbar_anchor_x);
-        self.show_ocr_panel(&ctx, panel_rect, reveal);
+        self.show_ocr_panel(ui, panel_rect, reveal);
         self.show_through_confirmation(&ctx);
         self.show_toast(&ctx);
 
@@ -1963,6 +1963,52 @@ mod tests {
             }
         }
         v
+    }
+
+    /// 面板覆盖层不得阻断根响应的窗口拖动（2026-11-19 三轮真机反馈「面板上
+    /// 拖不动」）。根因：egui 的命中搜索在指针被某 widget 覆盖时停止向下层
+    /// 查找（hit_test.rs 的 included_layers 早退），独立 layer 的 Area 即使
+    /// movable(false) 也会把根响应排除在候选之外——本测试的 Area 版本实测
+    /// 失败，改 scope_builder（根 Ui 内的绝对定位子 Ui）后通过。生产代码见
+    /// show_ocr_panel；工具条 Area 刻意保留独立 layer，否则按钮上的拖动会
+    /// 穿透给根响应（hit_test.rs 的 click/drag 双命中分支），违背「按钮只
+    /// 点击不拖动」。
+    #[test]
+    fn panel_overlay_does_not_block_root_drag() {
+        use std::cell::Cell;
+        let full = Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 400.0));
+        let panel = Rect::from_min_size(Pos2::new(400.0, 0.0), Vec2::new(200.0, 400.0));
+
+        // 对照组（无面板）必须先成立，否则是输入模拟本身有问题
+        for with_panel in [false, true] {
+            let ctx = egui::Context::default();
+            let dragged = Cell::new(false);
+            let frame = |events: Vec<egui::Event>| {
+                let input = egui::RawInput {
+                    screen_rect: Some(full),
+                    events,
+                    ..Default::default()
+                };
+                let _ = ctx.run_ui(input, |ui| {
+                    let root = ui.allocate_rect(full, egui::Sense::click_and_drag());
+                    if with_panel {
+                        ui.scope_builder(egui::UiBuilder::new().max_rect(panel), |ui| {
+                            ui.add(egui::Label::new("识别结果").selectable(false));
+                        });
+                    }
+                    dragged.set(root.dragged());
+                });
+            };
+            frame(vec![]);
+            frame(vec![egui::Event::PointerButton {
+                pos: Pos2::new(500.0, 100.0),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+            frame(vec![egui::Event::PointerMoved(Pos2::new(530.0, 140.0))]);
+            assert!(dragged.get(), "with_panel={with_panel}：拖动应落到根响应");
+        }
     }
 
     #[test]
