@@ -1451,10 +1451,10 @@ impl eframe::App for PinApp {
         // 后台 OCR 结果轮询（同上，识别中顺带保活重绘出转圈动画）
         self.poll_ocr(&ctx);
 
-        // 整个上方客户区（图像 + 面板 + 四周框）都可拖动；唯一排除底部
-        // 工具栏按钮条。面板上的 TextEdit/ScrollArea 在前景 Area 中仍优先
-        // 处理点击、选字和滚动，空白面板区域则落回这个拖动响应。
-        let drag_rect = Rect::from_min_max(full.min, Pos2::new(full.max.x, bar_rect.min.y));
+        // 整个窗口客户区都可拖动；底部工具栏的红框按钮由前景 Area 的
+        // 独立 widget 消费点击，因此红框内只点击，红框外（包括工具栏两侧
+        // 空白）都能拖动。面板正文/滚动控件同样优先消费自己的交互。
+        let drag_rect = full;
         let response = ui.allocate_rect(drag_rect, egui::Sense::click_and_drag());
         // 内边距「框」底色：与条带同色，图像浮在框上（R8）
         ui.painter()
