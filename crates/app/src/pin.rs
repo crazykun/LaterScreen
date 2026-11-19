@@ -1330,12 +1330,17 @@ impl eframe::App for PinApp {
         // OS 按窗口边界裁掉，无需手动裁剪。动画未完持续请求重绘
         let target = if side_w > 0.0 { 1.0 } else { 0.0 };
         let dt = ctx.input(|i| i.stable_dt).max(1.0 / 120.0);
-        self.panel_anim += (target - self.panel_anim) * (1.0 - (-dt / 0.12).exp());
-        self.panel_anim = self.panel_anim.clamp(0.0, 1.0);
-        if (target - self.panel_anim).abs() > 0.005 {
-            ctx.request_repaint_after(std::time::Duration::from_millis(8));
+        // 面板只做展开动画；关闭时立即撤掉内容和底色，避免窗口收窄前出现
+        // 一帧「面板淡出/闪烁」（用户反馈 2026-11-19）。
+        if !self.panel_open {
+            self.panel_anim = 0.0;
+        } else {
+            self.panel_anim += (target - self.panel_anim) * (1.0 - (-dt / 0.12).exp());
+            self.panel_anim = self.panel_anim.clamp(0.0, 1.0);
+            if (target - self.panel_anim).abs() > 0.005 {
+                ctx.request_repaint_after(std::time::Duration::from_millis(8));
+            }
         }
-        // 从左往右揭示（用户偏好）：内容不移动，裁剪窗自分隔线向右长出
         let reveal = side_w * self.panel_anim;
         // 收起方向的过渡帧对齐：panel_open 已翻 false 而 WM 尚未落地
         // InnerSize（窗口仍含面板宽度）时，图像区恒按基准宽**左锚**钳制
