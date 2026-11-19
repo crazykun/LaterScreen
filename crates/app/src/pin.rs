@@ -992,6 +992,7 @@ impl PinApp {
             .order(egui::Order::Foreground)
             .fixed_pos(pos)
             .interactable(true)
+            .movable(false)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = Vec2::splat(2.0);
@@ -1128,6 +1129,7 @@ impl PinApp {
                 .order(egui::Order::Foreground)
                 .fixed_pos(right)
                 .interactable(true)
+                .movable(false)
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::splat(2.0);
@@ -1240,6 +1242,7 @@ impl PinApp {
         egui::Area::new(egui::Id::new("pin-ocr-header"))
             .order(egui::Order::Foreground)
             .fixed_pos(panel_rect.min)
+            .movable(false)
             .show(ctx, |ui| {
                 ui.set_clip_rect(clip);
                 ui.set_max_width(panel_rect.width());
@@ -1271,6 +1274,7 @@ impl PinApp {
         egui::Area::new(egui::Id::new("pin-ocr-body"))
             .order(egui::Order::Foreground)
             .fixed_pos(body_rect.min)
+            .movable(false)
             .show(ctx, |ui| {
                 ui.set_clip_rect(clip);
                 ui.set_min_width(body_rect.width());
@@ -1364,6 +1368,7 @@ impl PinApp {
         egui::Area::new(egui::Id::new("pin-toast"))
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -(BAR_H + 10.0)))
+            .movable(false)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style())
                     .fill(Color32::from_black_alpha(200))
@@ -1537,6 +1542,13 @@ impl eframe::App for PinApp {
         // 整个窗口客户区都可拖动；底部工具栏的红框按钮由前景 Area 的
         // 独立 widget 消费点击，因此红框内只点击，红框外（包括工具栏两侧
         // 空白）都能拖动。面板正文/滚动控件同样优先消费自己的交互。
+        //
+        // 前景装饰 Area（工具条/面板/toast）一律 `.movable(false)`：egui 的
+        // Area 默认 movable=true，会注册 Sense::DRAG 的 move_response 把拖动
+        // 整片吞掉却不移动（窗口位置由下面的根响应统一负责），表现为「面板
+        // 上怎么拖都不动」（2026-11-19 真机反馈）。关掉后 Area 只消费点击，
+        // 拖动沿命中链落回根响应；OCR 正文的 TextEdit 仍持自己的 drag 用于
+        // 选中文字——**文字区拖动 = 选词，面板其余位置拖动 = 移窗**。
         let drag_rect = full;
         let response = ui.allocate_rect(drag_rect, egui::Sense::click_and_drag());
         // 内边距「框」底色：与条带同色，图像浮在框上（R8）
