@@ -302,6 +302,9 @@ pub struct PinApp {
     /// 右侧「识别结果」面板是否展开。展开/收起会增减窗口宽度（R3），
     /// 面板内容见 [`PinApp::ocr`]
     panel_open: bool,
+    /// 面板滑入动画进度（0..1，1=到位）。InnerSize 落地（side_w>0）后从
+    /// 右缘滑到位，消除「窗口跳宽 + 面板瞬现」的闪动感
+    panel_anim: f32,
     /// 面板内容状态：None = 尚未识别过（点「识别文字」开始）
     ocr: Option<OcrPanel>,
     /// 后台 OCR 任务（线程 + channel，与 upload_job 同款唤醒模式）：
@@ -404,6 +407,7 @@ impl PinApp {
             upload_job: None,
             upload_filename: None,
             panel_open: ocr.is_some(),
+            panel_anim: 0.0,
             ocr,
             ocr_job: None,
         }
@@ -1281,6 +1285,17 @@ impl eframe::App for PinApp {
             0.0
         };
         let split_y = (full.max.y - BAR_H).max(full.min.y);
+        // 面板滑入动画：InnerSize 落地（side_w>0）后内容从右缘滑到位（约
+        // 150ms 指数趋近），期间图像区/工具栏纹丝不动；滑出窗口外的部分由
+        // OS 按窗口边界裁掉，无需手动裁剪。动画未完持续请求重绘
+        let target = if side_w > 0.0 { 1.0 } else { 0.0 };
+        let dt = ctx.input(|i| i.stable_dt).max(1.0 / 120.0);
+        self.panel_anim += (target - self.panel_anim) * (1.0 - (-dt / 0.12).exp());
+        self.panel_anim = self.panel_anim.clamp(0.0, 1.0);
+        if (target - self.panel_anim).abs() > 0.005 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(8));
+        }
+        let slide = (1.0 - self.panel_anim) * side_w;
         // 收起方向的过渡帧对齐：panel_open 已翻 false 而 WM 尚未落地
         // InnerSize（窗口仍含面板宽度）时，图像区恒按基准宽**左锚**钳制
         // ——否则中心锚会让图像整体右移 PANEL_W/2 再弹回一帧。展开方向
@@ -1293,8 +1308,8 @@ impl eframe::App for PinApp {
         let img_area = Rect::from_min_max(full.min, Pos2::new(full.min.x + img_w, split_y));
         let image_rect = img_area.shrink(PAD);
         let panel_rect = Rect::from_min_max(
-            Pos2::new(img_area.max.x, full.min.y),
-            Pos2::new(full.max.x, split_y),
+            Pos2::new(img_area.max.x + slide, full.min.y),
+            Pos2::new(img_area.max.x + slide + side_w, split_y),
         );
         let bar_rect = Rect::from_min_max(Pos2::new(full.min.x, split_y), full.max);
         // 工具栏锚定**图像区**中心：面板开合改变全宽，若按全宽居中，
