@@ -102,7 +102,39 @@ fn dispatch(a: Action) -> bool {
     true
 }
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static LAST_GUI_LAUNCH_MS: AtomicU64 = AtomicU64::new(0);
+
+fn allow_gui_launch() -> bool {
+    let now = std::time::Instant::now();
+    // Instant 不能跨线程原子存储，用单调时钟起点后的毫秒值；托盘进程
+    // 存活期内不会溢出。CAS 防并发热键/菜单事件同时穿过节流门。
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let epoch = *EPOCH.get_or_init(std::time::Instant::now);
+    let ms = now.duration_since(epoch).as_millis() as u64;
+    loop {
+        let old = LAST_GUI_LAUNCH_MS.load(Ordering::Relaxed);
+        if ms.saturating_sub(old) < 800 {
+            return false;
+        }
+        if LAST_GUI_LAUNCH_MS
+            .compare_exchange(old, ms, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            return true;
+        }
+    }
+}
+
 fn spawn_detached(args: &[&str]) {
+    // 普通截图允许多层并存，但覆盖层启动有一段「截屏/枚举窗口/建窗」
+    // 的准备窗口；连续按 F1 时若无限 spawn，会表现为先没反应、稍后突然
+    // 弹出一群覆盖层。只对托盘派发的 gui 启动做 800ms 节流，不恢复
+    // 覆盖层运行期的单例——准备完成后仍可再次按 F1 开新层。
+    if args.first() == Some(&"gui") && !allow_gui_launch() {
+        return;
+    }
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => {
