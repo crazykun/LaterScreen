@@ -1451,11 +1451,11 @@ impl eframe::App for PinApp {
         // 后台 OCR 结果轮询（同上，识别中顺带保活重绘出转圈动画）
         self.poll_ocr(&ctx);
 
-        // 图像区（含内边距「框」）响应窗口拖动/双击复制；右侧面板与底部
-        // 条带不属于本 Response——面板区不触发拖动（R3），按钮点击也不会
-        // 卷入拖动态（此前整窗 click_and_drag 在 Wayland 拖动一次后，
-        // stale drag 会把工具栏点击当成继续移动，按钮全部点不了）
-        let response = ui.allocate_rect(img_area, egui::Sense::click_and_drag());
+        // 整个上方客户区（图像 + 面板 + 四周框）都可拖动；唯一排除底部
+        // 工具栏按钮条。面板上的 TextEdit/ScrollArea 在前景 Area 中仍优先
+        // 处理点击、选字和滚动，空白面板区域则落回这个拖动响应。
+        let drag_rect = Rect::from_min_max(full.min, Pos2::new(full.max.x, bar_rect.min.y));
+        let response = ui.allocate_rect(drag_rect, egui::Sense::click_and_drag());
         // 内边距「框」底色：与条带同色，图像浮在框上（R8）
         ui.painter()
             .rect_filled(img_area, 0.0, ui.visuals().panel_fill);
