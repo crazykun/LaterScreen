@@ -209,11 +209,11 @@ enum OcrPanel {
 }
 
 /// 面板内部控件发出的动作（先收集、闭包外执行，避免借用冲突）。
+/// 复制/收起已收进底部工具栏（ToolbarAction::CopyAll 语义/OCR 开合），
+/// 面板本体只留内容与重试。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PanelAction {
-    CopyAll,
     Retry,
-    Close,
 }
 
 /// 用户点击穿透入口后的下一步。区域穿透可直接应用；整窗穿透在本贴图窗口
@@ -950,12 +950,15 @@ impl PinApp {
             action_button, draw_check, draw_close, draw_ocr, draw_save, draw_upload, icon_button,
         };
         // 图标总宽（与 MIN_TOOLBAR_W 的估值同源）：无上传 11 组 ≈354pt、
-        // 有上传再加 26pt。用于整排水平居中。
-        let shown = if self.upload_cmd.is_some() {
+        // 有上传再加 26pt；OCR 结果面板打开时最右 +「复制全文」46pt。
+        // 用于整排水平居中。
+        let ocr_copy_ready =
+            self.panel_open && matches!(&self.ocr, Some(OcrPanel::Done { .. }));
+        let shown = (if self.upload_cmd.is_some() {
             380.0
         } else {
             354.0
-        };
+        }) + if ocr_copy_ready { 46.0 } else { 0.0 };
         // 锚定图像区中心；图像窄于整排时钳回条带内（不越出窗口）
         let pos = Pos2::new(
             (anchor_x - shown / 2.0).clamp(
@@ -1096,6 +1099,49 @@ impl PinApp {
                     if action_button(ui, true, "复制并关闭 (空格 同款；Ctrl+C/双击 仅复制)", draw_check) {
                         action = Some(ToolbarAction::CopyAndClose);
                     }
+                    // OCR 面板打开且识别完成：最右侧「复制全文」——操作全部
+                    // 收进工具栏，面板本体只留内容（用户反馈 2026-11-19）
+                    if ocr_copy_ready {
+                        let (slot, resp) = ui.allocate_exact_size(
+                            egui::vec2(44.0, crate::ui::toolbar::BTN),
+                            egui::Sense::click(),
+                        );
+                        let slot_vis = ui.style().interact(&resp);
+                        ui.painter().rect_filled(
+                            slot,
+                            4.0,
+                            if resp.hovered() {
+                                slot_vis.weak_bg_fill
+                            } else {
+                                ui.style().visuals.extreme_bg_color
+                            },
+                        );
+                        let galley = ui.painter().layout_no_wrap(
+                            "复制".into(),
+                            egui::FontId::proportional(12.0),
+                            slot_vis.fg_stroke.color,
+                        );
+                        let base = slot.center().y + crate::ui::cap_ratio() * 12.0 * 0.5;
+                        let ink_y = galley
+                            .rows
+                            .first()
+                            .and_then(|r| r.glyphs.first().map(|g| g.pos.y))
+                            .unwrap_or(galley.size().y * 0.5);
+                        ui.painter().galley(
+                            egui::Pos2::new(
+                                slot.center().x - galley.size().x * 0.5,
+                                base - ink_y,
+                            ),
+                            galley,
+                            slot_vis.fg_stroke.color,
+                        );
+                        if resp.on_hover_text("复制识别全文").clicked() {
+                            if let Some(OcrPanel::Done { text, .. }) = &self.ocr {
+                                let _ = crate::export::copy_text_to_clipboard(text);
+                                self.toast(ctx, "已复制全文");
+                            }
+                        }
+                    }
                 });
             });
         match action {
@@ -1167,101 +1213,7 @@ impl PinApp {
                             if let Some(OcrPanel::Done { copied: true, .. }) = &state {
                                 ui.weak(egui::RichText::new("已自动复制").small().color(muted));
                             }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    let (close_rect, close_resp) = ui.allocate_exact_size(
-                                        egui::vec2(crate::ui::toolbar::BTN, crate::ui::toolbar::BTN),
-                                        egui::Sense::click(),
-                                    );
-                                    let close_vis = ui.style().interact(&close_resp);
-                                    ui.painter().rect_filled(
-                                        close_rect,
-                                        4.0,
-                                        if close_resp.hovered() {
-                                            close_vis.weak_bg_fill
-                                        } else {
-                                            ui.style().visuals.extreme_bg_color
-                                        },
-                                    );
-                                    let close_galley = ui.painter().layout_no_wrap(
-                                        "×".into(),
-                                        egui::FontId::proportional(15.0),
-                                        close_vis.fg_stroke.color,
-                                    );
-                                    let close_base = close_rect.center().y
-                                        + crate::ui::cap_ratio() * 15.0 * 0.5;
-                                    let close_y = close_galley
-                                        .rows
-                                        .first()
-                                        .and_then(|r| r.glyphs.first().map(|g| g.pos.y))
-                                        .unwrap_or(close_galley.size().y * 0.5);
-                                    ui.painter().galley(
-                                        egui::Pos2::new(
-                                            close_rect.center().x - close_galley.size().x * 0.5,
-                                            close_base - close_y,
-                                        ),
-                                        close_galley,
-                                        close_vis.fg_stroke.color,
-                                    );
-                                    if close_resp
-                                        .on_hover_text("收起面板（工具条「识别文字」可再展开）")
-                                        .clicked()
-                                    {
-                                        act = Some(PanelAction::Close);
-                                    }
-                                    let copy_enabled = matches!(state, Some(OcrPanel::Done { .. }));
-                                    let (copy_rect, copy_resp) = ui.allocate_exact_size(
-                                        egui::vec2(68.0, crate::ui::toolbar::BTN),
-                                        egui::Sense::click(),
-                                    );
-                                    let copy_vis = if copy_enabled {
-                                        ui.style().interact(&copy_resp)
-                                    } else {
-                                        &ui.style().visuals.widgets.noninteractive
-                                    };
-                                    ui.painter().rect_filled(
-                                        copy_rect,
-                                        4.0,
-                                        if copy_resp.hovered() && copy_enabled {
-                                            copy_vis.weak_bg_fill
-                                        } else {
-                                            ui.style().visuals.extreme_bg_color
-                                        },
-                                    );
-                                    let copy_galley = ui.painter().layout_no_wrap(
-                                        "复制全部".into(),
-                                        egui::FontId::proportional(12.0),
-                                        if copy_enabled {
-                                            copy_vis.fg_stroke.color
-                                        } else {
-                                            ui.visuals().weak_text_color()
-                                        },
-                                    );
-                                    let copy_base = copy_rect.center().y
-                                        + crate::ui::cap_ratio() * 12.0 * 0.5;
-                                    let copy_y = copy_galley
-                                        .rows
-                                        .first()
-                                        .and_then(|r| r.glyphs.first().map(|g| g.pos.y))
-                                        .unwrap_or(copy_galley.size().y * 0.5);
-                                    ui.painter().galley(
-                                        egui::Pos2::new(
-                                            copy_rect.center().x - copy_galley.size().x * 0.5,
-                                            copy_base - copy_y,
-                                        ),
-                                        copy_galley,
-                                        copy_vis.fg_stroke.color,
-                                    );
-                                    if copy_resp
-                                        .on_hover_text("复制全文到剪贴板")
-                                        .clicked()
-                                        && copy_enabled
-                                    {
-                                        act = Some(PanelAction::CopyAll);
-                                    }
-                                },
-                            );
+                            // 操作按钮已收进底部工具栏最右（面板本体=纯内容区）
                         });
                         ui.add_space(6.0);
                         ui.separator();
@@ -1295,8 +1247,10 @@ impl PinApp {
                                         // 进程按键门控不抢：见 ui() 注释）
                                         let mut shown = text.clone();
                                         let fv = ui.visuals().clone();
-                                        let text_w = ui.available_width();
-                                        let text_h = ui.available_height().max(120.0);
+                                        // 高度用外层算好的固定值：ScrollArea 内部的
+                                        // available_height 是无界的，取不到面板剩余高
+                                        let text_w = body_size.x;
+                                        let text_h = body_size.y;
                                         ui.add(
                                             egui::TextEdit::multiline(&mut shown)
                                                 .desired_width(text_w)
@@ -1349,20 +1303,6 @@ impl PinApp {
                     });
             });
         match act {
-            Some(PanelAction::Close) => self.set_panel_open(ctx, false),
-            Some(PanelAction::CopyAll) => {
-                if let Some(OcrPanel::Done { text, .. }) = &self.ocr {
-                    match export::copy_text_to_clipboard(text) {
-                        Ok(()) => {
-                            if let Some(OcrPanel::Done { copied, .. }) = &mut self.ocr {
-                                *copied = true;
-                            }
-                            self.toast(ctx, "已复制全文");
-                        }
-                        Err(e) => self.toast(ctx, format!("复制失败: {e}")),
-                    }
-                }
-            }
             Some(PanelAction::Retry) => self.start_ocr(ctx),
             None => {}
         }
