@@ -195,6 +195,8 @@ enum ToolbarAction {
     Edit,
     /// 识别文字：无结果时=后台识别并打开右侧面板；已有结果时=开/关面板
     ToggleOcr,
+    /// 收起右侧识别结果面板（工具栏最右侧的 |← 按钮）
+    CollapseOcr,
 }
 
 /// 右侧「识别结果」面板的内容状态。`None`（PinApp.ocr）= 尚未识别过。
@@ -950,15 +952,16 @@ impl PinApp {
             action_button, draw_check, draw_close, draw_ocr, draw_save, draw_upload, icon_button,
         };
         // 图标总宽（与 MIN_TOOLBAR_W 的估值同源）：无上传 11 组 ≈354pt、
-        // 有上传再加 26pt；OCR 结果面板打开时最右 +「复制全文」46pt。
-        // 用于整排水平居中。
+        // 有上传再加 26pt。OCR 面板打开时最右 +「收起 |←」26pt，识别完成
+        // 再 +「复制」46pt。用于整排水平居中。
         let ocr_copy_ready =
             self.panel_open && matches!(&self.ocr, Some(OcrPanel::Done { .. }));
         let shown = (if self.upload_cmd.is_some() {
             380.0
         } else {
             354.0
-        }) + if ocr_copy_ready { 46.0 } else { 0.0 };
+        }) + if self.panel_open { 26.0 } else { 0.0 }
+            + if ocr_copy_ready { 46.0 } else { 0.0 };
         // 锚定图像区中心；图像窄于整排时钳回条带内（不越出窗口）
         let pos = Pos2::new(
             (anchor_x - shown / 2.0).clamp(
@@ -1099,6 +1102,13 @@ impl PinApp {
                     if action_button(ui, true, "复制并关闭 (空格 同款；Ctrl+C/双击 仅复制)", draw_check) {
                         action = Some(ToolbarAction::CopyAndClose);
                     }
+                    // OCR 面板打开时：|← 收起文字识别（下载图标旋转 90°：
+                    // 左竖线 = 边界，左箭头 = 把面板推回去收起）
+                    if self.panel_open
+                        && action_button(ui, true, "收起文字识别结果面板", draw_collapse_ocr)
+                    {
+                        action = Some(ToolbarAction::CollapseOcr);
+                    }
                     // OCR 面板打开且识别完成：最右侧「复制全文」——操作全部
                     // 收进工具栏，面板本体只留内容（用户反馈 2026-11-19）
                     if ocr_copy_ready {
@@ -1163,6 +1173,7 @@ impl PinApp {
             Some(ToolbarAction::Upload) => self.do_upload(ctx),
             Some(ToolbarAction::Edit) => self.do_edit(ctx),
             Some(ToolbarAction::ToggleOcr) => self.toggle_ocr(ctx),
+            Some(ToolbarAction::CollapseOcr) => self.set_panel_open(ctx, false),
             _ => {}
         }
     }
@@ -1673,6 +1684,22 @@ const ICON_W: f32 = 1.5;
 /// 以中心等比放大墨水盒：个别手调图标偏小时整体放大，比例坐标不变
 fn grow(r: Rect, k: f32) -> Rect {
     Rect::from_center_size(r.center(), r.size() * k)
+}
+
+/// 收起结果面板：下载图标（↓ + 底横线）顺时针旋转 90° = 左竖线 + 左箭头
+/// 「|←」——把右侧面板推回左边界收起（用户 2026-11-19 指定形状）。
+fn draw_collapse_ocr(p: &egui::Painter, r: Rect, c: Color32) {
+    let s = Stroke::new(ICON_W, c);
+    let w = r.width();
+    let at = |fx: f32, fy: f32| Pos2::new(r.min.x + w * fx, r.min.y + w * fy);
+    // 左竖线（旋转后的「托盘」边界）
+    p.line_segment([at(0.10, 0.14), at(0.10, 0.86)], s);
+    // 向左的水平箭头：杆从右侧延伸到箭头尖端
+    let tip = at(0.34, 0.50);
+    p.line_segment([at(0.90, 0.50), tip], s);
+    // 箭头两翼：从尖端向右上/右下张开（指向左）
+    p.line_segment([tip, at(0.54, 0.30)], s);
+    p.line_segment([tip, at(0.54, 0.70)], s);
 }
 
 fn draw_topmost(p: &egui::Painter, r: Rect, c: Color32) {
