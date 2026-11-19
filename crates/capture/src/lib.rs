@@ -122,6 +122,19 @@ pub fn open_screen_capture_settings() {
     platform::open_screen_capture_settings()
 }
 
+/// 辅助功能授权预检（macOS）：滚动截图注入滚轮需要它，未授权时 CGEventPost
+/// 静默丢弃事件。无副作用、不弹窗。仅 macOS。
+#[cfg(target_os = "macos")]
+pub fn accessibility_trusted() -> bool {
+    platform::accessibility_trusted()
+}
+
+/// 直达 系统设置 ▸ 隐私与安全性 ▸ 辅助功能 面板。仅 macOS。
+#[cfg(target_os = "macos")]
+pub fn open_accessibility_settings() {
+    platform::open_accessibility_settings()
+}
+
 /// 一条要注册的全局热键（Wayland GlobalShortcuts 用）。
 #[cfg(target_os = "linux")]
 pub use platform::ShortcutSpec;

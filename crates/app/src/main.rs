@@ -958,6 +958,21 @@ fn ensure_screen_capture_authorized() -> Result<(), String> {
     )
 }
 
+/// mac：滚动截图要经 CGEventPost 注入滚轮，未授权「辅助功能」时事件被系统
+/// 静默丢弃（scroll_wheel 不报错），用户框选完才发现「怎么都不动」。在滚动
+/// 流程开始前预检，与屏幕录制授权同一处理路径。
+#[cfg(target_os = "macos")]
+fn ensure_accessibility_authorized() -> Result<(), String> {
+    if lscreen_capture::accessibility_trusted() {
+        return Ok(());
+    }
+    lscreen_capture::open_accessibility_settings();
+    Err(
+        "滚动截图需要「辅助功能」权限来模拟滚轮：已打开 系统设置 ▸ 隐私与安全性 ▸ 辅助功能，允许后重新触发即可"
+            .into(),
+    )
+}
+
 fn capture_overlay() -> Result<OverlayShot, String> {
     #[cfg(target_os = "macos")]
     ensure_screen_capture_authorized()?;
@@ -1984,6 +1999,8 @@ fn run_scroll(
 ) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     ensure_screen_capture_authorized()?;
+    #[cfg(target_os = "macos")]
+    ensure_accessibility_authorized()?;
     if !(1..=1000).contains(&steps) {
         return Err("无效的 --steps（应为 1-1000）".into());
     }

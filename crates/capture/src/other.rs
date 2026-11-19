@@ -580,6 +580,26 @@ pub fn open_screen_capture_settings() {
         .spawn();
 }
 
+/// mac：辅助功能（Accessibility）是否已授权。滚动截图要经 CGEventPost
+/// 注入滚轮，未授权时事件被系统**静默丢弃**——scroll_wheel 不会报错，
+/// 表现为「滚动截图完全不动」（2026-11-19 真机反馈）。
+#[cfg(target_os = "macos")]
+pub fn accessibility_trusted() -> bool {
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+    }
+    unsafe { AXIsProcessTrusted() }
+}
+
+/// mac：打开「系统设置 ▸ 隐私与安全性 ▸ 辅助功能」。
+#[cfg(target_os = "macos")]
+pub fn open_accessibility_settings() {
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        .spawn();
+}
+
 /// 交互式截图仅 Wayland 需要；Win/mac 走自绘覆盖层。
 pub fn capture_interactive() -> Result<Option<Screenshot>> {
     Err(CaptureError("当前平台不支持交互式 portal 截图".into()))
