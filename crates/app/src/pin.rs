@@ -1127,9 +1127,10 @@ impl PinApp {
     /// 这里只叠内容。`panel_rect` 由调用方按「窗口右侧 − 底部条带」切出，
     /// 宽度即 [`PANEL_W`]（WM 未服从放大时为 0，见 ui() 的 side_w 反推）。
     fn show_ocr_panel(&mut self, ctx: &egui::Context, panel_rect: Rect, reveal: f32) {
-        // panel_rect 宽度由 ui() 按窗口实际几何反推（side_w）：WM 未服从
-        // 放大时为 0，此时面板内容一并跳过（等下一帧窗口真正变宽再画）
-        if panel_rect.width() <= 0.5 {
+        // 关闭方向不做淡出：panel_open 翻 false 的同一帧立即不绘内容；窗口
+        // 收窄期间 panel_rect 仍可能暂时保留旧宽度，必须同时门控，否则会
+        // 在收窗过渡帧闪出一帧残留面板（用户反馈 2026-11-19）。
+        if !self.panel_open || panel_rect.width() <= 0.5 || reveal <= 0.5 {
             return;
         }
         let busy = self.ocr_job.is_some();
@@ -1524,7 +1525,7 @@ impl eframe::App for PinApp {
         // 实宽判定：面板展开稳态与「收起方向过渡帧」（窗口尚未缩回基准宽，
         // 见上方 img_w 钳制）都铺底——后者铺的是空面板底色，避免窗口右侧
         // 露出一帧未绘背景；两个稳态及展开方向过渡帧该区宽度为 0 自然跳过
-        if panel_rect.width() > 0.5 {
+        if self.panel_open && panel_rect.width() > 0.5 && reveal > 0.5 {
             ui.painter()
                 .rect_filled(panel_rect, 0.0, ui.visuals().panel_fill);
             ui.painter().line_segment(
