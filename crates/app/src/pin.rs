@@ -965,8 +965,7 @@ impl PinApp {
         // 主排宽度（与 MIN_TOOLBAR_W 同源）：无上传 11 组 ≈354pt、有上传
         // 再加 26pt。OCR 的「|← 收起」「复制」两个按钮不进主排，单独右对齐
         // 到条带最右缘（用户 2026-11-19 要求），主排保持图像区中心不变。
-        let ocr_copy_ready =
-            self.panel_open && matches!(&self.ocr, Some(OcrPanel::Done { .. }));
+        let ocr_copy_ready = self.panel_open && matches!(&self.ocr, Some(OcrPanel::Done { .. }));
         let shown = if self.upload_cmd.is_some() {
             380.0
         } else {
@@ -1118,8 +1117,8 @@ impl PinApp {
 
         // OCR 的两个操作按钮单独右对齐到条带最右缘（用户 2026-11-19）：
         // 主排仍居中，|← 收起 + 复制 贴窗口右边，顺序 = 复制在最右。
-        let ocr_actions_w = (if self.panel_open { 26.0 } else { 0.0 })
-            + (if ocr_copy_ready { 46.0 } else { 0.0 });
+        let ocr_actions_w =
+            (if self.panel_open { 26.0 } else { 0.0 }) + (if ocr_copy_ready { 46.0 } else { 0.0 });
         if ocr_actions_w > 0.0 {
             let right = Pos2::new(
                 (bar.max.x - ocr_actions_w - 8.0).max(bar.min.x + 8.0),
@@ -1247,18 +1246,16 @@ impl PinApp {
         // Ui（scope_builder），没有额外汇 layer，拖动自然落回根响应；回归
         // 测试见 tests::panel_overlay_does_not_block_root_drag
         ui.scope_builder(egui::UiBuilder::new().max_rect(panel_rect), |ui| {
-                ui.set_clip_rect(clip);
-                ui.set_max_width(panel_rect.width());
-                let muted = ui.visuals().weak_text_color();
-                egui::Frame::new()
-                    .inner_margin(egui::Margin::same(12))
-                    .show(ui, |ui| {
-                        ui.set_min_height(crate::ui::toolbar::BTN + 4.0);
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new("识别结果").strong().size(14.0),
-                                )
+            ui.set_clip_rect(clip);
+            ui.set_max_width(panel_rect.width());
+            let muted = ui.visuals().weak_text_color();
+            egui::Frame::new()
+                .inner_margin(egui::Margin::same(12))
+                .show(ui, |ui| {
+                    ui.set_min_height(crate::ui::toolbar::BTN + 4.0);
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::Label::new(egui::RichText::new("识别结果").strong().size(14.0))
                                 .wrap_mode(egui::TextWrapMode::Extend)
                                 // 面板里的说明性文字一律不可选：egui 的 Label
                                 // 默认 selectable（style.interaction.
@@ -1268,20 +1265,20 @@ impl PinApp {
                                 // 已自动复制」那一行拖不动）。只有下方正文的
                                 // TextEdit 保留文本选择
                                 .selectable(false),
+                        );
+                        if let Some(OcrPanel::Done { copied: true, .. }) = &state {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new("已自动复制").small().color(muted),
+                                )
+                                .selectable(false),
                             );
-                            if let Some(OcrPanel::Done { copied: true, .. }) = &state {
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new("已自动复制").small().color(muted),
-                                    )
-                                    .selectable(false),
-                                );
-                            }
-                        });
-                        ui.add_space(6.0);
-                        ui.separator();
+                        }
                     });
-            });
+                    ui.add_space(6.0);
+                    ui.separator();
+                });
+        });
 
         // ---- 正文区：根 Ui 内的绝对定位子 Ui（同标题区，不用 Area）。卡片
         // 背景按 body_rect 画（必然撑满面板剩余高度），文字在卡片内滚动，
@@ -1289,95 +1286,93 @@ impl PinApp {
         // 内，available_height 收缩到内容高度，min_size 被吞掉——所以一直
         // 撑不满（2026-11-19 反复反馈）。
         ui.scope_builder(egui::UiBuilder::new().max_rect(body_rect), |ui| {
-                ui.set_clip_rect(clip);
-                ui.set_min_width(body_rect.width());
-                ui.set_max_width(body_rect.width());
-                ui.set_min_height(body_rect.height());
-                ui.set_max_height(body_rect.height());
-                let fv = ui.visuals().clone();
-                // 卡片底 + 描边：绝对矩形，100% 撑满
-                ui.painter()
-                    .rect_filled(body_rect, 6.0, fv.widgets.noninteractive.bg_fill);
-                ui.painter().rect_stroke(
-                    body_rect,
-                    6.0,
-                    fv.widgets.noninteractive.bg_stroke,
-                    egui::StrokeKind::Inside,
-                );
-                match &state {
-                    Some(OcrPanel::Done { text, .. }) => {
-                        // 只读 = 每帧用原文重建临时副本（egui 0.35 已无
-                        // TextEdit::read_only）；选中/复制完整保留，编辑不回写
-                        egui::ScrollArea::vertical()
-                            .id_salt("pin-ocr-scroll")
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                let mut shown = text.clone();
-                                ui.add(
-                                    egui::TextEdit::multiline(&mut shown)
-                                        .desired_width(body_rect.width())
-                                        // 字号与内边距都从上一版收一档：
-                                        // 13pt 配 12pt padding，紧凑但不贴边
-                                        .font(egui::FontId::proportional(13.0))
-                                        // egui 0.35：显式 frame() 会覆盖
-                                        // margin()（builder.rs 里 frame 直接用
-                                        // unwrap_or_else 取默认 margin），所以
-                                        // padding 必须写进 frame 本身
-                                        .frame(
-                                            egui::Frame::new()
-                                                .fill(egui::Color32::TRANSPARENT)
-                                                .inner_margin(egui::Margin::same(12)),
-                                        ),
-                                );
-                            });
-                    }
-                    Some(OcrPanel::Running) | None if busy => {
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(body_rect.height() * 0.22);
-                            ui.spinner();
-                            ui.add_space(10.0);
+            ui.set_clip_rect(clip);
+            ui.set_min_width(body_rect.width());
+            ui.set_max_width(body_rect.width());
+            ui.set_min_height(body_rect.height());
+            ui.set_max_height(body_rect.height());
+            let fv = ui.visuals().clone();
+            // 卡片底 + 描边：绝对矩形，100% 撑满
+            ui.painter()
+                .rect_filled(body_rect, 6.0, fv.widgets.noninteractive.bg_fill);
+            ui.painter().rect_stroke(
+                body_rect,
+                6.0,
+                fv.widgets.noninteractive.bg_stroke,
+                egui::StrokeKind::Inside,
+            );
+            match &state {
+                Some(OcrPanel::Done { text, .. }) => {
+                    // 只读 = 每帧用原文重建临时副本（egui 0.35 已无
+                    // TextEdit::read_only）；选中/复制完整保留，编辑不回写
+                    egui::ScrollArea::vertical()
+                        .id_salt("pin-ocr-scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            let mut shown = text.clone();
                             ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new("识别中…").color(fv.weak_text_color()),
-                                )
-                                .selectable(false),
+                                egui::TextEdit::multiline(&mut shown)
+                                    .desired_width(body_rect.width())
+                                    // 字号与内边距都从上一版收一档：
+                                    // 13pt 配 12pt padding，紧凑但不贴边
+                                    .font(egui::FontId::proportional(13.0))
+                                    // egui 0.35：显式 frame() 会覆盖
+                                    // margin()（builder.rs 里 frame 直接用
+                                    // unwrap_or_else 取默认 margin），所以
+                                    // padding 必须写进 frame 本身
+                                    .frame(
+                                        egui::Frame::new()
+                                            .fill(egui::Color32::TRANSPARENT)
+                                            .inner_margin(egui::Margin::same(12)),
+                                    ),
                             );
                         });
-                    }
-                    Some(OcrPanel::Failed { msg }) => {
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(12.0);
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new("识别失败")
-                                        .strong()
-                                        .color(fv.error_fg_color),
-                                )
-                                .selectable(false),
-                            );
-                            ui.add_space(4.0);
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(msg).color(fv.weak_text_color()),
-                                )
-                                .selectable(false),
-                            );
-                            ui.add_space(10.0);
-                            if ui.button("重试").clicked() {
-                                act = Some(PanelAction::Retry);
-                            }
-                        });
-                    }
-                    Some(OcrPanel::Running) | None => {
+                }
+                Some(OcrPanel::Running) | None if busy => {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(body_rect.height() * 0.22);
+                        ui.spinner();
+                        ui.add_space(10.0);
                         ui.add(
                             egui::Label::new(
-                                egui::RichText::new("尚未识别").color(fv.weak_text_color()),
+                                egui::RichText::new("识别中…").color(fv.weak_text_color()),
                             )
                             .selectable(false),
                         );
-                    }
+                    });
                 }
-            });
+                Some(OcrPanel::Failed { msg }) => {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(12.0);
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new("识别失败")
+                                    .strong()
+                                    .color(fv.error_fg_color),
+                            )
+                            .selectable(false),
+                        );
+                        ui.add_space(4.0);
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(msg).color(fv.weak_text_color()))
+                                .selectable(false),
+                        );
+                        ui.add_space(10.0);
+                        if ui.button("重试").clicked() {
+                            act = Some(PanelAction::Retry);
+                        }
+                    });
+                }
+                Some(OcrPanel::Running) | None => {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("尚未识别").color(fv.weak_text_color()),
+                        )
+                        .selectable(false),
+                    );
+                }
+            }
+        });
         match act {
             Some(PanelAction::Retry) => self.start_ocr(&ctx),
             None => {}

@@ -1447,7 +1447,6 @@ pub fn egui_color(c: Rgba) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), c.a())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
