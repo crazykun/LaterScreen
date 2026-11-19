@@ -1291,10 +1291,15 @@ impl PinApp {
                                         // 字号略放大：行高随之变舒展，配合
                                         // 加宽面板减少折行，读起来不再拥挤
                                         .font(egui::FontId::proportional(14.0))
-                                        // padding：文字离卡片边框留足呼吸空间
-                                        .margin(egui::Margin::same(18))
-                                        // 卡片背景由上面绝对矩形画，文字区透明
-                                        .frame(egui::Frame::new()),
+                                        // egui 0.35：显式 frame() 会覆盖
+                                        // margin()（builder.rs 里 frame 直接用
+                                        // unwrap_or_else 取默认 margin），所以
+                                        // padding 必须写进 frame 本身
+                                        .frame(
+                                            egui::Frame::new()
+                                                .fill(egui::Color32::TRANSPARENT)
+                                                .inner_margin(egui::Margin::same(18)),
+                                        ),
                                 );
                             });
                     }
