@@ -1288,6 +1288,10 @@ mod native_impl {
 
     pub fn run_native() -> Result<(), String> {
         let cfg = Config::load();
+        // 冷启动预热：托盘起来后立刻在后台空跑一次 eframe 建窗+字体解析
+        // （隐形 1×1 窗，跑完即退）。框架内存页留在系统页缓存，用户开机后
+        // 第一次按 F1 不再冷读盘（首按延迟从 2-4s 降到 ~0.7s，M6 实测口径）
+        spawn_detached(&["warmup"]);
         let mut builder = EventLoop::<UserEvent>::with_user_event();
         // macOS：常驻托盘用 Accessory（菜单栏应用）形态——不占 Dock。否则
         // Dock 常驻一个点了没反应的图标。功能窗口（截图覆盖层/配置/历史）

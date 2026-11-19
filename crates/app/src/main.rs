@@ -334,6 +334,8 @@ enum Cmd {
         output: Option<PathBuf>,
     },
     /// 贴图：把图片钉在屏幕上置顶悬浮（独立进程，支持多个并存）
+    #[command(hide = true)]
+    Warmup,
     Pin {
         /// 图片文件路径（PNG）；缺省从 stdin 读 PNG（覆盖层 spawn 时走此通道）
         #[arg(short, long)]
@@ -667,6 +669,7 @@ fn main() {
             scale,
             ocr_text,
         }) => run_pin(input, pos, scale, ocr_text),
+        Some(Cmd::Warmup) => run_warmup(),
         Some(Cmd::Config) => run_settings(),
         Some(Cmd::History) => run_history(),
         Some(Cmd::Upload { file }) => run_upload(file),
@@ -2415,6 +2418,53 @@ fn run_annotate(input: Option<PathBuf>) -> Result<(), String> {
 /// 贴图入口：读图（文件或 stdin）→ 置顶无边框窗口。`ocr_text` 传入时
 /// 右侧「识别结果」面板默认展开（覆盖层 OCR 交付单进程链路，R4）；交付
 /// 链路命名的临时全文文件在窗口退出后清理（手动 CLI 的其他输入文件不动）。
+/// 冷启动预热（登录后托盘自动空跑一次）：完整走一遍 eframe 建窗 +
+/// AppKit/GL 初始化 + 字体解析，进程随即退出。框架的内存页会留在系统
+/// 页缓存里——用户**第一次真正按 F1** 时不再冷读盘，覆盖层出现时间从
+/// 「2-4 秒（开机后首次）」降到与热启动持平（约 0.6-0.7s，实测 M6）。
+/// 无窗口可见（1×1 伪窗口 + 首帧即退出）。
+struct WarmupApp {
+    done: bool,
+}
+
+impl eframe::App for WarmupApp {
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
+        if !self.done {
+            self.done = true;
+            // 触发一次真实绘制路径后即请求关闭
+            ui.ctx()
+                .send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+        }
+    }
+}
+
+fn run_warmup() -> Result<(), String> {
+    let t = std::time::Instant::now();
+    // 字体解析同样预热（fc-list 子进程 + 16MB 字体读取）
+    let _ = crate::font::load_system_font();
+    let _ = crate::font::load_system_font();
+    let options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_position(eframe::egui::Pos2::new(-2000.0, -2000.0))
+            .with_inner_size(eframe::egui::vec2(1.0, 1.0))
+            .with_decorations(false)
+            .with_always_on_top(),
+        ..Default::default()
+    };
+    let result = eframe::run_native(
+        "lscreen-warmup",
+        options,
+        Box::new(|cc| {
+            if let Some(bytes) = crate::font::load_system_font() {
+                crate::font::setup_egui_fonts(&cc.egui_ctx, bytes);
+            }
+            Ok(Box::new(WarmupApp { done: false }) as Box<dyn eframe::App>)
+        }),
+    );
+    crate::trace_stage("warmup", t);
+    result.map_err(|e| e.to_string())
+}
+
 fn run_pin(
     input: Option<PathBuf>,
     pos: Option<String>,
