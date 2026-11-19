@@ -133,6 +133,11 @@ pub fn show(app: &mut SnipApp, ctx: &egui::Context) {
 /// 与完整标注工具栏分流——此阶段只做选区几何调整（拖内部移动、拖角/边
 /// 改大小），标注动作全部不适用。
 fn record_bar_contents(app: &mut SnipApp, ui: &mut egui::Ui, ctx: &egui::Context) {
+    // 行高钉成按钮槽位高，且必须在 horizontal 之前设置：它的初始行高在
+    // 创建子 Ui 时就已取 interact_size.y，闭包内再改已来不及。不钉时提示
+    // Label 先按较小行高居中，BTN(24) 按钮槽位又把行高撑大，文案便偏离
+    // 按钮中线（2026-11-19 真机反馈「文案和按钮不在一条线上」）
+    ui.spacing_mut().interact_size.y = BTN;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.label(
@@ -1431,6 +1436,49 @@ mod tests {
             sink.set(w);
         });
         bar_w.get()
+    }
+
+    /// 框选精简条的提示文案必须与按钮槽位同一中线（2026-11-19 真机反馈
+    /// 「文案和按钮不在一条线上」）。horizontal 的初始行高取 interact_size.y，
+    /// 不钉成 BTN 时 Label 先按较小行高居中，按钮槽位再把行高撑大 → 文案偏。
+    #[test]
+    fn record_bar_hint_shares_button_centerline() {
+        let ctx = egui::Context::default();
+        for pin_row_height in [false, true] {
+            let hint_y = std::cell::Cell::new(0.0f32);
+            let btn_y = std::cell::Cell::new(0.0f32);
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 60.0))),
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    if pin_row_height {
+                        // 与生产代码一致：必须在 horizontal 之前设置
+                        ui.spacing_mut().interact_size.y = BTN;
+                    }
+                    ui.horizontal(|ui| {
+                        let hint = ui.label(
+                            egui::RichText::new("拖动移动 · 拖角/边调整 · Enter 确认 · Esc 取消")
+                                .size(12.0),
+                        );
+                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(BTN), Sense::click());
+                        hint_y.set(hint.rect.center().y);
+                        btn_y.set(rect.center().y);
+                    });
+                });
+            });
+            let dy = (hint_y.get() - btn_y.get()).abs();
+            if pin_row_height {
+                assert!(dy < 0.5, "钉行高后文案与按钮应同中线，实测偏差 {dy}pt");
+            } else {
+                println!("未钉行高时的中线偏差 {dy}pt");
+                assert!(
+                    dy > 0.5,
+                    "未钉行高时应复现偏差（否则根因不在行高），实测 {dy}pt"
+                );
+            }
+        }
     }
 
     /// R10：单行判定阈值与标注窗宽度下限必须容得下**实测**的单行需求——
