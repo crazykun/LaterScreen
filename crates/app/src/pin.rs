@@ -659,7 +659,7 @@ impl PinApp {
                 .inner
             })
         });
-        let (confirm, mut cancel) = response.inner;
+        let (confirm, mut cancel) = response.inner.inner;
         if response.should_close() {
             cancel = true;
         }
@@ -1537,36 +1537,24 @@ impl eframe::App for PinApp {
             // 拖拽：StartDrag 在 X11 有「未激活窗口第一次拖不住」的坑（见
             // drag 字段注释）。
             crate::drag::start_drag(&ctx, &response);
-        } else {
-            // 手动拖拽（X11/Win/mac）：改听**全局指针**而非主 response——
-            // 按住工具条按钮起手的拖动此前被按钮吃掉 press，窗口纹丝不动
-            // （用户反馈 2026-11-19）。现在窗口内任意非面板位置按下拖动都
-            // 移动窗口；egui 拖远后松手 click=None（context.rs 只在
-            // click.is_some() 时置 CLICKED），按钮动作不会被误触发。起手
-            // 在右侧面板正文 = 面板滚动，排除
-            let (press, latest) = ctx.input(|i| (i.pointer.press_origin(), i.pointer.latest_pos()));
-            if let (Some(origin), Some(cur)) = (press, latest) {
-                let on_panel = panel_rect.contains(origin);
-                if origin.distance(cur) > 3.0 && !on_panel && self.drag.is_none() {
-                    if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
-                        self.drag = Some(DragState {
-                            grab_offset: origin.to_vec2(),
-                            sent: outer.min,
-                        });
-                    }
-                }
+        } else if response.drag_started() {
+            // 拖动仅从图像区/条带空隙起手（主 response）：工具条按钮行按
+            // 用户要求（2026-11-19）只点击不拖动——按钮是独立 widget，天然
+            // 吃掉自己的 press，从按钮起手永远不会变成窗口拖动；其余位置
+            // （图像区/四周框/条带空隙）按下拖动即移动窗口
+            if let (Some(outer), Some(origin)) = (
+                ctx.input(|i| i.viewport().outer_rect),
+                ctx.input(|i| i.pointer.press_origin()),
+            ) {
+                self.drag = Some(DragState {
+                    grab_offset: origin.to_vec2(),
+                    sent: outer.min,
+                });
             }
         }
         let scale = self.scale;
         if let Some(d) = &mut self.drag {
-            // 拖动中 = 按键仍按下且起手不在面板里（面板起手 = 滚动正文）
-            let dragging = ctx.input(|i| {
-                i.pointer.any_down()
-                    && i.pointer
-                        .press_origin()
-                        .is_some_and(|o| !panel_rect.contains(o))
-            });
-            if dragging {
+            if response.dragged() {
                 // 优先 X11 QueryPointer：绝对屏幕坐标，与窗口移动解耦，
                 // 无自激回路（见 drag 字段注释）。Win/mac 拿不到时退回
                 // egui 局部坐标换算，且仅在指针真实移动的帧重算，
@@ -1593,7 +1581,7 @@ impl eframe::App for PinApp {
                     }
                 }
             }
-            if ctx.input(|i| !i.pointer.any_down()) {
+            if response.drag_stopped() {
                 self.drag = None;
                 self.through_shape = None;
             }
