@@ -898,11 +898,23 @@ fn draw_tool_icon(tool: Tool, p: &egui::Painter, r: Rect, c: Color32) {
         }
         Tool::Marker => {
             p.circle_stroke(r.center(), r.width() * 0.48, Stroke::new(1.2, c));
-            p.text(
-                r.center(),
-                egui::Align2::CENTER_CENTER,
-                "1",
-                egui::FontId::proportional(r.height() * 0.75),
+            // 数字基线校准（与画布标号/缩放百分比同源）：egui 整行居中
+            // 含下伸部，"1" 会偏高——基线放到「圆心 + cap/2」（cap 由
+            // 同一字体文件实测，进程级缓存）
+            let font_id = egui::FontId::proportional(r.height() * 0.75);
+            let galley = p.layout_no_wrap("1".into(), font_id, c);
+            let baseline_in_row = galley
+                .rows
+                .first()
+                .and_then(|r| r.glyphs.first().map(|g| g.pos.y))
+                .unwrap_or_else(|| galley.size().y * 0.5);
+            let baseline = r.center().y + crate::ui::cap_ratio() * r.height() * 0.75 * 0.5;
+            p.galley(
+                egui::Pos2::new(
+                    r.center().x - galley.size().x * 0.5,
+                    baseline - baseline_in_row,
+                ),
+                galley,
                 c,
             );
         }
