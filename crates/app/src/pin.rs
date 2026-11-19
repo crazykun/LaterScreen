@@ -922,7 +922,7 @@ impl PinApp {
     /// 宽度收纳进「更多」——收纳曾把穿透按钮藏进二级菜单，穿透开启后
     /// 菜单锚在穿透窗口里点不开，只剩 Esc/托盘两条暗道可恢复。
     /// 悬停即出文字提示（icon_button 自带 on_hover_text）。
-    fn show_toolbar(&mut self, ctx: &egui::Context, bar: Rect) {
+    fn show_toolbar(&mut self, ctx: &egui::Context, bar: Rect, anchor_x: f32) {
         use crate::ui::toolbar::{
             action_button, draw_check, draw_close, draw_ocr, draw_save, draw_upload, icon_button,
         };
@@ -933,7 +933,14 @@ impl PinApp {
         } else {
             354.0
         };
-        let pos = Pos2::new(bar.center().x - shown / 2.0, bar.center().y - crate::ui::toolbar::BTN / 2.0);
+        // 锚定图像区中心；图像窄于整排时钳回条带内（不越出窗口）
+        let pos = Pos2::new(
+            (anchor_x - shown / 2.0).clamp(
+                bar.min.x + 8.0,
+                (bar.max.x - shown - 8.0).max(bar.min.x + 8.0),
+            ),
+            bar.center().y - crate::ui::toolbar::BTN / 2.0,
+        );
         let mut action = None;
         let (topmost, through, zoom, upload_busy) = (
             self.topmost,
@@ -1293,6 +1300,10 @@ impl eframe::App for PinApp {
             Pos2::new(full.max.x, split_y),
         );
         let bar_rect = Rect::from_min_max(Pos2::new(full.min.x, split_y), full.max);
+        // 工具栏锚定**图像区**中心：面板开合改变全宽，若按全宽居中，
+        // 工具栏会随面板右移（用户反馈 2026-11-18）。窄图放不下整排时
+        // 钳回条带内。
+        let toolbar_anchor_x = img_area.center().x;
 
         // 滚轮缩放（先于绘制；窗口尺寸不随缩放变化，R9）。指针悬停右侧
         // 面板时不应用：面板正文是 ScrollArea，对本帧滚动的消费发生在布局
@@ -1522,7 +1533,7 @@ impl eframe::App for PinApp {
             self.do_copy(&ctx);
         }
 
-        self.show_toolbar(&ctx, bar_rect);
+        self.show_toolbar(&ctx, bar_rect, toolbar_anchor_x);
         self.show_ocr_panel(&ctx, panel_rect);
         self.show_through_confirmation(&ctx);
         self.show_toast(&ctx);
