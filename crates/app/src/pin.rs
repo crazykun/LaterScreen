@@ -41,8 +41,8 @@ pub const BAR_H: f32 = 34.0;
 /// 紧贴图像。窗口尺寸 = 图像显示尺寸 + 2*PAD（+ 底部条带）。
 pub const PAD: f32 = 10.0;
 /// 右侧「识别结果」面板宽度：开面板时窗口宽在基准之上再加 PANEL_W，
-/// 图像显示区域不挤压（R3）。窄到只剩面板时仍可读，280pt ≈ 20 个中文字。
-pub const PANEL_W: f32 = 280.0;
+/// 图像显示区域不挤压（R3）。窄到只剩面板时仍可读，320pt ≈ 23 个中文字。
+pub const PANEL_W: f32 = 320.0;
 /// 工具条全量图标常驻所需的窗口逻辑宽下限（含边距）。
 /// 窗口逻辑宽低于它时按此值钳制下限——**穿透开关是工具条上的图标**，
 /// 窗口被图片宽度拖到极窄（如 40px 小图）时若不保底，穿透按钮会被挤出
@@ -1214,13 +1214,14 @@ impl PinApp {
             panel_rect.min,
             Pos2::new(panel_rect.min.x + reveal.max(1.0), panel_rect.max.y),
         );
-        const PAD: f32 = 12.0;
+        const PAD: f32 = 14.0;
+        const BODY_GAP: f32 = 8.0;
         const HEADER_H: f32 = crate::ui::toolbar::BTN + 4.0 + 6.0 + 1.0 + 4.0;
         let body_rect = Rect::from_min_size(
-            panel_rect.min + egui::vec2(PAD, PAD + HEADER_H),
+            panel_rect.min + egui::vec2(PAD, PAD + HEADER_H + BODY_GAP),
             egui::vec2(
                 (panel_rect.width() - 2.0 * PAD).max(80.0),
-                (panel_rect.height() - 2.0 * PAD - HEADER_H).max(80.0),
+                (panel_rect.height() - 2.0 * PAD - HEADER_H - BODY_GAP).max(80.0),
             ),
         );
 
@@ -1233,7 +1234,7 @@ impl PinApp {
                 ui.set_max_width(panel_rect.width());
                 let muted = ui.visuals().weak_text_color();
                 egui::Frame::new()
-                    .inner_margin(egui::Margin::same(12))
+                    .inner_margin(egui::Margin::same(14))
                     .show(ui, |ui| {
                         ui.set_min_height(crate::ui::toolbar::BTN + 4.0);
                         ui.horizontal(|ui| {
@@ -1287,8 +1288,11 @@ impl PinApp {
                                 ui.add(
                                     egui::TextEdit::multiline(&mut shown)
                                         .desired_width(body_rect.width())
+                                        // 字号略放大：行高随之变舒展，配合
+                                        // 加宽面板减少折行，读起来不再拥挤
+                                        .font(egui::FontId::proportional(14.0))
                                         // padding：文字离卡片边框留足呼吸空间
-                                        .margin(egui::Margin::same(14))
+                                        .margin(egui::Margin::same(18))
                                         // 卡片背景由上面绝对矩形画，文字区透明
                                         .frame(egui::Frame::new()),
                                 );
