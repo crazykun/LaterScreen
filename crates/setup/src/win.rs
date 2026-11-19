@@ -4,6 +4,7 @@
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use windows::core::{Interface, HSTRING, PCWSTR};
 use windows::Win32::System::Com::{
@@ -18,11 +19,17 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const ERROR_SHARING_VIOLATION: i32 = 32;
 
 const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\LaterScreen";
+/// HKCU 开机自启（per-user，无需管理员；与卸载注册同一侧）
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+/// 自启值名（卸载/重装时按名清理）
+const RUN_VALUE: &str = "LaterScreen";
 
 pub struct InstallPlan {
     pub dir: PathBuf,
     pub desktop_shortcut: bool,
     pub start_menu: bool,
+    /// 写入 HKCU Run 开机自启
+    pub auto_start: bool,
 }
 
 /// 弹系统错误对话框。安装器是 GUI 子系统，stderr 没有接收方——不弹窗的话
@@ -93,24 +100,79 @@ fn create_shortcut(link: &Path, target: &Path, desc: &str) -> Result<(), String>
     }
 }
 
+/// 结束正在运行的 LaterScreen（覆盖安装前必做：exe 被映像锁定写不进去）。
+/// 全部 lscreen 进程同镜像（托盘/贴图/面板都是 lscreen.exe），按名强杀；
+/// 无进程时 taskkill 报错，忽略即可。UI 子系统 spawn 不闪黑框靠
+/// CREATE_NO_WINDOW。返回是否确有进程被杀（仅用于文案）。
+fn close_running() -> bool {
+    let out = Command::new("taskkill")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["/f", "/im", "lscreen.exe", "/t"])
+        .output();
+    matches!(out, Ok(o) if o.status.success())
+}
+
+/// 等待映像锁释放：taskkill 返回到进程真正退场有毫秒级窗口，
+/// 紧接着的文件写入可能仍撞 sharing violation，短重试兜底。
+fn wait_locks_released(timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let alive = Command::new("tasklist")
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(["/fi", "imagename eq lscreen.exe"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("lscreen.exe"))
+            .unwrap_or(true); // 查询失败按仍在处理，走满超时
+        if !alive {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
 pub fn install(
     bin: &[u8],
     plan: &InstallPlan,
     version: &str,
     mut prog: impl FnMut(f32, &str),
 ) -> Result<(), String> {
-    prog(0.05, "创建安装目录");
+    prog(0.02, "检查运行中的 LaterScreen");
+    if close_running() {
+        prog(0.08, "正在关闭旧版本");
+        wait_locks_released(Duration::from_secs(5));
+    }
+
+    prog(0.15, "创建安装目录");
     std::fs::create_dir_all(&plan.dir).map_err(|e| format!("创建目录失败: {e}"))?;
 
     let exe = plan.dir.join("lscreen.exe");
-    prog(0.25, "写入 lscreen.exe");
-    std::fs::write(&exe, bin).map_err(|e| {
-        if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
-            "写入失败：LaterScreen 正在运行，请先退出后重试".to_string()
+    prog(0.3, "写入 lscreen.exe");
+    let mut last = None;
+    for attempt in 0..3 {
+        match std::fs::write(&exe, bin) {
+            Ok(()) => {
+                last = None;
+                break;
+            }
+            Err(e) if attempt < 2 && e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => {
+                // 旧进程收尾有延迟：稍候重试；仍占用再报错
+                std::thread::sleep(Duration::from_millis(500));
+                last = Some(e);
+            }
+            Err(e) => {
+                last = Some(e);
+                break;
+            }
+        }
+    }
+    if let Some(e) = last {
+        return Err(if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
+            "写入失败：LaterScreen 正在运行，请手动退出后重试".to_string()
         } else {
             format!("写入 lscreen.exe 失败: {e}")
-        }
-    })?;
+        });
+    }
 
     prog(0.55, "写入卸载程序");
     let self_exe = std::env::current_exe().map_err(|e| format!("定位安装器自身失败: {e}"))?;
@@ -155,6 +217,15 @@ pub fn install(
     key.set_u32("NoRepair", 1)
         .map_err(|e| format!("写注册表 NoRepair 失败: {e}"))?;
 
+    if plan.auto_start {
+        prog(0.95, "写入开机自启");
+        let run = windows_registry::CURRENT_USER
+            .create(RUN_KEY)
+            .map_err(|e| format!("写注册表 Run 键失败: {e}"))?;
+        run.set_string(RUN_VALUE, format!("\"{}\"", exe.display()))
+            .map_err(|e| format!("写开机自启失败: {e}"))?;
+    }
+
     prog(1.0, "安装完成");
     Ok(())
 }
@@ -174,6 +245,10 @@ pub fn uninstall(mut prog: impl FnMut(f32, &str)) -> Result<(), String> {
     windows_registry::CURRENT_USER
         .remove_tree(UNINSTALL_KEY)
         .map_err(|e| format!("删除注册表键失败: {e}"))?;
+    // 开机自启值一并清掉（老版本卸载器没写过它，值不存在时删除报错，忽略）
+    if let Ok(run) = windows_registry::CURRENT_USER.open(RUN_KEY) {
+        let _ = run.remove_value(RUN_VALUE);
+    }
 
     prog(0.55, "删除程序文件");
     // 运行中的 exe 被映像锁定删不掉：吞错会"假卸载成功"、文件全部残留，

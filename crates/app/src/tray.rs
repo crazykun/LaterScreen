@@ -93,9 +93,14 @@ fn dispatch(a: Action) -> bool {
         Action::PinThrough => crate::pin::write_ctl("unthrough"),
         Action::PinsClose => crate::pin::write_ctl("close"),
         Action::Quit => {
-            // 托盘退出时带走它 spawn 的历史面板（独立进程，不会自动跟随退出）。
-            // 留信号文件，运行中的面板轮询到即自关；无面板则下次开面板时清掉。
+            // 托盘退出时带走它 spawn 的独立窗口进程（历史面板、配置面板、
+            // 贴图），它们不会自动跟随托盘退出：
+            // - 历史/配置面板：留信号文件，窗口心跳轮询到即自关；
+            //   无窗口则下次开窗时清掉，不会误关新窗口。
+            // - 贴图走既有 ctl 广播（「关闭所有贴图」同一条路）。
             crate::history::request_quit();
+            crate::instance::request_quit(crate::instance::Kind::Settings);
+            crate::pin::write_ctl("close");
             return false;
         }
     }

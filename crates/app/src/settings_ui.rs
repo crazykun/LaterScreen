@@ -945,18 +945,25 @@ impl eframe::App for SettingsApp {
         }
 
         self.discard_confirmation(&ctx);
-        self.poll_raise(&ctx);
+        self.poll_signals(&ctx);
     }
 }
 
 // ---------------------------------------------------------------- 页面
 
 impl SettingsApp {
-    /// 单例唤起心跳（v0.11.4）：第二个 `lscreen config` 进程会留下 raise
-    /// 信号。窗口在后台时无输入事件，eframe 不会主动重绘——必须自己
-    /// `request_repaint_after` 保持心跳（与 history::poll_raise 同一坑）。
-    fn poll_raise(&mut self, ctx: &egui::Context) {
+    /// 单例信号心跳（v0.11.4 唤起 / 退出联动）：第二个 `lscreen config`
+    /// 进程会留下 raise 信号；托盘「退出」会留下 quit 信号（配置面板是
+    /// 独立进程，不会跟随托盘退出）。窗口在后台时无输入事件，eframe 不会
+    /// 主动重绘——必须自己 `request_repaint_after` 保持心跳（与
+    /// history::poll_raise 同一坑）。退出信号直接关窗：托盘都在退出了，
+    /// 未保存改动无需再弹放弃确认。
+    fn poll_signals(&mut self, ctx: &egui::Context) {
         const POLL: std::time::Duration = std::time::Duration::from_millis(300);
+        if crate::instance::take_quit(crate::instance::Kind::Settings) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
         if crate::instance::take_raise(crate::instance::Kind::Settings) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));

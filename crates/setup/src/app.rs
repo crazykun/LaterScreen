@@ -35,6 +35,7 @@ pub struct SetupApp {
     dir: String,
     desktop_shortcut: bool,
     start_menu: bool,
+    auto_start: bool,
     prog: Shared,
     /// Working 期间缓存的进度（避免持锁绘制）
     frac: f32,
@@ -54,21 +55,24 @@ const LOGO: &[u8] = include_bytes!("../../../packaging/icon.png");
 const ACCENT: Color32 = Color32::from_rgb(0xe5, 0x39, 0x35);
 /// 窗口底色
 const BG: Color32 = Color32::from_rgb(0x14, 0x14, 0x18);
-/// 控件描边
-const CARD_STROKE: Color32 = Color32::from_rgb(0x2b, 0x2b, 0x35);
+/// 控件描边（与 app 主题 DARK_STROKE 同值；0x2b 旧值在暗底下几乎不可见）
+const CARD_STROKE: Color32 = Color32::from_rgb(0x3d, 0x3d, 0x4c);
 /// 次级文字
 const MUTED: Color32 = Color32::from_rgb(0x9a, 0x9a, 0xa5);
 /// 主文字
 const TEXT: Color32 = Color32::from_rgb(0xec, 0xec, 0xf1);
 /// 底部按钮条底色
 const FOOTER: Color32 = Color32::from_rgb(0x11, 0x11, 0x15);
-/// 输入框/次级控件底色
-const FIELD: Color32 = Color32::from_rgb(0x16, 0x16, 0x1b);
+/// 输入框/次级控件底色（与 app 主题 DARK_FIELD 同值；旧值 0x16 与窗口
+/// 底色 0x14 只差 2，即「输入框看不见」的根因）
+const FIELD: Color32 = Color32::from_rgb(0x23, 0x23, 0x2c);
 
 /// 底部按钮条高度（固定，保证按钮永不被内容挤出窗口）
 const FOOTER_H: f32 = 64.0;
 /// 按钮统一尺寸：主次同宽同高，只用颜色区分层级
 const BTN: egui::Vec2 = egui::vec2(112.0, 34.0);
+/// 路径行「浏览」按钮宽
+const BROWSE_W: f32 = 64.0;
 
 /// 强制暗色并套用自定义视觉。
 ///
@@ -149,11 +153,12 @@ pub fn run(uninstall: bool) -> eframe::Result<()> {
 }
 
 fn uninstall_wanted(uninstall: bool) -> f32 {
-    // 含 64px 固定底部按钮条
+    // 含 64px 固定底部按钮条；安装页 = 头部 + 路径行 + 三个复选框 + 说明，
+    // 380 装不下（v0.15.1 起加了自启复选框）
     if uninstall {
         280.0
     } else {
-        380.0
+        405.0
     }
 }
 
@@ -170,6 +175,9 @@ impl SetupApp {
             dir: win::default_dir().display().to_string(),
             desktop_shortcut: true,
             start_menu: true,
+            // 托盘常驻是产品默认形态（裸启动即静默驻留、热键唤起），
+            // 自启默认勾选；用户不想自启可在安装时取消
+            auto_start: true,
             prog: empty_prog(),
             frac: 0.0,
             msg: String::new(),
@@ -192,6 +200,7 @@ impl SetupApp {
                 dir: PathBuf::from(&self.dir),
                 desktop_shortcut: self.desktop_shortcut,
                 start_menu: self.start_menu,
+                auto_start: self.auto_start,
             };
             std::thread::spawn(move || {
                 let r = win::install(BIN, &plan, VERSION, |f, m| set_prog(&prog, f, m, None));
@@ -389,10 +398,20 @@ impl SetupApp {
         }
 
         ui.label("安装位置：");
-        // right_to_left 先放「浏览」按钮，输入框吃剩余宽度 —— 顺排会把按钮挤出窗口
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        // 输入框吃剩余宽度、「浏览」固定在最右。不能用 right_to_left 的
+        // with_layout：egui 0.35 里它把整行**垂直居中进全部剩余空间**
+        // （行后内容随之被推出窗口裁掉——v0.15.1 安装页选项区下坠、
+        // 复选框全部不可见的根因），顺排 + 手动给输入框让位才可控
+        ui.horizontal(|ui| {
+            let input_w = (ui.available_width() - BROWSE_W - 8.0).max(120.0);
+            ui.add(egui::TextEdit::singleline(&mut self.dir).desired_width(input_w));
             if ui
-                .add(egui::Button::new("浏览").min_size(egui::vec2(64.0, 30.0)))
+                .add(
+                    egui::Button::new("浏览")
+                        .min_size(egui::vec2(BROWSE_W, 30.0))
+                        .fill(FIELD)
+                        .stroke(egui::Stroke::new(1.0, CARD_STROKE)),
+                )
                 .clicked()
             {
                 if let Some(dir) = rfd::FileDialog::new()
@@ -402,11 +421,10 @@ impl SetupApp {
                     self.dir = dir.display().to_string();
                 }
             }
-            ui.add_space(4.0);
-            ui.add(egui::TextEdit::singleline(&mut self.dir).desired_width(f32::INFINITY));
         });
         ui.checkbox(&mut self.desktop_shortcut, "创建桌面快捷方式");
         ui.checkbox(&mut self.start_menu, "创建开始菜单快捷方式");
+        ui.checkbox(&mut self.auto_start, "开机自动运行");
         ui.label(
             RichText::new("可在 Windows「设置 - 应用」中卸载；重复安装将覆盖更新")
                 .color(MUTED)

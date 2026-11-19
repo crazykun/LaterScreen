@@ -78,6 +78,15 @@ fn raise_path(kind: Kind) -> PathBuf {
         .join(format!("singleton.{}.raise", kind.as_str()))
 }
 
+/// 退出信号 = `singleton.<name>.quit`。托盘退出时对还开着的独立窗口
+/// （配置面板）留信号，窗口心跳轮询到即自关（与 history::request_quit
+/// 同一套路：它们是独立进程，不会跟随托盘进程退出）。
+fn quit_path(kind: Kind) -> PathBuf {
+    crate::config::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(format!("singleton.{}.quit", kind.as_str()))
+}
+
 /// 独占文件锁句柄：句柄存活期间持锁，drop/进程退出即释放。
 /// 与 history.rs 的 FileLock 同语义，独立成份以免跨模块共享私有类型。
 struct FileLock(std::fs::File);
@@ -239,8 +248,10 @@ pub fn acquire(kind: Kind) -> bool {
             Ok(Some(mut l)) => {
                 // 锁内写 PID 供人工诊断（诊断值，不参与存活判断）
                 let _ = l.write_pid(std::process::id());
-                // 清掉上次会话残留的唤起信号，免得新窗口刚开就自我 Focus
+                // 清掉上次会话残留的唤起/退出信号，免得新窗口刚开就自我
+                // Focus 或立刻自关
                 let _ = std::fs::remove_file(raise_path(kind));
+                let _ = std::fs::remove_file(quit_path(kind));
                 HELD.lock().unwrap()[slot_index(kind)] = Some(l);
                 return true;
             }
@@ -263,6 +274,28 @@ pub fn acquire(kind: Kind) -> bool {
 /// 必须配合 `request_repaint_after`，见 history::poll_raise 的复盘）。
 pub fn take_raise(kind: Kind) -> bool {
     let p = raise_path(kind);
+    if p.exists() {
+        let _ = std::fs::remove_file(&p);
+        return true;
+    }
+    false
+}
+
+/// 请求关闭某用途的存活窗口（托盘退出时调用）：留退出信号，窗口心跳
+/// 轮询到即自关。无窗口运行时该文件由下一次 `acquire` 清掉，不会误关
+/// 新窗口。
+pub fn request_quit(kind: Kind) {
+    let p = quit_path(kind);
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&p, b"1");
+}
+
+/// 轮询退出信号：有则消费掉（删文件）并返回 true，调用方应关闭窗口。
+/// 与 [`take_raise`] 同一心跳调用即可。
+pub fn take_quit(kind: Kind) -> bool {
+    let p = quit_path(kind);
     if p.exists() {
         let _ = std::fs::remove_file(&p);
         return true;
@@ -314,6 +347,30 @@ mod tests {
         std::fs::write(raise_path(Kind::Settings), b"1").unwrap();
         assert!(take_raise(Kind::Settings));
         assert!(!take_raise(Kind::Settings));
+    }
+
+    /// 托盘退出联动：quit 信号消费一次即消失；acquire 拿锁时清掉残留
+    /// quit 信号（上次「退出时没开配置面板」留下的文件不得误关新窗口）。
+    #[test]
+    fn quit_signal_consumed_once_and_cleared_on_acquire() {
+        let _g = serial();
+        std::fs::create_dir_all(quit_path(Kind::Settings).parent().unwrap()).unwrap();
+        // 无窗口时留下的残留 quit 信号
+        std::fs::write(quit_path(Kind::Settings), b"1").unwrap();
+        // 本测试进程抢 Settings 锁（外部真配置窗口开着时跳过）
+        if !acquire(Kind::Settings) {
+            eprintln!("跳过：Settings 锁被外部进程持有（真实配置面板运行中）");
+            return;
+        }
+        assert!(
+            !quit_path(Kind::Settings).exists(),
+            "acquire 必须清掉残留 quit 信号"
+        );
+        assert!(!take_quit(Kind::Settings));
+        // request_quit → take_quit 消费一次
+        request_quit(Kind::Settings);
+        assert!(take_quit(Kind::Settings));
+        assert!(!take_quit(Kind::Settings));
     }
 
     /// 托盘/覆盖层无窗口可唤起：锁冲突时不该写 raise 文件（can_raise=false）；
