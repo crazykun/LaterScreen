@@ -1202,35 +1202,39 @@ impl PinApp {
     /// 这里只叠内容。`panel_rect` 由调用方按「窗口右侧 − 底部条带」切出，
     /// 宽度即 [`PANEL_W`]（WM 未服从放大时为 0，见 ui() 的 side_w 反推）。
     fn show_ocr_panel(&mut self, ctx: &egui::Context, panel_rect: Rect, reveal: f32) {
-        // 关闭方向不做淡出：panel_open 翻 false 的同一帧立即不绘内容；窗口
-        // 收窄期间 panel_rect 仍可能暂时保留旧宽度，必须同时门控，否则会
-        // 在收窗过渡帧闪出一帧残留面板（用户反馈 2026-11-19）。
+        // 关闭方向不做淡出：panel_open 翻 false 的同一帧立即不绘内容
         if !self.panel_open || panel_rect.width() <= 0.5 || reveal <= 0.5 {
             return;
         }
         let busy = self.ocr_job.is_some();
-        // 状态快照：闭包内不借用 self，动作收集到闭包外统一执行
         let state = self.ocr.clone();
         let mut act: Option<PanelAction> = None;
-        egui::Area::new(egui::Id::new("pin-ocr-panel"))
+        // 揭示动画：标题与正文两个 Area 共用同一绝对裁剪矩形
+        let clip = Rect::from_min_max(
+            panel_rect.min,
+            Pos2::new(panel_rect.min.x + reveal.max(1.0), panel_rect.max.y),
+        );
+        const PAD: f32 = 12.0;
+        const HEADER_H: f32 = crate::ui::toolbar::BTN + 4.0 + 6.0 + 1.0 + 4.0;
+        let body_rect = Rect::from_min_size(
+            panel_rect.min + egui::vec2(PAD, PAD + HEADER_H),
+            egui::vec2(
+                (panel_rect.width() - 2.0 * PAD).max(80.0),
+                (panel_rect.height() - 2.0 * PAD - HEADER_H).max(80.0),
+            ),
+        );
+
+        // ---- 标题区：只一行状态文字，与正文彻底解耦
+        egui::Area::new(egui::Id::new("pin-ocr-header"))
             .order(egui::Order::Foreground)
             .fixed_pos(panel_rect.min)
             .show(ctx, |ui| {
-                // 从左往右揭示：内容固定在最终位置，裁剪窗自分隔线向右
-                // 长出（宽度 = 已揭示宽度），文字不闪不跳
-                ui.set_clip_rect(Rect::from_min_max(
-                    panel_rect.min,
-                    Pos2::new(panel_rect.min.x + reveal.max(1.0), panel_rect.max.y),
-                ));
-                // 面板内容取色全部走令牌（与底部条带同一 visuals），禁止硬编码 RGB
-                let muted = ui.visuals().weak_text_color();
-                let error_fg = ui.visuals().error_fg_color;
+                ui.set_clip_rect(clip);
                 ui.set_max_width(panel_rect.width());
-                ui.set_max_height(panel_rect.height());
+                let muted = ui.visuals().weak_text_color();
                 egui::Frame::new()
                     .inner_margin(egui::Margin::same(12))
                     .show(ui, |ui| {
-                        // ---- 标题行：固定槽高，标题/状态/复制/关闭统一按槽位基线
                         ui.set_min_height(crate::ui::toolbar::BTN + 4.0);
                         ui.horizontal(|ui| {
                             ui.add(
@@ -1242,93 +1246,86 @@ impl PinApp {
                             if let Some(OcrPanel::Done { copied: true, .. }) = &state {
                                 ui.weak(egui::RichText::new("已自动复制").small().color(muted));
                             }
-                            // 操作按钮已收进底部工具栏最右（面板本体=纯内容区）
                         });
                         ui.add_space(6.0);
                         ui.separator();
-                        ui.add_space(4.0);
-
-                        // ---- 正文：按状态渲染。尺寸一律由 panel_rect 绝对
-                        // 几何算：Frame 内部的 available_height() 会收缩到内容
-                        // 高度甚至无界，之前靠它算出的 min_size 只有 120pt，
-                        // 正文框撑不满面板（用户反复反馈 2026-11-19）。
-                        const PAD: f32 = 12.0;
-                        const HEADER_H: f32 =
-                            crate::ui::toolbar::BTN + 4.0 + 6.0 + 1.0 + 4.0;
-                        let body_w = (panel_rect.width() - 2.0 * PAD).max(80.0);
-                        let body_h = (panel_rect.height() - 2.0 * PAD - HEADER_H).max(80.0);
-                        match state {
-                            Some(OcrPanel::Done { text, .. }) => {
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(body_w, body_h),
-                                    *ui.layout(),
-                                    |ui| {
-                                        egui::ScrollArea::vertical()
-                                            .id_salt("pin-ocr-scroll")
-                                            .auto_shrink([false, false])
-                                            .show(ui, |ui| {
-                                        // 只读 = 每帧用原文重建临时副本（egui 0.35
-                                        // 已无 TextEdit::read_only，interactive(false)
-                                        // 会连选中一起禁掉）：编辑只落
-                                        // 本地副本、不回写识别结果，而选中/复制
-                                        // 完整保留（Ctrl+C 走 egui 文本复制，主
-                                        // 进程按键门控不抢：见 ui() 注释）
-                                        let mut shown = text.clone();
-                                        let fv = ui.visuals().clone();
-                                        let text_w = body_w;
-                                        let text_h = body_h;
-                                        ui.add(
-                                            egui::TextEdit::multiline(&mut shown)
-                                                .desired_width(text_w)
-                                                .min_size(egui::vec2(text_w, text_h))
-                                                // 正文框内边距：文字离边框留足呼吸
-                                                // 空间（用户 2026-11-19），且撑满高度
-                                                .margin(egui::Margin::same(14))
-                                                // 卡片底色用 noninteractive.bg_fill：
-                                                // 与面板底色拉开一档 + 明确描边，
-                                                // padding 才有「卡片」的视觉感
-                                                .frame(
-                                                    egui::Frame::new()
-                                                        .fill(fv.widgets.noninteractive.bg_fill)
-                                                        .stroke(fv.widgets.noninteractive.bg_stroke)
-                                                        .corner_radius(egui::CornerRadius::same(6)),
-                                                ),
-                                        );
-                                        });
-                                    },
-                                );
-                            }
-                            Some(OcrPanel::Running) | None if busy => {
-                                ui.vertical_centered(|ui| {
-                                    ui.add_space(panel_rect.height() * 0.22);
-                                    ui.spinner();
-                                    ui.add_space(10.0);
-                                    ui.label(egui::RichText::new("识别中…").color(muted));
-                                });
-                            }
-                            Some(OcrPanel::Failed { msg }) => {
-                                ui.vertical_centered(|ui| {
-                                    ui.add_space(12.0);
-                                    ui.label(
-                                        egui::RichText::new("识别失败").strong().color(error_fg),
-                                    );
-                                    ui.add_space(4.0);
-                                    ui.label(egui::RichText::new(msg).color(muted));
-                                    ui.add_space(10.0);
-                                    if ui.button("重试").clicked() {
-                                        act = Some(PanelAction::Retry);
-                                    }
-                                });
-                            }
-                            Some(OcrPanel::Running) => {
-                                // 无任务且状态残留 Running（理论不可达）：按空态处理
-                                ui.label(egui::RichText::new("尚未识别").color(muted));
-                            }
-                            None => {
-                                ui.label(egui::RichText::new("尚未识别").color(muted));
-                            }
-                        }
                     });
+            });
+
+        // ---- 正文区：独立绝对定位 Area。卡片背景按 body_rect 画（必然撑满
+        // 面板剩余高度），文字在卡片内滚动，padding 由 TextEdit margin 提供。
+        // 之前把 TextEdit 放在 Frame 布局流内，available_height 收缩到内容
+        // 高度，min_size 被吞掉——所以一直撑不满（2026-11-19 反复反馈）。
+        egui::Area::new(egui::Id::new("pin-ocr-body"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(body_rect.min)
+            .show(ctx, |ui| {
+                ui.set_clip_rect(clip);
+                ui.set_min_width(body_rect.width());
+                ui.set_max_width(body_rect.width());
+                ui.set_min_height(body_rect.height());
+                ui.set_max_height(body_rect.height());
+                let fv = ui.visuals().clone();
+                // 卡片底 + 描边：绝对矩形，100% 撑满
+                ui.painter()
+                    .rect_filled(body_rect, 6.0, fv.widgets.noninteractive.bg_fill);
+                ui.painter().rect_stroke(
+                    body_rect,
+                    6.0,
+                    fv.widgets.noninteractive.bg_stroke,
+                    egui::StrokeKind::Inside,
+                );
+                match &state {
+                    Some(OcrPanel::Done { text, .. }) => {
+                        // 只读 = 每帧用原文重建临时副本（egui 0.35 已无
+                        // TextEdit::read_only）；选中/复制完整保留，编辑不回写
+                        egui::ScrollArea::vertical()
+                            .id_salt("pin-ocr-scroll")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                let mut shown = text.clone();
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut shown)
+                                        .desired_width(body_rect.width())
+                                        // padding：文字离卡片边框留足呼吸空间
+                                        .margin(egui::Margin::same(14))
+                                        // 卡片背景由上面绝对矩形画，文字区透明
+                                        .frame(egui::Frame::new()),
+                                );
+                            });
+                    }
+                    Some(OcrPanel::Running) | None if busy => {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(body_rect.height() * 0.22);
+                            ui.spinner();
+                            ui.add_space(10.0);
+                            ui.label(
+                                egui::RichText::new("识别中…").color(fv.weak_text_color()),
+                            );
+                        });
+                    }
+                    Some(OcrPanel::Failed { msg }) => {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(12.0);
+                            ui.label(
+                                egui::RichText::new("识别失败")
+                                    .strong()
+                                    .color(fv.error_fg_color),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new(msg).color(fv.weak_text_color()));
+                            ui.add_space(10.0);
+                            if ui.button("重试").clicked() {
+                                act = Some(PanelAction::Retry);
+                            }
+                        });
+                    }
+                    Some(OcrPanel::Running) | None => {
+                        ui.label(
+                            egui::RichText::new("尚未识别").color(fv.weak_text_color()),
+                        );
+                    }
+                }
             });
         match act {
             Some(PanelAction::Retry) => self.start_ocr(ctx),
