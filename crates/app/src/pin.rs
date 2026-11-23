@@ -552,12 +552,17 @@ impl PinApp {
         }
     }
 
-    /// 当前模式下的窗口尺寸：纯图 = 图像当前显示尺寸（base × zoom）；
-    /// 正常 = 图像基准 + 四周内边距 + 底部条带（面板展开再加面板宽）。
-    /// 旋转/翻转/缩放/面板开合/纯图切换共用，避免某条路径漏掉纯图分支。
+    /// 当前模式下的窗口尺寸：纯图 = 图像当前显示尺寸（base × zoom），
+    /// 宽度保底 [`MIN_TOOLBAR_W`]（小图也要放得下 hover 浮出的工具条，
+    /// 图像居中、两侧露框底色）；正常 = 图像基准 + 四周内边距 + 底部条带
+    /// （面板展开再加面板宽）。旋转/翻转/缩放/面板开合/纯图切换共用，
+    /// 避免某条路径漏掉纯图分支。
     fn current_window_size(&self) -> Vec2 {
         if self.bare {
-            self.base * self.zoom
+            Vec2::new(
+                (self.base.x * self.zoom).max(MIN_TOOLBAR_W),
+                self.base.y * self.zoom,
+            )
         } else {
             window_size_at(self.base, self.panel_open)
         }
