@@ -211,6 +211,15 @@ make_dmg() { # $1=target $2=bin
     codesign "${sign_args[@]}" "$app"
     # 拖拽安装：卷内放 /Applications 快捷方式
     ln -s /Applications "$stage/Applications"
+    # 拖拽提示：背景图（虚线箭头 + 中文文案）+ 预置 .DS_Store（图标布局 /
+    # 窗口尺寸 / 背景图引用），两者均为随仓库提交的发布资源，CI 零额外依赖。
+    # .DS_Store 由 create-dmg 生成后拨平图标（Iloc 即中心，(130,150)/(410,150)、
+    # iconSize=128、窗口 540x380），背景别名为卷相对路径
+    # "LaterScreen:.background:dmg-background.png"，用户机器卷名一致即可解析。
+    # 改设计：编辑 scripts/gen_dmg_background.py 重生成背景图（需 macOS+CJK 字体）。
+    mkdir -p "$stage/.background"
+    cp packaging/dmg-background.png "$stage/.background/dmg-background.png"
+    cp packaging/dmg.DS_Store "$stage/.DS_Store"
     out="$DIST/lscreen-v$VERSION-$1.dmg"
     rm -f "$out"
     hdiutil create -quiet -volname "LaterScreen" -srcfolder "$stage" -format UDZO "$out"

@@ -4,5 +4,8 @@
 !docs/**/*.png
 /dist
 !packaging/icon.png
+# dmg 安装窗口发布资源（背景图 + 预置 Finder 布局）
+!packaging/dmg-background.png
+!packaging/dmg.DS_Store
 .workbuddy/*
 .zcode/*
