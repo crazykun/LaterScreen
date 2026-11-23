@@ -781,9 +781,12 @@ fn run_settings() -> Result<(), String> {
 ///   egui 逻辑坐标（与 `with_inner_size` 语义一致，无 DPI 坑），建窗即
 ///   正确尺寸，避免「先默认大小闪一下再跳变」。
 fn run_history() -> Result<(), String> {
-    // 单例：快捷键/菜单连按会不断 spawn 新历史进程，这里先抢锁，已有活着的
-    // 历史窗口则本进程直接退出，不再弹第二个面板。
+    // 单例 toggle：快捷键/菜单连按会不断 spawn 新历史进程，这里先抢锁。
+    // 已有活着的历史窗口 → 留下退出信号让它自行关闭（poll_raise 里 quit
+    // 优先于 raise，不会先跳前台再关），本进程退出；窗口关闭后锁释放，
+    // 下次再按重新打开——第一次按出窗、再按收窗（2026-11-23 用户要求）。
     if !history::acquire_single_instance() {
+        history::request_quit();
         return Ok(());
     }
     let (_, saved_size) = history::load_saved_geometry();
