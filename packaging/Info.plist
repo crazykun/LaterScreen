@@ -20,6 +20,11 @@
 	<string>icon</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<!-- 菜单栏应用：不注册 Dock 图标。运行期 winit 事件循环还会显式
+	     Accessory（tray::run_native / main::run_eframe），此处是启动瞬间
+	     （didFinishLaunching 之前）不闪图标的声明式保证。 -->
+	<key>LSUIElement</key>
+	<true/>
 	<key>LSMinimumSystemVersion</key>
 	<string>12.3</string>
 </dict>

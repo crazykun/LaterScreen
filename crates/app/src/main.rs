@@ -69,124 +69,10 @@ pub(crate) fn apply_window_class(cc: &eframe::CreationContext<'_>) {
     }
 }
 
-/// 非 Linux：mac 的 Dock 图标在首帧统一补设（见 `DockIconOnceApp`），
-/// Windows 用 exe 资源图标，均无需窗口级处理。
+/// 非 Linux：Windows 用 exe 资源图标，mac 子进程不占 Dock（见 run_eframe），
+/// 均无需窗口级处理。
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn apply_window_class(_cc: &eframe::CreationContext<'_>) {}
-
-/// mac：给**直跑二进制**的进程补设应用图标（首帧经 `DockIconOnceApp` 调用）。
-///
-/// 托盘动作全是 spawn 独立子进程（历史面板/贴图/录制状态窗…），macOS 上
-/// 子进程是裸可执行文件（不经 LaunchServices 启动），Dock 里拿到的是系统
-/// 默认图标——只有经 LaterScreen.app 启动的主进程才有 bundle 图标
-/// （用户反馈「历史面板图标不对，不是我应用的图标」）。
-///
-/// **时机是成败关键**（真机对照实验，macOS 15 / Intel）：同一段
-/// `NSApp setApplicationIconImage` 在 run_eframe 早期或 eframe creator 回调
-/// 里调用，NSApp 状态未报错但 Dock 始终不采纳；**窗口显示后的首帧**再设
-/// 才生效。故通过 `DockIconOnceApp` 在首帧调用本函数。图标源用内嵌打包图
-/// （tray::ICON_PNG，与 bundle 的 icon.icns 同源）落到临时文件再经
-/// `NSImage initWithContentsOfFile:` 加载——系统自解码 PNG。raw libobjc
-/// FFI 直连（AppKit 已在链接闭包内），零新依赖；任一步失败静默跳过——
-/// 图标只是体验问题，与 Linux 侧 set_window_class 同语义。
-#[cfg(target_os = "macos")]
-fn set_dock_icon() {
-    use std::sync::OnceLock;
-    static DONE: OnceLock<()> = OnceLock::new();
-    if DONE.set(()).is_err() {
-        return;
-    }
-    // libobjc 直连（repo 既有风格：capture/other.rs 直连 CG/CF 同款，不引入
-    // objc 系新依赖）。objc_msgSend 是汇编实现的**定参**函数，必须按定参
-    // 形状声明：C 变参形状（`...`）在 Apple arm64 上会把匿名参数压栈
-    // （arm64 变参调用约定），而 objc_msgSend 只从 x2/x3/… 寄存器读实参，
-    // 拿到的是寄存器残留垃圾——真机 M6/macOS 27 实测 `+[NSString
-    // stringWithUTF8String:]` 对垃圾指针 strlen 直接 SIGSEGV，v0.11.8–
-    // v0.14.2 所有 mac GUI 子进程（截图/取色/贴图/历史/设置）首帧必崩。
-    // x86_64 变参仍走寄存器，故当年 Intel 真机验证通过、arm64 才暴露。
-    // 同符号按不同签名各自声明即可（链接期都解析到同一符号，rustc 不做
-    // 跨声明签名一致性校验）：0 参形状给 sharedApplication/alloc/release，
-    // 1 参形状给其余调用；void 方法（release）的返回值丢弃即可。
-    // clashing_extern_declarations 警的本就是「意外」的签名冲突，这里两个
-    // 形状都是有意为之（变参的教训见上），CI -D warnings 下显式放行。
-    #[link(name = "objc", kind = "dylib")]
-    #[allow(clashing_extern_declarations)]
-    unsafe extern "C" {
-        fn objc_getClass(name: *const i8) -> *mut core::ffi::c_void;
-        fn sel_registerName(name: *const i8) -> *const core::ffi::c_void;
-        #[link_name = "objc_msgSend"]
-        fn msg_send0(
-            obj: *mut core::ffi::c_void,
-            sel: *const core::ffi::c_void,
-        ) -> *mut core::ffi::c_void;
-        #[link_name = "objc_msgSend"]
-        fn msg_send1(
-            obj: *mut core::ffi::c_void,
-            sel: *const core::ffi::c_void,
-            arg0: *mut core::ffi::c_void,
-        ) -> *mut core::ffi::c_void;
-    }
-    let sel = |name: &'static core::ffi::CStr| unsafe { sel_registerName(name.as_ptr()) };
-    unsafe {
-        let nsapp_cls = objc_getClass(c"NSApplication".as_ptr());
-        let nsimage_cls = objc_getClass(c"NSImage".as_ptr());
-        let nsstring_cls = objc_getClass(c"NSString".as_ptr());
-        if nsapp_cls.is_null() || nsimage_cls.is_null() || nsstring_cls.is_null() {
-            return;
-        }
-        let nsapp = msg_send0(nsapp_cls, sel(c"sharedApplication"));
-        if nsapp.is_null() {
-            return;
-        }
-        let tmp = std::env::temp_dir().join("lscreen-dockicon.png");
-        if std::fs::write(&tmp, tray::ICON_PNG).is_err() {
-            return;
-        }
-        let tmp_c = match std::ffi::CString::new(tmp.to_string_lossy().as_bytes()) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        let path = msg_send1(
-            nsstring_cls,
-            sel(c"stringWithUTF8String:"),
-            tmp_c.as_ptr() as *mut core::ffi::c_void,
-        );
-        let image = msg_send1(
-            msg_send0(nsimage_cls, sel(c"alloc")),
-            sel(c"initWithContentsOfFile:"),
-            path,
-        );
-        if image.is_null() {
-            return;
-        }
-        msg_send1(nsapp, sel(c"setApplicationIconImage:"), image);
-        msg_send0(image, sel(c"release"));
-    }
-}
-
-/// mac：首帧补设 Dock 图标的 App 包装层。6 个 App 全部只重载
-/// `ui()`/`clear_color()`，转发这两个即可保持行为；**新 App 若重载了
-/// eframe::App 的其他方法，需在此同步转发**。
-#[cfg(target_os = "macos")]
-struct DockIconOnceApp {
-    inner: Box<dyn eframe::App>,
-    done: bool,
-}
-
-#[cfg(target_os = "macos")]
-impl eframe::App for DockIconOnceApp {
-    fn ui(&mut self, ui: &mut eframe::egui::Ui, frame: &mut eframe::Frame) {
-        if !self.done {
-            self.done = true;
-            set_dock_icon();
-        }
-        self.inner.ui(ui, frame);
-    }
-
-    fn clear_color(&self, visuals: &eframe::egui::Visuals) -> [f32; 4] {
-        self.inner.clear_color(visuals)
-    }
-}
 
 /// 取出 eframe 窗口的 X11 window id（跨屏 fullscreen 用）。非 X11 返回 None。
 #[cfg(target_os = "linux")]
@@ -476,25 +362,25 @@ fn report_fatal(msg: &str) {
 /// 没有，切 `HardwareAcceleration::Off` 也救不回来。
 fn run_eframe(
     title: &str,
-    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] dock_icon: bool,
-    options: eframe::NativeOptions,
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))] mut options: eframe::NativeOptions,
     app: eframe::AppCreator<'static>,
 ) -> Result<(), String> {
-    // mac 裸子进程的 Dock 图标在首帧补设（早期时机 Dock 不采纳），见
-    // DockIconOnceApp / set_dock_icon。覆盖层类窗口（截图/取色/框选）传
-    // false：覆盖层是菜单栏之上的整屏窗，Dock 上挂一个点不动的本应用图标
-    // 只会突兀（用户反馈 2026-11-18）；贴图/历史/设置等交互窗仍补设。
+    // mac：GUI 子进程一律 Accessory（菜单栏应用）形态——不占 Dock、不进
+    // Cmd+Tab（用户反馈 2026-11-20：贴图/历史各挂一个 Dock 图标，要求全隐；
+    // 此前 2026-11-18 只是覆盖层不挂图标、交互窗仍挂）。与托盘常驻进程
+    // （tray::run_native）同机制：经 eframe 的 event_loop_builder 钩子在
+    // 事件循环创建前声明，winit 会在 applicationDidFinishLaunching 时显式
+    // setActivationPolicy(Accessory)。不能「提前裸设 + 不声明钩子」——winit
+    // 对未显式声明 policy 的**非 bundle 进程**会在 didFinishLaunching 强制
+    // 改回 Regular（cargo run 裸跑即中招）。窗口抢焦点不受形态影响：winit
+    // 默认 activateIgnoringOtherApps=YES，Accessory 照样激活、文本输入正常。
     #[cfg(target_os = "macos")]
-    let app: eframe::AppCreator<'static> = if dock_icon {
-        Box::new(move |cc| {
-            let inner = app(cc)?;
-            Ok(Box::new(DockIconOnceApp { inner, done: false }) as Box<dyn eframe::App>)
-        })
-    } else {
-        app
-    };
-    #[cfg(not(target_os = "macos"))]
-    let _ = dock_icon;
+    {
+        options.event_loop_builder = Some(Box::new(|builder| {
+            use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+            builder.with_activation_policy(ActivationPolicy::Accessory);
+        }));
+    }
     eframe::run_native(title, options, app).map_err(|e| match e {
         eframe::Error::OpenGL(_)
         | eframe::Error::NoGlutinConfigs(..)
@@ -762,7 +648,6 @@ fn run_settings() -> Result<(), String> {
     };
     run_eframe(
         "lscreen 配置",
-        true,
         options,
         Box::new(|cc| Ok(Box::new(settings_ui::SettingsApp::new(cc)))),
     )
@@ -811,7 +696,6 @@ fn run_history() -> Result<(), String> {
     };
     run_eframe(
         "lscreen 历史",
-        true,
         options,
         Box::new(|cc| Ok(Box::new(history::HistoryApp::new(cc)))),
     )
@@ -894,7 +778,6 @@ fn pick_region_interactive() -> Result<Option<String>, String> {
     let out = shared.clone();
     run_eframe(
         "lscreen-record",
-        false,
         options,
         Box::new(move |cc| {
             apply_overlay_behavior(cc);
@@ -1121,7 +1004,6 @@ fn run_gui(mode: ui::Mode) -> Result<(), String> {
     instance::mark_gui_overlay();
     run_eframe(
         "lscreen",
-        false,
         options,
         Box::new(move |cc| {
             apply_overlay_behavior(cc);
@@ -1187,7 +1069,6 @@ fn run_gui_wayland() -> Result<(), String> {
     };
     run_eframe(
         "lscreen",
-        false,
         options,
         Box::new(move |cc| {
             Ok(Box::new(ui::SnipApp::new(
@@ -1866,7 +1747,6 @@ fn run_record(
     let app_status = status.clone();
     run_eframe(
         "lscreen-record-status",
-        true,
         options,
         Box::new(move |cc| {
             Ok(Box::new(record_ui::RecordApp::new(
@@ -2243,7 +2123,6 @@ fn run_scroll(
     let app_start = started.clone();
     run_eframe(
         "lscreen-scroll-status",
-        true,
         options,
         Box::new(move |cc| {
             Ok(Box::new(record_ui::RecordApp::new(
@@ -2447,7 +2326,6 @@ fn run_annotate(
     let config = config::Config::load();
     run_eframe(
         "lscreen-annotate",
-        true,
         options,
         Box::new(move |cc| {
             let shot = lscreen_capture::Screenshot {
@@ -2591,7 +2469,6 @@ fn run_pin(
         };
         run_eframe(
             "lscreen-pin",
-            true,
             options,
             Box::new(move |cc| {
                 let launch = pin::PinLaunch {

@@ -775,8 +775,6 @@ fn base_tooltip() -> String {
 // ---------------------------------------------------------------- 图标
 
 /// 打包图标源图（与 mac bundle 的 icon.icns、Win 资源图标同源）。
-/// mac 的 Dock 图标补设（main::set_dock_icon）也直接把这串 PNG 字节喂给
-/// NSImage——系统自解 PNG，无需经 image crate 解码。
 pub(crate) const ICON_PNG: &[u8] = include_bytes!("../../../packaging/icon.png");
 
 /// 彩色位图图标：Linux 的 `_NET_WM_ICON` 窗口图标与 Win 托盘在用。
