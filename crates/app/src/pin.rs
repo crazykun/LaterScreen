@@ -50,7 +50,7 @@ pub const PANEL_W: f32 = 300.0;
 /// 窗口宽度下限 = 完整工具条宽（无上传 11 组 ≈354pt、有上传 ≈380pt 含
 /// 边距——「识别文字」按钮加入后按 384 保底），窄图也要放得下全部
 /// 按钮（穿透可恢复的死锁防线），见 window_size_at/show_toolbar。
-pub const MIN_TOOLBAR_W: f32 = 384.0;
+pub const MIN_TOOLBAR_W: f32 = 410.0;
 /// 放大用最近邻（滚轮放大像素格清晰），缩小用线性
 fn texture_options() -> egui::TextureOptions {
     egui::TextureOptions {
@@ -193,6 +193,8 @@ enum ToolbarAction {
     Upload,
     /// 在独立标注窗中打开当前贴图（同滚动截图预览链路）
     Edit,
+    /// 纯图模式：只显示图片（隐藏边框/工具条/面板），鼠标移入浮出工具条
+    ToggleBare,
     /// 识别文字：无结果时=后台识别并打开右侧面板；已有结果时=开/关面板
     ToggleOcr,
     /// 收起右侧识别结果面板（工具栏最右侧的 |← 按钮）
@@ -304,6 +306,9 @@ pub struct PinApp {
     upload_job: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     /// 上传条目的历史副本文件名（record_file 返回值，成功后回填 url）
     upload_filename: Option<String>,
+    /// 纯图模式：只显示图片（隐藏边框/工具条/面板），鼠标移入浮出工具条。
+    /// 窗口尺寸 = 图像当前显示尺寸（base × zoom），面板状态保留但不显示
+    bare: bool,
     /// 右侧「识别结果」面板是否展开。展开/收起会增减窗口宽度（R3），
     /// 面板内容见 [`PinApp::ocr`]
     panel_open: bool,
@@ -416,6 +421,7 @@ impl PinApp {
             upload_cmd,
             upload_job: None,
             upload_filename: None,
+            bare: false,
             panel_open: ocr.is_some(),
             panel_anim: 0.0,
             ocr,
@@ -536,12 +542,32 @@ impl PinApp {
     /// 工具条「识别文字」按钮：无结果/上次失败 → 后台识别并展开面板；
     /// 已有结果 → 单纯开/合面板（不重复识别）；识别中 → 忽略连点（R2）。
     fn toggle_ocr(&mut self, ctx: &egui::Context) {
+        // 纯图模式没有面板位：先恢复完整布局再识别/开合面板
+        self.bare = false;
         match &self.ocr {
             Some(OcrPanel::Running) => {} // 识别中：防连点
             Some(OcrPanel::Done { .. }) => self.set_panel_open(ctx, !self.panel_open),
             // 尚未识别过、或上次失败/文件读取失败：重新识别并展开面板（R7 可重试）
             Some(OcrPanel::Failed { .. }) | None => self.start_ocr(ctx),
         }
+    }
+
+    /// 当前模式下的窗口尺寸：纯图 = 图像当前显示尺寸（base × zoom）；
+    /// 正常 = 图像基准 + 四周内边距 + 底部条带（面板展开再加面板宽）。
+    /// 旋转/翻转/缩放/面板开合/纯图切换共用，避免某条路径漏掉纯图分支。
+    fn current_window_size(&self) -> Vec2 {
+        if self.bare {
+            self.base * self.zoom
+        } else {
+            window_size_at(self.base, self.panel_open)
+        }
+    }
+
+    /// 纯图模式切换：只显示图片（隐藏边框/工具条/面板），鼠标移入浮出工具条。
+    /// 进入时窗口收到图像当前显示尺寸，退出恢复完整布局（2026-11-23 用户要求）。
+    fn toggle_bare(&mut self, ctx: &egui::Context) {
+        self.bare = !self.bare;
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.current_window_size()));
     }
 
     /// 面板开合（R3）：展开/收起只增减窗口宽度（PANEL_W），图像显示区域
@@ -551,7 +577,7 @@ impl PinApp {
             return;
         }
         self.panel_open = open;
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(window_size_at(self.base, open)));
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.current_window_size()));
     }
 
     /// 后台启动 OCR（不卡 UI，线程 + channel 同 upload_job/scan_ocr 模式）。
@@ -819,10 +845,7 @@ impl PinApp {
                 egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &self.rgba);
             t.set(img, texture_options());
         }
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(window_size_at(
-            self.base,
-            self.panel_open,
-        )));
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.current_window_size()));
     }
 
     fn rotate_cw(&mut self, ctx: &egui::Context) {
@@ -853,6 +876,10 @@ impl PinApp {
             return;
         }
         self.zoom = z;
+        // 纯图模式窗口 = 图像显示尺寸，缩放时窗口跟随（正常模式固定框 R9）
+        if self.bare {
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.current_window_size()));
+        }
         let pct = (z * 100.0).round() as i32;
         self.toast(ctx, format!("{pct}%"));
     }
@@ -967,9 +994,9 @@ impl PinApp {
         // 到条带最右缘（用户 2026-11-19 要求），主排保持图像区中心不变。
         let ocr_copy_ready = self.panel_open && matches!(&self.ocr, Some(OcrPanel::Done { .. }));
         let shown = if self.upload_cmd.is_some() {
-            380.0
+            406.0
         } else {
-            354.0
+            380.0
         };
         // 锚定图像区中心；图像窄于整排时钳回条带内（不越出窗口）
         let pos = Pos2::new(
@@ -987,6 +1014,7 @@ impl PinApp {
             self.upload_job.is_some(),
         );
         let (ocr_busy, ocr_open) = (self.ocr_job.is_some(), self.panel_open);
+        let bare = self.bare;
         egui::Area::new(egui::Id::new("pin-bar"))
             .order(egui::Order::Foreground)
             .fixed_pos(pos)
@@ -1071,6 +1099,15 @@ impl PinApp {
                     if action_button(ui, true, "返回编辑：在标注窗打开本贴图（可标注/OCR）", draw_edit)
                     {
                         action = Some(ToolbarAction::Edit);
+                    }
+                    // 纯图模式：只显示图片，鼠标移入浮出工具条（再点恢复）
+                    let bare_tip = if bare {
+                        "显示外层：恢复边框与工具栏"
+                    } else {
+                        "隐藏外层：只显示图片（鼠标移入浮出工具栏）"
+                    };
+                    if action_button(ui, true, bare_tip, draw_bare) {
+                        action = Some(ToolbarAction::ToggleBare);
                     }
                     // 识别文字：无结果时点击=后台识别并展开右侧面板；已有
                     // 结果=开/合面板；识别中=禁用防连点（R2）。面板展开时
@@ -1202,6 +1239,7 @@ impl PinApp {
             Some(ToolbarAction::ZoomIn) => self.step_zoom(ctx, true),
             Some(ToolbarAction::Upload) => self.do_upload(ctx),
             Some(ToolbarAction::Edit) => self.do_edit(ctx),
+            Some(ToolbarAction::ToggleBare) => self.toggle_bare(ctx),
             Some(ToolbarAction::ToggleOcr) => self.toggle_ocr(ctx),
             Some(ToolbarAction::CollapseOcr) => self.set_panel_open(ctx, false),
             _ => {}
@@ -1413,6 +1451,8 @@ impl eframe::App for PinApp {
         // 建窗期置顶补发（with_always_on_top 在部分 WM 不落地，见方法注释）
         self.ping_window_level(&ctx);
         let full = ui.max_rect();
+        // 纯图模式：只显示图片（隐藏边框/工具条/面板），鼠标移入浮出工具条
+        let bare = self.bare;
         // 窗口切成三块：右侧识别面板（展开时）+ 上方图像区（含四周内边距
         // 「框」）+ 下方工具条条带。图像显示区域 = 图像区减去四周 PAD，
         // 不随面板开合与缩放变化（R3/R9）。面板宽度按窗口**实际几何**反推：
@@ -1420,7 +1460,7 @@ impl eframe::App for PinApp {
         // 缘），按状态直接切分会让图像右缘被持续裁掉——实际没长出足够宽
         // 度就按无面板布局（图像完整），WM 补上尺寸后下一帧自动展开
         let base_w = window_size_at(self.base, false).x;
-        let side_w = if self.panel_open {
+        let side_w = if !bare && self.panel_open {
             let grown = full.width() - base_w;
             if grown >= PANEL_W - 1.0 {
                 PANEL_W
@@ -1430,7 +1470,11 @@ impl eframe::App for PinApp {
         } else {
             0.0
         };
-        let split_y = (full.max.y - BAR_H).max(full.min.y);
+        let split_y = if bare {
+            full.max.y
+        } else {
+            (full.max.y - BAR_H).max(full.min.y)
+        };
         // 面板滑入动画：InnerSize 落地（side_w>0）后内容从右缘滑到位（约
         // 150ms 指数趋近），期间图像区/工具栏纹丝不动；滑出窗口外的部分由
         // OS 按窗口边界裁掉，无需手动裁剪。动画未完持续请求重绘
@@ -1452,13 +1496,15 @@ impl eframe::App for PinApp {
         // InnerSize（窗口仍含面板宽度）时，图像区恒按基准宽**左锚**钳制
         // ——否则中心锚会让图像整体右移 PANEL_W/2 再弹回一帧。展开方向
         // 由上方 side_w 的实际几何反推保证（未落地就按无面板布局）
-        let img_w = if self.panel_open {
+        let img_w = if bare {
+            full.width()
+        } else if self.panel_open {
             full.max.x - side_w
         } else {
             full.width().min(base_w)
         };
         let img_area = Rect::from_min_max(full.min, Pos2::new(full.min.x + img_w, split_y));
-        let image_rect = img_area.shrink(PAD);
+        let image_rect = if bare { img_area } else { img_area.shrink(PAD) };
         let panel_rect = Rect::from_min_max(
             Pos2::new(img_area.max.x, full.min.y),
             Pos2::new(full.max.x, split_y),
@@ -1710,7 +1756,23 @@ impl eframe::App for PinApp {
             self.do_copy(&ctx);
         }
 
-        self.show_toolbar(&ctx, bar_rect, toolbar_anchor_x);
+        if bare {
+            // 纯图模式：平时只显示图片；鼠标移入窗口时浮出工具条（半透明底
+            // 覆盖在图上），移出即隐藏。hover 进出都要及时刷新——egui 无输入
+            // 事件时不主动重绘，120ms 心跳兜底
+            let hover = ctx
+                .input(|i| i.pointer.latest_pos())
+                .is_some_and(|p| full.contains(p));
+            if hover {
+                let bar = Rect::from_min_max(Pos2::new(full.min.x, full.max.y - BAR_H), full.max);
+                ui.painter()
+                    .rect_filled(bar, 0.0, Color32::from_black_alpha(150));
+                self.show_toolbar(&ctx, bar, toolbar_anchor_x);
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(120));
+        } else {
+            self.show_toolbar(&ctx, bar_rect, toolbar_anchor_x);
+        }
         self.show_ocr_panel(ui, panel_rect, reveal);
         self.show_through_confirmation(&ctx);
         self.show_toast(&ctx);
@@ -1865,6 +1927,26 @@ fn dashed_mirror_axis(p: &egui::Painter, r: Rect, c: Color32, vertical: bool) {
 }
 
 /// 编辑图标：圆角方框内的一支铅笔，作为贴图编辑 Logo。
+/// 纯图模式（眼睛）：只显示图片，鼠标移入浮出工具条。
+fn draw_bare(p: &egui::Painter, r: Rect, c: Color32) {
+    let s = Stroke::new(ICON_W, c);
+    let cy = r.center().y;
+    let w = r.width();
+    // 杏仁形眼睛轮廓：上下两条抛物线（各 8 段折线近似）+ 瞳孔
+    let n = 8;
+    let pt = |i: usize, sign: f32| {
+        let t = i as f32 / n as f32;
+        let x = r.min.x + w * t;
+        let h = (t * std::f32::consts::PI).sin();
+        Pos2::new(x, cy + sign * h * w * 0.26)
+    };
+    for i in 0..n {
+        p.line_segment([pt(i, -1.0), pt(i + 1, -1.0)], s);
+        p.line_segment([pt(i, 1.0), pt(i + 1, 1.0)], s);
+    }
+    p.circle_filled(r.center(), w * 0.11, c);
+}
+
 fn draw_edit(p: &egui::Painter, r: Rect, c: Color32) {
     // 编辑图标原稿偏小（用户反馈 2026-11-18）：同 rotate 放大墨水盒
     let r = grow(r, 1.18);
