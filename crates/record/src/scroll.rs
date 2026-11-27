@@ -256,6 +256,17 @@ impl ScrollStitcher {
         if sad / (rows * cols as u64) > MATCH_TOL as u64 {
             return Ok(ScrollOutcome::Mismatch);
         }
+        // 重叠下限：本帧与已拼接内容必须留有至少一个匹配块的真重叠。
+        // 位移超过「帧高 − 块高」（= max_shift）时上一屏尾部已整块滚出
+        // 画面，此时任何「匹配」都只是内容重复纹理上的巧合——真机
+        // 2026-11-27：浏览器单格位移 408px、选区 420px，重叠只剩 12 行，
+        // 8 行纹理就能骗过 MIN_VERIFY，拼出的长图内容回跳/重影。
+        // 宁可按 Mismatch 停下（调用方保留已有结果），也不把错位内容
+        // 拼进长图。
+        let overlap = (h as usize).min(len_prev.saturating_sub(s));
+        if overlap < self.block {
+            return Ok(ScrollOutcome::Mismatch);
+        }
         // s = 本帧视口顶在拼接图坐标中的位置（帧行 r ↔ 拼接行 r+s）。
         // 视口底（拼接图末行 len-1）在本帧中的行号 = len-1-s，其后才是
         // 新进入视口的内容：追加行数 = h − (len−s)，s 本身不是追加量
@@ -390,6 +401,38 @@ mod tests {
             }
         }
         assert!((st.height() as i64 - src_h as i64).abs() <= 2);
+    }
+
+    /// 位移超过「帧高 − 匹配块」时（上一屏尾部整块滚出画面）**绝不允许
+    /// 追加**：此时重叠不足一个匹配块，任何「匹配」都只是重复内容纹理上
+    /// 的巧合。真机 2026-11-27：浏览器单格滚轮 408px、选区高 420px，
+    /// 重叠只剩 12 行却仍被 MIN_VERIFY 放过 → 长图内容回跳/重影。
+    ///
+    /// 取值上限 h−8：重叠少于 MIN_VERIFY 行的真实位移连候选都进不来
+    /// （位移假设本身无法验证），那种情况由调用方侧的小步长保证，
+    /// 不在本守卫的职责内。
+    #[test]
+    fn shift_beyond_match_budget_never_appends() {
+        let (w, h, src_h) = (160usize, 120usize, 20_000usize);
+        let mut st = ScrollStitcher::new(&window_view(src_h, w, h, 0), w as u32, h as u32).unwrap();
+        let budget = st.max_shift() as usize; // 120 − 20 = 100
+        assert_eq!(budget, 100);
+        for shift in (budget + 1)..=(h - 8) {
+            let out = st
+                .push(&window_view(src_h, w, h, shift), w as u32, h as u32)
+                .unwrap();
+            assert!(
+                !matches!(out, ScrollOutcome::Appended(_)),
+                "shift={shift} 超过可匹配预算 {budget} 仍然追加了内容（{out:?}）"
+            );
+        }
+        assert_eq!(st.height(), h as u32, "越预算的帧不得改变长图高度");
+        // 正边界：恰好一个匹配块的重叠仍应正常拼接
+        assert!(matches!(
+            st.push(&window_view(src_h, w, h, budget), w as u32, h as u32)
+                .unwrap(),
+            ScrollOutcome::Appended(_)
+        ));
     }
 
     /// 选区底部压着**纯色**固定镶边（输入条/工具栏底衬）时：内容滚动、

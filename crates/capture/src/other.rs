@@ -198,6 +198,7 @@ mod mac {
             wheel_count: u32,
             ...
         ) -> *mut core::ffi::c_void;
+        pub fn CGEventSetIntegerValueField(event: *mut core::ffi::c_void, field: u32, value: i64);
         pub fn CGEventPost(tap: u32, event: *mut core::ffi::c_void);
         pub fn CGWarpMouseCursorPosition(new_position: CGPoint) -> i32;
         // 屏幕录制授权预检/申请（macOS 10.14+）：预检无副作用；申请仅「未
@@ -871,7 +872,7 @@ pub fn scroll_wheel(clicks: i32) -> Result<()> {
     Ok(())
 }
 
-/// mac：CGEvent 合成滚轮（**像素单位**）。指针需已在目标窗口上（滚动
+/// mac：CGEvent 合成滚轮（**行单位**）。指针需已在目标窗口上（滚动
 /// 截图流程先 warp 到选区中心）。
 ///
 /// 真机点验修正（2026-09-19）×3：
@@ -880,33 +881,78 @@ pub fn scroll_wheel(clicks: i32) -> Result<()> {
 /// 2. 「自然滚动」开启（macOS 默认）时会话层注入的增量被系统再翻转
 ///    （负增量实际向**上**滚）——按 com.apple.swipescrolldirection 偏好
 ///    预翻转符号
-/// 3. line 单位不可用：浏览器对「行」的解释在 Retina 下可达 40+ 逻辑
-///    像素/行，每步（2 notch）位移 240-300 物理px，远超拼接器尾部块
-///    匹配窗口（≤96px），内容整窗滚飞 → 拼接全程 NoChange。改像素
-///    单位精确控位：每 notch 15 逻辑像素（≈30 物理），clicks=2 时每步
-///    60 物理px——对齐 X11 notch 的位移量级，尾窗留 36px 重叠可匹配
+/// 3. 曾改「像素单位 15px/notch」试图精确控位——**方向错了**（2026-11-27
+///    真机定量复现）：不设 kCGScrollWheelEventIsContinuous 时事件被
+///    AppKit 当**非精确**（行）滚动投递，数值被当作行数解释。Edge 实测
+///    一「格」15 被当作 15 行 → 单次位移 408px（选区高 420px，重叠只剩
+///    12 行），且相邻事件被合并吞噬（408/0/0 交替）。拼接器在近乎零重叠
+///    时靠 8 行纹理就能「验证」通过，于是错位/重影/内容回跳——浏览器里
+///    「重影/只有一屏」的真因，不在拼接算法。
+///
+/// 现采用**行单位每格 1 行**（与 Win 的 WHEEL_DELTA、X11 notch 同一语义）：
+/// Edge 实测每格恒定 40px、整像素对齐（帧差 mad=0.0），首格不再被吞；
+/// 420px 选区每步重叠 ≥300px，远在匹配预算内。clicks 格数由调用方闭环
+/// 校准（见 run_scroll 的 est_shift）。注意**不要**再叠加连续标志：带
+/// continuous=1 时行增量被解释为像素并被放大（Edge 实测 80px/格）。
+///
+/// **不要用 `CGEventCreateScrollWheelEvent` 的变参传增量**（2026-11-27
+/// 真机定量对照钉死）：Rust 侧 C 变参在 arm64 上会把 `-1` 传成 `255`
+/// ——同一坐标同一时刻，C 程序创建的事件 `DeltaAxis1=-1 / Point=-10`，
+/// Rust 创建的是 `255 / 2550 / 0xFF0000`。浏览器收到「向下滚 255 行」，
+/// 一格格注入也直接把页面顶到底（用户反馈「在最上面一下就滚到最后」）。
+/// 事件仍用该 API 建（拿到正确的事件类型/源），随后**显式覆写三个
+/// 增量字段**绕开变参。
 #[cfg(target_os = "macos")]
 pub fn scroll_wheel(clicks: i32) -> Result<()> {
-    /// 一格滚轮的位移（逻辑像素；kCGScrollEventUnitPixel 单位）
-    const PX_PER_NOTCH: i32 = 15;
+    /// kCGScrollEventUnitLine
+    const UNIT_LINE: u32 = 1;
+    /// kCGScrollWheelEventDeltaAxis1（行增量）
+    const DELTA_AXIS1: u32 = 11;
+    /// kCGScrollWheelEventFixedPtDeltaAxis1（16.16 定点，CoreGraphics 自己
+    /// 也填这个字段）
+    const FIXED_PT_DELTA_AXIS1: u32 = 93;
+    /// kCGScrollWheelEventPointDeltaAxis1（像素增量；CG 对 1 行取 10px）
+    const POINT_DELTA_AXIS1: u32 = 96;
+    /// CoreGraphics 对「1 行」的像素当量（C 版实测 1 行 = 10px）
+    const PX_PER_LINE: i32 = 10;
     let source = unsafe { mac::CGEventSourceCreate(mac::SOURCE_HID) };
     if source.is_null() {
         return Err(CaptureError("CGEventSourceCreate 失败".into()));
     }
     let mut sign: i32 = clicks.signum();
-    if mac::natural_scrolling_on() {
+    let natural = mac::natural_scrolling_on();
+    if natural {
         sign = -sign;
     }
-    let notch = sign * PX_PER_NOTCH;
+    if std::env::var_os("LSCREEN_SCROLL_DEBUG").is_some() {
+        eprintln!(
+            "lscreen scroll[debug]: wheel unit=line clicks={clicks} natural={natural} sign={sign}"
+        );
+    }
     let mut ok = true;
-    for _ in 0..clicks.unsigned_abs() {
-        // kCGScrollEventUnitPixel = 0
-        let ev = unsafe { mac::CGEventCreateScrollWheelEvent(source, 0, 1, notch) };
+    // 每格一个独立事件（一行）：一次事件带 N 行会被浏览器合并成一个大
+    // 步长，做不到「最小可控位移」，闭环校准也就失去了粒度。
+    // 事件之间留 10ms：零间隔连发偶尔被浏览器整批吞掉（真机 2026-11-27：
+    // 同进程连发 5 格，gap=0 三次里有一次只走 3 格，gap≥10ms 稳定 5 格）
+    const GAP: std::time::Duration = std::time::Duration::from_millis(10);
+    for i in 0..clicks.unsigned_abs() {
+        if i > 0 {
+            std::thread::sleep(GAP);
+        }
+        let ev = unsafe { mac::CGEventCreateScrollWheelEvent(source, UNIT_LINE, 1, 0) };
         if ev.is_null() {
             ok = false;
             break;
         }
+        // 变参只传了占位 0；真正的增量在这里显式写（见上方文档）
         unsafe {
+            mac::CGEventSetIntegerValueField(ev, DELTA_AXIS1, sign as i64);
+            mac::CGEventSetIntegerValueField(
+                ev,
+                FIXED_PT_DELTA_AXIS1,
+                (sign as i64) << 16, // 16.16 定点
+            );
+            mac::CGEventSetIntegerValueField(ev, POINT_DELTA_AXIS1, (sign * PX_PER_LINE) as i64);
             mac::CGEventPost(mac::SESSION_TAP, ev);
             mac::CFRelease(ev);
         }

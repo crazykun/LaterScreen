@@ -247,8 +247,10 @@ enum Cmd {
         /// 最大滚动步数（每步滚动一次滚轮）
         #[arg(long, default_value_t = 60)]
         steps: u32,
-        /// 每步滚轮格数上限（实际按选区高度自适应，首步恒 1 格）
-        #[arg(long, default_value_t = 2)]
+        /// 每步滚轮格数上限（实际按选区高度自适应，首步恒 1 格）。
+        /// 一格在不同浏览器里位移不同（mac Edge 行单位实测 40px），
+        /// 上限只是安全阀，实际格数由首次实测位移闭环校准
+        #[arg(long, default_value_t = 8)]
         clicks: u32,
         /// 每步等待内容稳定的毫秒数
         #[arg(long, default_value_t = 200)]
@@ -1810,23 +1812,97 @@ fn poster_path(video: &std::path::Path) -> PathBuf {
         .join(format!("{stem}_poster.png"))
 }
 
-/// [`wait_stable`] 的附加观测：区分「画面全程静止」与「有滚动/动画」，
-/// 供「未检测到滚动」的归因提示与 LSCREEN_SCROLL_DEBUG 跟踪使用
-struct StableWait {
-    /// 首次比对即达标：采帧窗口内画面完全静止（页面没动）
-    static_page: bool,
-    /// 实际比对轮数
+/// [`wait_scroll_settled`] 的附加观测：区分「滚轮没生效」与「滚到底」
+struct SettleWait {
+    /// 采帧窗口内画面是否真的动过（false = 滚轮事件没落地/页面不响应）
+    moved: bool,
+    /// 实际采帧轮数
     polls: u32,
-    /// 预算耗尽仍未静止（页面有持续动画）
+    /// 动画在预算内没停稳（页面有持续动画/惯性未收尾）
     timed_out: bool,
 }
 
-/// 滚动一步后等待画面稳定：先等基准 `pause`，然后每 80ms 比对一次抽样
-/// 差异，相等即认为平滑滚动动画收尾。`budget` 是稳定等待上限——超时返回
-/// 当前帧：页面有持续动画（视频/动图）时不能无限等，拼接器自身的
-/// Mismatch 保护会兜底。v0.8.0 的固定 pause 在 mac/Win 浏览器平滑
-/// 滚动（惯性动画 ~300-500ms）下截图是动画中间态，尾部块匹配错位 →
-/// 长图重影/断段（mac 真机点验 2026-09-19）
+/// 两帧是否有可辨差异：抽样比较（每 8 像素取 1），差异 ≥ 0.05% 才算动过。
+/// 阈值与旧 wait_stable 一致——亚像素 AA 抖动不应被判成「滚动」。
+fn frames_differ(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return true;
+    }
+    let n = a.len() / 4;
+    let mut diff = 0usize;
+    for i in (0..n).step_by(8) {
+        if a[i * 4..i * 4 + 3] != b[i * 4..i * 4 + 3] {
+            diff += 1;
+            if diff * 2000 >= n {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 滚动一步后等画面落定：**先等滚动真正开始**，再等动画收尾，返回最终帧。
+///
+/// 旧实现是「固定 pause 后连拍两帧，认为没差就是稳定」——mac 浏览器在
+/// 指针 warp 后常把**首个滚轮事件吞掉**（真机 2026-11-27 定量复现：
+/// 连续注入 4 格，前 1-2 格画面纹丝不动），平滑滚动动画也可能晚于
+/// `pause` 才起步。此时两帧都还是滚动前的静止画面 → 误判 NoChange，
+/// 于是在页面顶部直接退化成普通截图（用户反馈「最上面滑动不了」）。
+/// 现在把「起步」与「收尾」分开看：起步预算内一直没动 → `moved=false`
+/// 交调用方决定重试；动过之后按连续两帧无差异收尾。
+fn wait_scroll_settled(
+    prev: &lscreen_capture::Screenshot,
+    region: (i32, i32, u32, u32),
+    start_budget: std::time::Duration,
+    settle_budget: std::time::Duration,
+    stop: &std::sync::atomic::AtomicBool,
+) -> lscreen_capture::Result<(lscreen_capture::Screenshot, SettleWait)> {
+    use std::sync::atomic::Ordering;
+    let (x, y, w, h) = region;
+    const POLL: std::time::Duration = std::time::Duration::from_millis(50);
+    let mut sw = SettleWait {
+        moved: false,
+        polls: 0,
+        timed_out: false,
+    };
+    let mut cur = lscreen_capture::capture_region(x, y, w, h)?;
+    // 阶段 1：等滚动起步
+    let t0 = std::time::Instant::now();
+    while !frames_differ(&prev.rgba, &cur.rgba) {
+        if stop.load(Ordering::Relaxed) || t0.elapsed() >= start_budget {
+            return Ok((cur, sw));
+        }
+        std::thread::sleep(POLL);
+        cur = lscreen_capture::capture_region(x, y, w, h)?;
+        sw.polls += 1;
+    }
+    sw.moved = true;
+    // 阶段 2：等动画收尾（连续两帧无差异）
+    let t1 = std::time::Instant::now();
+    loop {
+        if stop.load(Ordering::Relaxed) || t1.elapsed() >= settle_budget {
+            sw.timed_out = true;
+            return Ok((cur, sw));
+        }
+        std::thread::sleep(POLL);
+        let next = lscreen_capture::capture_region(x, y, w, h)?;
+        sw.polls += 1;
+        if !frames_differ(&cur.rgba, &next.rgba) {
+            return Ok((next, sw));
+        }
+        cur = next;
+    }
+}
+
+/// 起拍前等画面稳定：先等基准 `pause`，然后每 80ms 比对一次抽样差异，
+/// 无差异即认为（用户手动定位后的）残余惯性/滚动动画已收尾。`budget` 是
+/// 等待上限——超时返回当前帧：页面有持续动画（视频/动图）时不能无限等，
+/// 拼接器自身的 Mismatch 保护会兜底。v0.8.0 的固定 pause 在 mac/Win
+/// 浏览器平滑滚动（惯性动画 ~300-500ms）下截图是动画中间态，尾部块匹配
+/// 错位 → 长图重影/断段（mac 真机点验 2026-09-19）
+///
+/// 只用于**起拍前**；每一步滚动后的采帧走 [`wait_scroll_settled`]（它额外
+/// 处理「滚动还没起步」）。
 fn wait_stable(
     x: i32,
     y: i32,
@@ -1835,35 +1911,19 @@ fn wait_stable(
     pause: std::time::Duration,
     budget: std::time::Duration,
     stop: &std::sync::atomic::AtomicBool,
-) -> lscreen_capture::Result<(lscreen_capture::Screenshot, StableWait)> {
+) -> lscreen_capture::Result<lscreen_capture::Screenshot> {
     use std::sync::atomic::Ordering;
     std::thread::sleep(pause);
     let mut prev = lscreen_capture::capture_region(x, y, w, h)?;
     let start = std::time::Instant::now();
-    let mut sw = StableWait {
-        static_page: false,
-        polls: 0,
-        timed_out: false,
-    };
     loop {
         if stop.load(Ordering::Relaxed) || start.elapsed() >= budget {
-            sw.timed_out = !sw.static_page;
-            return Ok((prev, sw));
+            return Ok(prev);
         }
         std::thread::sleep(std::time::Duration::from_millis(80));
         let cur = lscreen_capture::capture_region(x, y, w, h)?;
-        // 抽样比较（每 8 像素取 1）：差异 < 0.05% 视为稳定
-        let mut diff = 0usize;
-        let n = prev.rgba.len() / 4;
-        for i in (0..n).step_by(8) {
-            if prev.rgba[i * 4..i * 4 + 3] != cur.rgba[i * 4..i * 4 + 3] {
-                diff += 1;
-            }
-        }
-        sw.polls += 1;
-        if diff * 2000 < n {
-            sw.static_page = sw.polls == 1;
-            return Ok((cur, sw));
+        if !frames_differ(&prev.rgba, &cur.rgba) {
+            return Ok(cur);
         }
         prev = cur;
     }
@@ -1955,7 +2015,7 @@ fn run_scroll(
                 // 轻松超过可匹配预算 → 首步 Mismatch（真机 2026-09-19：滚完
                 // 立刻点「开始滚动」必现）。页面有持续动画时等不到静止：
                 // 预算到点照常开拍（拼接器 Mismatch 保护兜底）。
-                let (first, _) = wait_stable(
+                let first = wait_stable(
                     x,
                     y,
                     w,
@@ -1992,32 +2052,60 @@ fn run_scroll(
 
                 let mut no_change = 0u32;
                 let mut scrolled = false;
-                // 归因观测：页面动过（wait_stable 见到变化）/ 发生过 Mismatch
+                // 归因观测：页面动过 / 发生过 Mismatch
                 let mut page_moved = false;
                 let mut mismatched = false;
-                // 闭环校准：浏览器对合成滚轮有加速放大（Safari 实测约 6 倍
-                // 名义位移），固定格数在矮选区下单步就把尾块整块滚出画面
-                // （首步 Mismatch，真机 2026-09-19：411px 高选区 + ~376px/步
-                // vs 可匹配上限 343px）。首步只滚 1 格实测位移，之后按
-                // 「预算一半」自适应格数；--clicks 语义变为上限。
+                // 闭环校准：不同浏览器对「一格」的解释差很多（mac 真机定量
+                // 2026-11-27：Edge 行单位 40px/格；早期像素单位被当行解释
+                // 达 ~408px/格）。首步只滚 1 格实测位移，之后按「预算一半」
+                // 自适应格数；--clicks 语义为上限。固定格数在矮选区下单步
+                // 就把尾块整块滚出画面（首步 Mismatch，真机 2026-09-19）。
                 let mut notches = 1i32;
                 let mut est_shift = 0f32; // 实测每格位移（物理px），EWMA
-                                          // 每步稳定等待预算：pause×4（上限 1.2s）
+                                          // 起步预算：指针 warp 后首个滚轮事件常被系统吞掉
+                                          // （真机 2026-11-27：连续 4 格前 1-2 格画面不动），
+                                          // 再加浏览器平滑滚动的起步延迟
+                let start_budget = (pause + std::time::Duration::from_millis(300))
+                    .min(std::time::Duration::from_millis(800));
+                // 每步稳定等待预算：pause×4（上限 1.2s）
                 let step_budget = (pause * 4).min(std::time::Duration::from_millis(1200));
+                // 拼接器参考帧：上一个被喂进去的帧（首个 = 起拍帧）
+                let mut last_frame = first;
                 for step in 1..=steps {
                     if th_stop.load(Ordering::Relaxed) {
                         break;
                     }
                     lscreen_capture::scroll_wheel(-notches).map_err(|e| e.to_string())?;
-                    // mac/Win 浏览器平滑滚动（惯性动画 ~300-500ms）下，固定
-                    // pause 后截图拿到的是动画中间态，尾部块匹配错位 → 长图
-                    // 重影/断段。轮询等画面稳定（连续两帧几乎无差异）再交
-                    // 拼接器；超时按当前帧继续（页面有动画时不能干等）
-                    let (frame, sw) = wait_stable(x, y, w, h, pause, step_budget, &th_stop)
-                        .map_err(|e| e.to_string())?;
+                    // 先等滚动真起步，再等动画收尾：固定 pause 后连拍两帧的
+                    // 旧做法会把「事件被吞/动画未起步」误判成 NoChange，
+                    // 在页面顶部直接退化成普通截图（真机反馈「最上面滑不动」）
+                    let (frame, sw) = wait_scroll_settled(
+                        &last_frame,
+                        (x, y, w, h),
+                        start_budget,
+                        step_budget,
+                        &th_stop,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    if !sw.moved {
+                        // 画面纹丝不动：滚轮没生效。还没拼上任何内容时多给
+                        // 几次机会（首个事件被吞是常态），已拼过则视为到底
+                        no_change += 1;
+                        let patience = if scrolled { 2 } else { 4 };
+                        if dbg {
+                            eprintln!(
+                                "lscreen scroll[debug]: step {step} notches={notches} 未动（no_change={no_change}/{patience}）"
+                            );
+                        }
+                        if no_change >= patience {
+                            break;
+                        }
+                        continue; // 画面没变，不喂拼接器
+                    }
                     let outcome = st
                         .push(&frame.rgba, frame.width, frame.height)
                         .map_err(|e| e.to_string())?;
+                    last_frame = frame;
                     {
                         let mut s = th_status.lock().unwrap();
                         s.frames = step as usize;
@@ -2025,14 +2113,13 @@ fn run_scroll(
                     }
                     if dbg {
                         eprintln!(
-                            "lscreen scroll[debug]: step {step} notches={notches} stable(polls={}, static={}, timeout={}) {outcome:?} height={}",
+                            "lscreen scroll[debug]: step {step} notches={notches} wait(polls={}, timeout={}) {outcome:?} height={}",
                             sw.polls,
-                            sw.static_page,
                             sw.timed_out,
                             st.height()
                         );
                     }
-                    page_moved |= !sw.static_page;
+                    page_moved = true;
                     match outcome {
                         lscreen_record::scroll::ScrollOutcome::Appended(n) => {
                             no_change = 0;
