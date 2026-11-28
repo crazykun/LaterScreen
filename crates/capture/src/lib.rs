@@ -36,6 +36,7 @@ pub type Result<T> = std::result::Result<T, CaptureError>;
 /// - `origin` 是该显示器在虚拟桌面上的原点
 /// - `width/height` 是物理像素尺寸
 /// - `scale` = 物理像素 / 逻辑坐标（X11 下恒为 1.0）
+#[derive(Clone)]
 pub struct Screenshot {
     pub rgba: Vec<u8>,
     pub width: u32,

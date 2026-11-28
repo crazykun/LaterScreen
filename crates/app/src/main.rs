@@ -1877,7 +1877,13 @@ fn wait_scroll_settled(
         sw.polls += 1;
     }
     sw.moved = true;
-    // 阶段 2：等动画收尾（连续两帧无差异）
+    // 阶段 2：等动画收尾（连续两帧无差异）。判稳后还要过一道**宽限期
+    // 复查**：我们的采帧（CGWindowListCreateImage）会短暂拖住窗口合成器，
+    // 平滑滚动动画可能在采帧间隙停顿 ~100-300ms——两帧恰好相同被误判成
+    // 稳定，动画随后自己走完，末段内容全部丢失（真机 2026-11-28：8 格
+    // 只追加 14 行、页面实际到底差 35 行，短页长图恒缺尾）。复查必须
+    // **不采帧地静置** GRACE 再拍：静止窗口拉长到 ~200ms 才算真稳。
+    const GRACE: std::time::Duration = std::time::Duration::from_millis(150);
     let t1 = std::time::Instant::now();
     loop {
         if stop.load(Ordering::Relaxed) || t1.elapsed() >= settle_budget {
@@ -1888,7 +1894,18 @@ fn wait_scroll_settled(
         let next = lscreen_capture::capture_region(x, y, w, h)?;
         sw.polls += 1;
         if !frames_differ(&cur.rgba, &next.rgba) {
-            return Ok((next, sw));
+            if t1.elapsed() + GRACE >= settle_budget {
+                return Ok((next, sw)); // 预算不够复查，按现状交付
+            }
+            std::thread::sleep(GRACE);
+            let recheck = lscreen_capture::capture_region(x, y, w, h)?;
+            sw.polls += 1;
+            if !frames_differ(&next.rgba, &recheck.rgba) {
+                return Ok((recheck, sw));
+            }
+            // 动画在「稳定」判定后仍在走：以复查帧为基准继续等收尾
+            cur = recheck;
+            continue;
         }
         cur = next;
     }
@@ -1990,6 +2007,11 @@ fn run_scroll(
     let (th_stop, th_status, th_path) = (stop.clone(), status.clone(), path.clone());
     let started = Arc::new(AtomicBool::new(false));
     let th_started = started.clone();
+    // 到底检测（尾部补拍用）+ 末帧槽（补拍重叠验证的基准帧）
+    let bottom_hit = Arc::new(AtomicBool::new(false));
+    let th_bottom = bottom_hit.clone();
+    let last_shot = Arc::new(Mutex::new(None::<lscreen_capture::Screenshot>));
+    let th_last = last_shot.clone();
     let pause = std::time::Duration::from_millis(pause_ms);
     let stitcher = std::thread::spawn(
         move || -> std::result::Result<lscreen_record::scroll::ScrollStitcher, String> {
@@ -2098,6 +2120,9 @@ fn run_scroll(
                             );
                         }
                         if no_change >= patience {
+                            if scrolled {
+                                th_bottom.store(true, Ordering::Relaxed);
+                            }
                             break;
                         }
                         continue; // 画面没变，不喂拼接器
@@ -2105,7 +2130,8 @@ fn run_scroll(
                     let outcome = st
                         .push(&frame.rgba, frame.width, frame.height)
                         .map_err(|e| e.to_string())?;
-                    last_frame = frame;
+                    last_frame = frame.clone();
+                    *th_last.lock().unwrap() = Some(frame);
                     {
                         let mut s = th_status.lock().unwrap();
                         s.frames = step as usize;
@@ -2238,6 +2264,70 @@ fn run_scroll(
     };
     let (mut img, mut ih) = (st.image().to_vec(), st.height());
     let iw = st.width();
+    // 尾部补拍：页面到底后，选区（钉在视口内固定位置）看不到视口底部
+    // 之下、但仍在窗口内容区里的最后一段页面——选区高度 < 浏览器视口时
+    // 这段恒缺（真机 2026-11-28：选区 475px、视口 816px，长图恒短 ~341px）。
+    // 窗口内容区延伸到窗口底缘，补拍选区下缘→窗口底缘的屏幕条即是页面
+    // 尾段：几何上必然与已拼内容首尾相接（页面静止于 maxScroll），先重叠
+    // 验证再追加，任何异常（窗口识别错/页面被手动滚动）都会验证失败并
+    // 安全跳过。边框条画在选区外扩 2px 处、会入镜，先拆掉。
+    if bottom_hit.load(Ordering::Relaxed) {
+        let dbg = std::env::var_os("LSCREEN_SCROLL_DEBUG").is_some();
+        drop(_border);
+        let warp_pt = (x + w as i32 / 2, y + h as i32 / 2);
+        let target = lscreen_capture::list_windows().into_iter().find(|wd| {
+            warp_pt.0 >= wd.x
+                && warp_pt.0 < wd.x + wd.width as i32
+                && warp_pt.1 >= wd.y
+                && warp_pt.1 < wd.y + wd.height as i32
+        });
+        if let Some(wd) = target {
+            let extra = (wd.y + wd.height as i32) - (y + h as i32);
+            // OV：补拍条顶部与末帧底部重叠验证的行数（同屏同刻内容，页面
+            // 静止时应逐像素一致）
+            let ov = (h / 2).min(48) as usize;
+            if dbg {
+                eprintln!(
+                    "lscreen scroll[debug]: 尾部补拍 extra={extra} ov={ov} 窗口=({},{},{},{})",
+                    wd.x, wd.y, wd.width, wd.height
+                );
+            }
+            if extra >= 8 {
+                match lscreen_capture::capture_region(
+                    x,
+                    y + h as i32 - ov as i32,
+                    w,
+                    extra as u32 + ov as u32,
+                ) {
+                    Ok(strip) => {
+                        let ok = last_shot.lock().unwrap().as_ref().is_some_and(|lf| {
+                            strip.height as usize >= ov
+                                && lf.height as usize >= ov
+                                && !frames_differ(
+                                    &lf.rgba
+                                        [(((lf.height as usize) - ov) * lf.width as usize * 4)..],
+                                    &strip.rgba[..ov * strip.width as usize * 4],
+                                )
+                        });
+                        if ok {
+                            let add_rows = strip.height as usize - ov;
+                            img.extend_from_slice(&strip.rgba[ov * strip.width as usize * 4..]);
+                            ih += add_rows as u32;
+                            if dbg {
+                                eprintln!("lscreen scroll[debug]: 尾部补拍追加 {add_rows} 行");
+                            }
+                        } else if dbg {
+                            eprintln!("lscreen scroll[debug]: 尾部补拍重叠验证未过，跳过");
+                        }
+                    }
+                    Err(e) if dbg => eprintln!("lscreen scroll[debug]: 尾部补拍采帧失败：{e}"),
+                    Err(_) => {}
+                }
+            }
+        } else if dbg {
+            eprintln!("lscreen scroll[debug]: 尾部补拍未找到指针下窗口，跳过");
+        }
+    }
     // GPU 单纹理高度上限普遍 8192/16384：超限截断保预览可用（纹理被驱动
     // 静默裁剪更糟），不静默——stderr 明示
     const MAX_H: u32 = 8192;
