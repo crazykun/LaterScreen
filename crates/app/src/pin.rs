@@ -232,24 +232,33 @@ pub fn clamp_pos(
 /// 呼吸感，贴图、工具条与桌面同屏共存。
 const FIT_SCREEN_PORTION: f32 = 0.75;
 
-/// 所在屏适配的 zoom 上限：逐维解 (可摆放区×占比 − 窗口固定件) / 图像基准。
-/// 窗口 = 显示尺寸 × zoom + 固定件（PAD/条带/面板宽是加法不是比例）。
-/// 宽度钳 [`MIN_TOOLBAR_W`] 与 [`PANEL_MIN_H`] 保底只在极小显示时生效，
-/// 此处忽略（适配都发生在框要溢出的场景）。下限 0.05 防退化到 0。
-/// [`initial_zoom`]（建窗）与旋转/翻转后的重适配共用。
-fn fit_zoom(base: Vec2, panel_open: bool, usable: Vec2) -> f32 {
+/// 逐维解 (可用区 − 窗口固定件) / 图像基准 的 zoom 上限（`area` = 目标
+/// 可用尺寸）。适配目标 × [`FIT_SCREEN_PORTION`] 与 100% 兜底两处共用。
+fn zoom_cap(base: Vec2, panel_open: bool, area: Vec2) -> f32 {
     let panel = if panel_open { PANEL_W } else { 0.0 };
-    let tx = (usable.x * FIT_SCREEN_PORTION - 2.0 * PAD - panel).max(0.0);
-    let ty = (usable.y * FIT_SCREEN_PORTION - 2.0 * PAD - BAR_H).max(0.0);
+    let tx = (area.x - 2.0 * PAD - panel).max(0.0);
+    let ty = (area.y - 2.0 * PAD - BAR_H).max(0.0);
     let cap_x = (tx / base.x).max(0.0);
     let cap_y = (ty / base.y).max(0.0);
     cap_x.min(cap_y).max(0.05)
 }
 
+/// 所在屏适配的 zoom 上限：目标区 = 可摆放区 × [`FIT_SCREEN_PORTION`]。
+/// [`initial_zoom`]（建窗）与旋转/翻转后的重适配共用。
+fn fit_zoom(base: Vec2, panel_open: bool, usable: Vec2) -> f32 {
+    zoom_cap(
+        base,
+        panel_open,
+        Vec2::new(usable.x * FIT_SCREEN_PORTION, usable.y * FIT_SCREEN_PORTION),
+    )
+}
+
 /// 贴图初始缩放：建窗前算好，建窗尺寸与 PinApp 初始 zoom 共用同一值。
 /// - **大图**：窗口（图像+框/条带/面板）超过所在屏可摆放区 → 等比缩小到
 ///   可摆放区的 75% 以内（[`FIT_SCREEN_PORTION`]），工具条与桌面同屏共存
-///   （用户 2026-11-28：大图默认别 100%、全屏图也别铺满）；
+///   （用户 2026-11-28：大图默认别 100%、全屏图也别铺满）；**宽扁图适配
+///   后高度不足最低显示高时放宽到 100% 可摆放区补足**（宽度可超 75%
+///   目标、不可超屏；宽度到顶仍不足则接受，等比缩放对极端比例无解）；
 /// - **小图**：图像显示尺寸不足最低宽高 → 等比放大（钳 [`MAX_ZOOM`]，再
 ///   钳不超过所在屏——细长横条按高放大可能横向爆宽）；
 /// - 中等图恒 1.0：1:1 贴图语义不变。
@@ -266,8 +275,15 @@ pub fn initial_zoom(w: u32, h: u32, scale: f32, panel_open: bool, usable: Option
     }
     let fit = fit_zoom(base, panel_open, s);
     if fit < 1.0 {
+        let mut z = fit;
+        // 宽扁图按 75% 目标适配后高度低于最低显示高（OCR/阅读场景挤成
+        // 一条缝，用户 2026-11-28）：宽度放宽到 100% 可摆放区补足高度
+        if base.y * z < MIN_DISPLAY_H {
+            let cap_full = zoom_cap(base, panel_open, s);
+            z = z.max((MIN_DISPLAY_H / base.y).min(cap_full));
+        }
         // 超大图的适配值可能低于 MIN_ZOOM 档位下限：屏幕放得下优先
-        return fit;
+        return z.max(0.05);
     }
     // 小图放大：显示尺寸达到最低宽高
     let up = (MIN_DISPLAY_W / base.x)
@@ -278,12 +294,13 @@ pub fn initial_zoom(w: u32, h: u32, scale: f32, panel_open: bool, usable: Option
     up.min(fit).clamp(MIN_ZOOM, MAX_ZOOM)
 }
 
-/// 面板展开时的窗口高度下限：极矮贴图（几像素高的横条）按图像高度建窗
-/// 会让面板只剩一条缝——标题行（复制全部/×）被裁出可视区，正文区高度
-/// 趋近 0。保底后图像区高于图像，图像以中心锚居中（框上下留白），面板
-/// 保持可读可操作。高度按「标题行 24 + Frame 边距 20 + 分隔/间隙 12 +
-/// 正文最少 60」取整。
-const PANEL_MIN_H: f32 = 120.0;
+/// 面板展开时的窗口高度下限：极矮/宽扁贴图按图像高度建窗会让面板只剩
+/// 一条缝——标题行（复制全部/×）被裁出可视区，识别结果正文挤成一行读
+/// 不了（用户 2026-11-28：宽扁图 OCR「太低、识别结果不好看」）。保底后
+/// 图像区高于图像，图像以中心锚居中（框上下留白），面板保持可读可操作。
+/// 高度按「标题行 24 + Frame 边距 20 + 分隔/间隙 12 + 正文读几行 240」
+/// 取整。
+const PANEL_MIN_H: f32 = 300.0;
 
 /// 窗口逻辑尺寸 → 底部条带的物理像素矩形（x, y, w, h），XShape 输入区
 /// 保留区用（穿透时条带仍可交互）。窗口比条带还矮（极端小图深缩小）时
@@ -1109,7 +1126,13 @@ impl PinApp {
         let Some(z_raw) = zooms.into_iter().reduce(f32::max) else {
             return;
         };
-        let z = z_raw.clamp(MIN_ZOOM, MAX_ZOOM);
+        // 下限：档位 + 最低显示宽高（框紧贴图像，宽扁图不能拖到 96px 高
+        // 以下——OCR/阅读场景太挤，用户 2026-11-28「最低高度没限制吗」；
+        // 窗口保底宽 410 / 高 150 由 current_window_size 统一生效）
+        let min_zoom = MIN_ZOOM
+            .max(MIN_DISPLAY_W / self.base.x)
+            .max(MIN_DISPLAY_H / self.base.y);
+        let z = z_raw.clamp(min_zoom, MAX_ZOOM);
         if (z - self.zoom).abs() < 1e-3 {
             return;
         }
@@ -1728,8 +1751,11 @@ impl eframe::App for PinApp {
         // 不随面板开合与缩放变化（R3/R9）。面板宽度按窗口**实际几何**反推：
         // 请求的 InnerSize 由 WM 落地可能延迟甚至被拒（贴图常钉在屏幕边
         // 缘），按状态直接切分会让图像右缘被持续裁掉——实际没长出足够宽
-        // 度就按无面板布局（图像完整），WM 补上尺寸后下一帧自动展开
-        let base_w = window_size_at(self.base, false).x;
+        // 度就按无面板布局（图像完整），WM 补上尺寸后下一帧自动展开。
+        // 无面板框宽按 frame_display（建窗适配后的显示尺寸）算——初始适
+        // 配让 zoom≠1 成为常态，用未缩放基准比对会把面板误判成未展开
+        //（图像占满全宽、面板本体隐藏，2026-11-28 真机复现）
+        let base_w = window_size_at(self.frame_display, false).x;
         let side_w = if !bare && self.panel_open {
             let grown = full.width() - base_w;
             if grown >= PANEL_W - 1.0 {
@@ -2585,18 +2611,42 @@ mod tests {
 
     #[test]
     fn ocr_panel_widens_window_without_changing_height() {
-        // R3：面板开合只在基准之上加/减 PANEL_W（叠加在 R8 基准之上），
-        // 正常高度图像的面板开合高度不变
-        let closed = window_size_at(Vec2::new(300.0, 200.0), false);
-        let open = window_size_at(Vec2::new(300.0, 200.0), true);
+        // R3：面板开合只在基准之上加/减 PANEL_W（叠加在 R8 基准之上）；
+        // 正常高度图像的面板开合高度不变（260+54=314 ≥ PANEL_MIN_H，
+        // 不触发高度保底）
+        let closed = window_size_at(Vec2::new(300.0, 260.0), false);
+        let open = window_size_at(Vec2::new(300.0, 260.0), true);
         assert_eq!(open.x, closed.x + PANEL_W);
         assert_eq!(open.y, closed.y);
+        // 宽扁贴图开面板：高度抬到 PANEL_MIN_H 保底（识别结果可读，
+        // 用户 2026-11-28：宽扁图 OCR「太低、识别结果不好看」）
+        let flat_closed = window_size_at(Vec2::new(300.0, 60.0), false);
+        let flat_open = window_size_at(Vec2::new(300.0, 60.0), true);
+        assert_eq!(flat_closed.y, 60.0 + 2.0 * PAD + BAR_H);
+        assert_eq!(flat_open.y, PANEL_MIN_H);
         // 极矮贴图（几像素高的横条）开面板：高度抬到 PANEL_MIN_H 保底，
         // 否则面板标题行（复制全部/×）被裁出可视区
         let tiny_closed = window_size_at(Vec2::new(300.0, 4.0), false);
         let tiny_open = window_size_at(Vec2::new(300.0, 4.0), true);
         assert_eq!(tiny_closed.y, 4.0 + 2.0 * PAD + BAR_H);
         assert_eq!(tiny_open.y, PANEL_MIN_H);
+    }
+
+    #[test]
+    fn initial_zoom_rescues_min_display_height_for_wide_short_image() {
+        // 1600×60 宽扁图在 1600×900：75% 目标 fit = min(0.7375, 10.35)
+        // = 0.7375 → 显示高 44px < 96 最低显示高 → 放宽宽度到 100% 可摆放
+        // 区补足：z = min(96/60, cap_full) = min(1.6, 1.1775) = 1.1775
+        let z = initial_zoom(1600, 60, 1.0, false, Some(Vec2::new(1600.0, 900.0)));
+        let cap_full = ((1600.0 - 2.0 * PAD) / 1600.0).min((900.0 - 2.0 * PAD - BAR_H) / 60.0);
+        assert!((z - 1.1775f32.min(cap_full)).abs() < 1e-4, "z={z}");
+        // 窗口宽度不超所在屏可摆放区（可超 75% 目标）
+        let win = window_size_zoomed(1600, 60, 1.0, z, false);
+        assert!(win.x <= 1600.0 + 1e-3, "win={win:?}");
+        // 宽度到顶仍不足时接受（等比缩放对极端比例无解）：40px 超高细条
+        // 反过来受宽度目标支配，高度照常
+        let z2 = initial_zoom(500, 10, 1.0, false, Some(Vec2::new(1600.0, 900.0)));
+        assert!(z2 > 0.0 && z2 <= MAX_ZOOM, "z2={z2}");
     }
 
     #[test]
