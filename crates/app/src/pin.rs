@@ -5,7 +5,9 @@
 //!
 //! 交互：拖拽移动窗口（手动定位，见 PinApp::drag）、滚轮缩放 25%–1600%
 //! （**框不动，只变框内图像大小**——框在建窗时按初始适配定死，见
-//! frame_display；纯图模式无框、窗口随缩放跟随）、**Shift+滚轮调
+//! frame_display；纯图模式无框、窗口随缩放跟随）、**边缘/角拖拽改框体
+//! 尺寸**（对侧锚定、宽高独立、图像缩放不变，见 ResizeState）、
+//! **Shift+滚轮调
 //! 不透明度**（20%–100%）、**R/H/V 旋转 90°/水平/**
 //! 垂直翻转**（纯像素置换，复制/保存的就是变换后的画面）、高倍放大
 //! （实际显示 ≥8x）叠加像素网格、工具条**点击穿透**（图像区点击穿到
@@ -498,9 +500,10 @@ struct DragState {
     sent: Pos2,
 }
 
-/// 边缘/角拖拽缩放的状态（用户 2026-11-28）。拖拽 = 带对侧锚点的等比
-/// 缩放：zoom 变化、框始终紧贴图像；东/南手柄锚在窗口左上（不动），
-/// 西/北手柄锚在对侧边/角，窗口位置随缩放平移。
+/// 边缘/角拖拽改框的状态（用户 2026-11-28）。拖拽 = **只改框体尺寸**
+/// （图像缩放/zoom 不变，超出裁掉、不足留白居中）；东/南手柄锚在窗口
+/// 左上（不动），西/北手柄锚在对侧边/角，窗口位置随框尺寸平移。宽高
+/// 独立拉伸（无等比约束）。
 struct ResizeState {
     /// 激活的方位（角 = 相邻两条同时 true）：东/南/西/北
     east: bool,
@@ -1095,20 +1098,16 @@ impl PinApp {
         );
     }
 
-    /// 边缘/角拖拽缩放的逐帧处理（手柄见 ui 末尾；状态见 ResizeState）。
-    /// 指针位置换算各维目标显示尺寸 → 等比 zoom（角手柄取两维较大者，
-    /// 指针至少落在一维的框角上）→ 更新框；西/北锚在对侧边/角，窗口
-    /// 位置随新尺寸平移（用起手窗口尺寸推对侧坐标，窗口保底宽/高由
-    /// current_window_size 统一生效）。
+    /// 边缘/角拖拽改框的逐帧处理（手柄见 ui 末尾；状态见 ResizeState）。
+    /// 指针位置直接换算各维目标**框体尺寸**（图像缩放/zoom 不变，超出
+    /// 裁掉、不足留白居中，宽高独立拉伸）；西/北锚在对侧边/角，窗口
+    /// 位置随框尺寸平移（用起手窗口尺寸推对侧坐标）。
     fn handle_frame_resize(&mut self, ctx: &egui::Context) {
         let Some(r) = self.resize.as_ref() else {
             return;
         };
         if !ctx.input(|i| i.pointer.primary_down()) {
-            // 松手收尾：如实提示当前缩放
             self.resize = None;
-            let pct = (self.zoom * 100.0).round() as i32;
-            self.toast(ctx, format!("{pct}%"));
             return;
         }
         let scale = self.scale;
@@ -1128,37 +1127,33 @@ impl PinApp {
         let Some(p) = pointer else {
             return;
         };
-        // 各维目标：显示尺寸 = 指针到固定边/角的距离 − 固定件（起手窗口
-        // 尺寸 − 起手显示尺寸）；角手柄取两维较大者
+        // 各维目标框体尺寸 = 指针到固定边/角的距离 − 固定件（起手窗口
+        // 尺寸 − 起手框显示尺寸）；宽高独立、zoom 不变
         let chrome = r.start_window - r.start_display;
-        let mut zooms = Vec::new();
-        if r.east {
-            zooms.push((p.x - r.anchor.x - chrome.x) / self.base.x);
-        }
-        if r.south {
-            zooms.push((p.y - r.anchor.y - chrome.y) / self.base.y);
-        }
-        if r.west {
-            zooms.push((r.anchor.x + r.start_window.x - p.x - chrome.x) / self.base.x);
-        }
-        if r.north {
-            zooms.push((r.anchor.y + r.start_window.y - p.y - chrome.y) / self.base.y);
-        }
-        let Some(z_raw) = zooms.into_iter().reduce(f32::max) else {
-            return;
+        let new_w = if r.east {
+            p.x - r.anchor.x - chrome.x
+        } else if r.west {
+            r.anchor.x + r.start_window.x - p.x - chrome.x
+        } else {
+            r.start_display.x
         };
-        // 下限：档位 + 最低显示宽高（框紧贴图像，宽扁图不能拖到 96px 高
-        // 以下——OCR/阅读场景太挤，用户 2026-11-28「最低高度没限制吗」；
-        // 窗口保底宽 410 / 高 150 由 current_window_size 统一生效）
-        let min_zoom = MIN_ZOOM
-            .max(MIN_DISPLAY_W / self.base.x)
-            .max(MIN_DISPLAY_H / self.base.y);
-        let z = z_raw.clamp(min_zoom, MAX_ZOOM);
-        if (z - self.zoom).abs() < 1e-3 {
+        let new_h = if r.south {
+            p.y - r.anchor.y - chrome.y
+        } else if r.north {
+            r.anchor.y + r.start_window.y - p.y - chrome.y
+        } else {
+            r.start_display.y
+        };
+        // 下限：最低显示宽高（宽扁图不能拖到 96px 高以下——OCR/阅读场景
+        // 太挤，用户 2026-11-28「最低高度没限制吗」；窗口保底宽 410 由
+        // current_window_size 统一生效）
+        let frame_display = Vec2::new(new_w.max(MIN_DISPLAY_W), new_h.max(MIN_DISPLAY_H));
+        if (frame_display.x - self.frame_display.x).abs() < 1e-3
+            && (frame_display.y - self.frame_display.y).abs() < 1e-3
+        {
             return;
         }
-        self.zoom = z;
-        self.frame_display = self.base * z;
+        self.frame_display = frame_display;
         let win = self.current_window_size();
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(win));
         // 西/北：对侧边/角固定，窗口位置 = 固定边角 − 新窗口尺寸
@@ -2172,14 +2167,13 @@ impl eframe::App for PinApp {
             self.set_zoom(&ctx, 1.0);
         }
 
-        // ---- 边缘/角拖拽缩放（用户 2026-11-28）：8 个手柄区覆盖四边与
-        // 四角，最后分配 = 命中在顶、优先于移动。拖拽 = 带对侧锚点的等比
-        // 缩放：zoom 变化、框始终紧贴图像。西/北手柄锚在对侧边，窗口位置
-        // 随缩放平移——Wayland 禁止客户端自设坐标（OuterPosition no-op），
-        // 只保留东/南/东南。穿透中窗口对指针不可见，手柄自然收不到事件。
-        // 缩放范围与滚轮一致（MIN_ZOOM–MAX_ZOOM），下限另含工具条最小
-        // 宽高对应的 zoom——框紧贴图像，不能缩到工具条保底以下
-        if !self.through {
+        // ---- 边缘/角拖拽改框（用户 2026-11-28）：8 个手柄区覆盖四边与
+        // 四角，最后分配 = 命中在顶、优先于移动。拖拽 = 只改框体尺寸
+        // （图像缩放不变，超出裁掉、不足留白居中），宽高独立。西/北手柄
+        // 锚在对侧边，窗口位置随框尺寸平移——Wayland 禁止客户端自设坐标
+        // （OuterPosition no-op），只保留东/南/东南。穿透中窗口对指针不
+        // 可见，手柄自然收不到事件；纯图模式无框，不提供手柄。
+        if !self.through && !self.bare {
             let h = HANDLE_PX;
             let (fmin, fmax) = (full.min, full.max);
             let mid_w = full.width() - 2.0 * h;
