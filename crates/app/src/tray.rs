@@ -120,7 +120,10 @@ fn allow_gui_launch() -> bool {
     let ms = now.duration_since(epoch).as_millis() as u64;
     loop {
         let old = LAST_GUI_LAUNCH_MS.load(Ordering::Relaxed);
-        if ms.saturating_sub(old) < 800 {
+        // old == 0 = 托盘启动后的第一次按 F1：直接放行。EPOCH 在第一次
+        // 按键时才初始化（ms≈0），此前「首按必被 800ms 节流吞掉」——
+        // 表现为启动后第一次 F1 毫无响应（用户 2026-11-28）
+        if old != 0 && ms.saturating_sub(old) < 800 {
             return false;
         }
         if LAST_GUI_LAUNCH_MS

@@ -2557,6 +2557,13 @@ impl eframe::App for WarmupApp {
 
 fn run_warmup() -> Result<(), String> {
     let t = std::time::Instant::now();
+    // 截屏链路预热（首次 F1 的剩余大头）：TCC 预检 + xcap 显示器枚举 +
+    // 首次真实采集 + CGWindowList 窗口枚举（覆盖层窗口吸附用）。这些
+    // 系统调用首次触发的冷开销不在二进制/字体页缓存里，1×1 窗口预热
+    // 覆盖不到——托盘启动时在后台做掉，首次 F1 直接走热路径
+    let _ = lscreen_capture::monitor_rect_at(1, 1);
+    let _ = lscreen_capture::capture_primary();
+    let _ = lscreen_capture::list_windows();
     // 字体解析同样预热（fc-list 子进程 + 16MB 字体读取）
     let _ = crate::font::load_system_font();
     let _ = crate::font::load_system_font();
