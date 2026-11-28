@@ -4,8 +4,8 @@
 //! 传入，本进程读完即建窗。每个贴图一个轻量进程，关闭即释放全部内存。
 //!
 //! 交互：拖拽移动窗口（手动定位，见 PinApp::drag）、滚轮缩放 25%–1600%
-//! （**窗口尺寸不随缩放变化**，以图像中心为锚放大/缩小，超出窗口部分
-//! 裁切）、**Shift+滚轮调不透明度**（20%–100%）、**R/H/V 旋转 90°/水平/
+//! （**窗口跟随图像显示尺寸**，以图像中心为锚放大/缩小）、**Shift+滚轮调
+//! 不透明度**（20%–100%）、**R/H/V 旋转 90°/水平/**
 //! 垂直翻转**（纯像素置换，复制/保存的就是变换后的画面）、高倍放大
 //! （实际显示 ≥8x）叠加像素网格、工具条**点击穿透**（图像区点击穿到
 //! 下层窗口，工具条条带仍可交互——再点穿透按钮即恢复；Esc 与托盘菜单
@@ -51,6 +51,13 @@ pub const PANEL_W: f32 = 300.0;
 /// 边距——「识别文字」按钮加入后按 384 保底），窄图也要放得下全部
 /// 按钮（穿透可恢复的死锁防线），见 window_size_at/show_toolbar。
 pub const MIN_TOOLBAR_W: f32 = 410.0;
+/// 极小贴图的窗口最小高：条带 34 + 上下内边距 20 + 图像区 96。初始放大
+/// 到该高度，工具条与图像都可见可操作（与 PANEL_MIN_H 同量级）。
+const MIN_WINDOW_H: f32 = 150.0;
+/// 小图初始放大的显示区下限：宽 = 工具条最小宽对应的图像宽（窗口不再
+/// 是大片空框），高 = [`MIN_WINDOW_H`] 对应的图像高
+const MIN_DISPLAY_W: f32 = MIN_TOOLBAR_W - 2.0 * PAD;
+const MIN_DISPLAY_H: f32 = MIN_WINDOW_H - BAR_H - 2.0 * PAD;
 /// 放大用最近邻（滚轮放大像素格清晰），缩小用线性
 fn texture_options() -> egui::TextureOptions {
     egui::TextureOptions {
@@ -129,17 +136,11 @@ fn flip_rgba(rgba: &mut [u8], w: u32, h: u32, horizontal: bool) {
     }
 }
 
-/// 贴图窗口初始逻辑尺寸：图像 + 四周内边距 + 底部工具条条带；`panel_open`
-/// 时宽度再加面板宽（R3/R8）。宽度保底 [`MIN_TOOLBAR_W`]——再窄的图也要
-/// 放得下完整工具条（穿透可恢复）。
-pub fn window_size(w: u32, h: u32, scale: f32, panel_open: bool) -> Vec2 {
-    window_size_at(Vec2::new(w as f32 / scale, h as f32 / scale), panel_open)
-}
-
 /// 图像显示尺寸（逻辑点） → 窗口尺寸：加四周内边距 + 底部条带、宽度钳
 /// [`MIN_TOOLBAR_W`]；`panel_open` 再加面板宽，高度不足 [`PANEL_MIN_H`]
-/// 时抬到保底。建窗与旋转/翻转变换、面板开合共用——**窗口尺寸只由图像
-/// 基准尺寸与面板开合决定，与缩放无关**（R9）。
+/// 时抬到保底。建窗与旋转/翻转变换、面板开合共用——**窗口尺寸由图像
+/// 显示尺寸（基准 × zoom）与面板开合决定**（2026-11-28 起窗口跟随缩放，
+/// 旧 R9 固定框废弃）。
 fn window_size_at(image: Vec2, panel_open: bool) -> Vec2 {
     let mut x = (image.x + 2.0 * PAD).max(MIN_TOOLBAR_W);
     let mut y = image.y + 2.0 * PAD + BAR_H;
@@ -148,6 +149,117 @@ fn window_size_at(image: Vec2, panel_open: bool) -> Vec2 {
         y = y.max(PANEL_MIN_H);
     }
     Vec2::new(x, y)
+}
+
+/// 贴图窗口初始逻辑尺寸（含初始缩放）：[`initial_zoom`] 的结果喂这里，
+/// 建窗尺寸与 [`PinApp::current_window_size`] 同一公式。
+pub fn window_size_zoomed(w: u32, h: u32, scale: f32, zoom: f32, panel_open: bool) -> Vec2 {
+    window_size_at(
+        Vec2::new(w as f32 / scale, h as f32 / scale) * zoom,
+        panel_open,
+    )
+}
+
+/// 系统栏预留（贴图所在屏的窗口适配用，与历史窗口默认摆放同一约定）：
+/// mac 顶部菜单栏 40（标准 24 / 刘海 37 取大）、底部 Dock 80；Win/Linux
+/// 底部任务栏 56（典型 48 + 边距 8）。
+pub const BAR_RESERVE_TOP: f32 = if cfg!(target_os = "macos") { 40.0 } else { 0.0 };
+pub const BAR_RESERVE_BOTTOM: f32 = if cfg!(target_os = "macos") {
+    80.0
+} else {
+    56.0
+};
+
+/// 所在屏可摆放区（逻辑尺寸）：显示器矩形扣系统栏预留与左右 8 边距。
+/// `monitor` = [`lscreen_capture::monitor_rect_at`] 的结果（物理像素）；
+/// None（查不到所在屏）恒 None。
+pub fn usable_screen(monitor: Option<lscreen_capture::MonitorRect>, scale: f32) -> Option<Vec2> {
+    let (_, _, mw, mh) = monitor?;
+    if scale <= 0.0 {
+        return None;
+    }
+    let (mw, mh) = (mw as f32 / scale, mh as f32 / scale);
+    Some(Vec2::new(
+        (mw - 16.0).max(1.0),
+        (mh - BAR_RESERVE_TOP - BAR_RESERVE_BOTTOM).max(1.0),
+    ))
+}
+
+/// 初始位置钳进所在屏：窗口右/下越出可摆放区（系统栏预留内）时左移/
+/// 上移，仍放不下则贴可摆放区左上角；不越界时交付位置原样保留。
+/// 大图适配后窗口变小但仍可能比原位置可容纳的更大，钳一下工具条才
+/// 真正可见（用户 2026-11-28）。
+pub fn clamp_pos(
+    pos: (f32, f32),
+    win: Vec2,
+    monitor: Option<lscreen_capture::MonitorRect>,
+    scale: f32,
+) -> (f32, f32) {
+    let Some((mx, my, mw, mh)) = monitor else {
+        return pos;
+    };
+    if scale <= 0.0 {
+        return pos;
+    }
+    let (mx, my, mw, mh) = (
+        mx as f32 / scale,
+        my as f32 / scale,
+        mw as f32 / scale,
+        mh as f32 / scale,
+    );
+    let left = mx + 8.0;
+    let top = my + BAR_RESERVE_TOP;
+    let right = (mx + mw - 8.0).max(left);
+    let bottom = (my + mh - BAR_RESERVE_BOTTOM).max(top);
+    let x = if pos.0 + win.x > right {
+        (right - win.x).max(left)
+    } else {
+        pos.0
+    };
+    let y = if pos.1 + win.y > bottom {
+        (bottom - win.y).max(top)
+    } else {
+        pos.1
+    };
+    (x, y)
+}
+
+/// 贴图初始缩放：建窗前算好，建窗尺寸与 PinApp 初始 zoom 共用同一值。
+/// - **大图**：窗口（图像+框/条带/面板）超过所在屏可摆放区 → 等比缩小到
+///   恰好放得下，工具条不被推出屏外（用户 2026-11-28：大图默认别 100%）；
+/// - **小图**：图像显示尺寸不足最低宽高 → 等比放大（钳 [`MAX_ZOOM`]，再
+///   钳不超过所在屏——细长横条按高放大可能横向爆宽）；
+/// - 中等图恒 1.0：1:1 贴图语义不变。
+///
+/// `usable` = 所在屏可摆放区逻辑尺寸（已扣系统栏预留，见
+/// [`usable_screen`]）；None（查不到所在屏）恒 1.0。
+pub fn initial_zoom(w: u32, h: u32, scale: f32, panel_open: bool, usable: Option<Vec2>) -> f32 {
+    let base = Vec2::new(w as f32 / scale, h as f32 / scale);
+    let Some(s) = usable.filter(|s| s.x > 0.0 && s.y > 0.0) else {
+        return 1.0;
+    };
+    if base.x <= 0.0 || base.y <= 0.0 {
+        return 1.0;
+    }
+    // 窗口 = 显示尺寸 × zoom + 固定件（PAD/条带/面板宽是加法不是比例），
+    // 逐维解 (可用 − 固定件) / 基准 = 该维 zoom 上限。宽度钳 MIN_TOOLBAR_W
+    // 与 PANEL_MIN_H 保底只在极小显示时生效，此处忽略（大图适配路径不受
+    // 影响，小图路径另有 MAX_ZOOM 兜底）
+    let panel = if panel_open { PANEL_W } else { 0.0 };
+    let cap_x = ((s.x - 2.0 * PAD - panel) / base.x).max(0.0);
+    let cap_y = ((s.y - 2.0 * PAD - BAR_H) / base.y).max(0.0);
+    let fit = cap_x.min(cap_y);
+    if fit < 1.0 {
+        // 超大图的适配值可能低于 MIN_ZOOM 档位下限：屏幕放得下优先
+        return fit.max(0.05);
+    }
+    // 小图放大：显示尺寸达到最低宽高
+    let up = (MIN_DISPLAY_W / base.x)
+        .max(MIN_DISPLAY_H / base.y)
+        .clamp(1.0, MAX_ZOOM);
+    // 放大后仍不得超屏（细长横条按高放大可能横向爆宽）；此处 fit ≥ 1，
+    // up ≤ MAX_ZOOM，钳制只为防御
+    up.min(fit).clamp(MIN_ZOOM, MAX_ZOOM)
 }
 
 /// 面板展开时的窗口高度下限：极矮贴图（几像素高的横条）按图像高度建窗
@@ -349,6 +461,9 @@ pub struct PinLaunch {
     /// 存在/非 UTF-8）面板照常展开但显示错误文案，可点重试改走贴图内
     /// 识别（R7）。
     pub ocr_seed: Option<Result<String, String>>,
+    /// 初始缩放（建窗前由 [`initial_zoom`] 算好）：大图适应所在屏、小图
+    /// 放大到最低宽高、中等图 1.0
+    pub initial_zoom: f32,
 }
 
 impl PinApp {
@@ -362,6 +477,7 @@ impl PinApp {
             font,
             source,
             ocr_seed,
+            initial_zoom,
         } = launch;
         crate::apply_window_class(cc);
         // 贴图是独立进程，必须自己挂中文字体，否则按钮/菜单/toast 的中文
@@ -400,7 +516,10 @@ impl PinApp {
             w,
             h,
             base: Vec2::new(w as f32 / scale, h as f32 / scale),
-            zoom: 1.0,
+            // 初始缩放不钳 MIN_ZOOM：超大图的屏幕适配值可能低于档位下限，
+            // 钳了就失去「适应屏幕」的意义（窗口再次溢出）。用户后续缩放
+            // 仍按 MIN_ZOOM/MAX_ZOOM 档位钳制
+            zoom: initial_zoom,
             texture: Some(texture),
             toast: None,
             drag: None,
@@ -552,11 +671,12 @@ impl PinApp {
         }
     }
 
-    /// 当前模式下的窗口尺寸：纯图 = 图像当前显示尺寸（base × zoom），
-    /// 宽度保底 [`MIN_TOOLBAR_W`]（小图也要放得下 hover 浮出的工具条，
-    /// 图像居中、两侧露框底色）；正常 = 图像基准 + 四周内边距 + 底部条带
-    /// （面板展开再加面板宽）。旋转/翻转/缩放/面板开合/纯图切换共用，
-    /// 避免某条路径漏掉纯图分支。
+    /// 当前模式下的窗口尺寸：图像当前显示尺寸（base × zoom）+ 框（四周
+    /// 内边距 + 底部条带；纯图模式无框、宽度保底 [`MIN_TOOLBAR_W`]）；
+    /// 面板展开再加面板宽。**正常模式窗口跟随缩放**（2026-11-28 起改：
+    /// 旧 R9 固定框下 zoom>1 超出部分被裁掉完全看不见，大图初始适配也
+    /// 无从谈起），旋转/翻转/缩放/面板开合/纯图切换共用，避免某条路径
+    /// 漏掉纯图分支。
     fn current_window_size(&self) -> Vec2 {
         if self.bare {
             Vec2::new(
@@ -564,7 +684,7 @@ impl PinApp {
                 self.base.y * self.zoom,
             )
         } else {
-            window_size_at(self.base, self.panel_open)
+            window_size_at(self.base * self.zoom, self.panel_open)
         }
     }
 
@@ -873,18 +993,15 @@ impl PinApp {
         );
     }
 
-    /// 设定缩放（工具条 −/+/百分比与键盘 +/−/0 用）。只改图像绘制尺寸
-    /// （中心锚），窗口尺寸不随缩放变化（R9），无几何补偿。
+    /// 设定缩放（工具条 −/+/百分比与键盘 +/−/0 用）。窗口跟随图像显示
+    /// 尺寸（2026-11-28 起两种模式一致），图像以中心为锚缩放。
     fn set_zoom(&mut self, ctx: &egui::Context, zoom: f32) {
         let z = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
         if (z - self.zoom).abs() < 1e-3 {
             return;
         }
         self.zoom = z;
-        // 纯图模式窗口 = 图像显示尺寸，缩放时窗口跟随（正常模式固定框 R9）
-        if self.bare {
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.current_window_size()));
-        }
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.current_window_size()));
         let pct = (z * 100.0).round() as i32;
         self.toast(ctx, format!("{pct}%"));
     }
@@ -952,8 +1069,8 @@ impl PinApp {
         self.toast = Some((msg.into(), ctx.input(|i| i.time) + TOAST_SECS));
     }
 
-    /// 滚轮缩放：**窗口尺寸与位置都不动**（R9），以图像中心为锚放大/缩小，
-    /// 超出窗口的部分被裁掉（不滚动、不平移）。Shift+滚轮仍是不透明度。
+    /// 滚轮缩放：窗口跟随图像显示尺寸（与 set_zoom 同步），以图像中心
+    /// 为锚放大/缩小。Shift+滚轮仍是不透明度。
     fn handle_zoom(&mut self, ctx: &egui::Context) {
         // Shift+滚轮被 egui 默认归为「水平滚动」（horizontal_scroll_modifier
         // = SHIFT），值落在 delta.x——纵轴读取对 Shift 组合恒为 0，必须合成
@@ -977,6 +1094,7 @@ impl PinApp {
         }
         let old_zoom = self.zoom;
         self.zoom = new_zoom;
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.current_window_size()));
 
         let pct = (new_zoom * 100.0).round() as i32;
         let dir = if new_zoom > old_zoom { "+" } else { "" };
@@ -1628,8 +1746,8 @@ impl eframe::App for PinApp {
         // 内边距「框」底色：与条带同色，图像浮在框上（R8）
         ui.painter()
             .rect_filled(img_area, 0.0, ui.visuals().panel_fill);
-        // 图像按 zoom 绘制，以图像区中心为锚（R9）；窗口尺寸不变，超出
-        // 部分裁掉——裁剪矩形钉在 image_rect，放大出界的边角不会越出「框」
+        // 图像按 zoom 绘制，以图像区中心为锚；窗口跟随显示尺寸（见
+        // current_window_size），clip 兜住取整误差
         let shown = Rect::from_center_size(image_rect.center(), self.base * self.zoom);
         let paint = ui.painter().with_clip_rect(image_rect);
         if let Some(tex) = &self.texture {
@@ -2138,10 +2256,13 @@ mod tests {
     #[test]
     fn window_width_never_shrinks_below_toolbar_floor() {
         // 大图：原样 + 四周内边距（R8：窗口 = 图像 + 2*PAD + 条带）
-        assert_eq!(window_size(800, 600, 1.0, false), Vec2::new(820.0, 654.0));
+        assert_eq!(
+            window_size_zoomed(800, 600, 1.0, 1.0, false),
+            Vec2::new(820.0, 654.0)
+        );
         // 40px 小图：窗口宽钳到工具条保底宽——穿透按钮必须始终在条带上
         assert_eq!(
-            window_size(40, 40, 1.0, false),
+            window_size_zoomed(40, 40, 1.0, 1.0, false),
             Vec2::new(MIN_TOOLBAR_W, 40.0 + 2.0 * PAD + BAR_H)
         );
         // 深缩放同理：0.25x 的 800px 图也保底
@@ -2149,6 +2270,84 @@ mod tests {
             window_size_at(Vec2::new(200.0, 150.0), false),
             Vec2::new(MIN_TOOLBAR_W.max(220.0), 150.0 + 2.0 * PAD + BAR_H)
         );
+    }
+
+    #[test]
+    fn initial_zoom_fits_big_image_to_screen() {
+        // 2800×1600 图在 1600×900 可摆放区（scale=1）：窗口 = 显示+固定件
+        // → fit = min((1600−20)/2800, (900−54)/1600) = min(0.564, 0.529)
+        let z = initial_zoom(2800, 1600, 1.0, false, Some(Vec2::new(1600.0, 900.0)));
+        let expected = ((1600.0 - 2.0 * PAD) / 2800.0).min((900.0 - 2.0 * PAD - BAR_H) / 1600.0);
+        assert!((z - expected).abs() < 1e-4, "z={z} expected≈{expected}");
+        // 适配后窗口（含框）必须 ≤ 可摆放区
+        let win = window_size_zoomed(2800, 1600, 1.0, z, false);
+        assert!(
+            win.x <= 1600.0 + 1e-3 && win.y <= 900.0 + 1e-3,
+            "win={win:?}"
+        );
+        // 面板展开时宽度预算计入 PANEL_W：同样的大图 fit 更小
+        let zp = initial_zoom(2800, 1600, 1.0, true, Some(Vec2::new(1600.0, 900.0)));
+        assert!(zp < z, "panel_open 应使 fit 更小：{zp} vs {z}");
+    }
+
+    #[test]
+    fn initial_zoom_upscales_small_image_to_minimums() {
+        // 80×80 小图在 1600×900：不超屏（fit = min(19.75, 10.575) ≥ 1）
+        // → 放大到显示宽 390（zoom = 390/80 = 4.875）
+        let z = initial_zoom(80, 80, 1.0, false, Some(Vec2::new(1600.0, 900.0)));
+        assert!((z - MIN_DISPLAY_W / 80.0).abs() < 1e-4, "z={z}");
+        let win = window_size_zoomed(80, 80, 1.0, z, false);
+        assert_eq!(win.x, MIN_TOOLBAR_W);
+        // 放大后的窗口高 ≥ MIN_WINDOW_H
+        assert!(win.y >= MIN_WINDOW_H - 1e-3, "win={win:?}");
+        // 极端细长横条（400×5）：按高放大（96/5=19.2 → 钳 MAX_ZOOM=16）会
+        // 横向爆宽 6420 → 再钳屏幕：z = (1600−20)/400 = 3.95
+        let z2 = initial_zoom(400, 5, 1.0, false, Some(Vec2::new(1600.0, 900.0)));
+        assert!((z2 - (1600.0 - 2.0 * PAD) / 400.0).abs() < 1e-4, "z2={z2}");
+        let win2 = window_size_zoomed(400, 5, 1.0, z2, false);
+        assert!(
+            win2.x <= 1600.0 + 1e-3 && win2.y <= 900.0 + 1e-3,
+            "win={win2:?}"
+        );
+        assert!(z2 < MAX_ZOOM, "横向爆宽必须被屏幕钳回：z2={z2}");
+    }
+
+    #[test]
+    fn initial_zoom_medium_image_stays_100() {
+        // 800×600 在 1600×900：窗口 820×654 放得下 → 恒 1.0（1:1 语义）
+        assert_eq!(
+            initial_zoom(800, 600, 1.0, false, Some(Vec2::new(1600.0, 900.0))),
+            1.0
+        );
+        // 查不到所在屏 → 恒 1.0
+        assert_eq!(initial_zoom(2800, 1600, 1.0, false, None), 1.0);
+        assert_eq!(initial_zoom(80, 80, 1.0, false, None), 1.0);
+    }
+
+    #[test]
+    fn usable_screen_and_clamp_pos_keep_toolbar_on_screen() {
+        let mon: lscreen_capture::MonitorRect = (0, 0, 1920, 1080);
+        let s = 1.0f32;
+        let usable = usable_screen(Some(mon), s).unwrap();
+        assert_eq!(
+            usable,
+            Vec2::new(1920.0 - 16.0, 1080.0 - BAR_RESERVE_TOP - BAR_RESERVE_BOTTOM)
+        );
+        // 大图适配后贴右下角：位置钳进可摆放区（右 8 / 下 Dock 预留）
+        let win = Vec2::new(600.0, 400.0);
+        let (x, y) = clamp_pos((1500.0, 900.0), win, Some(mon), s);
+        assert_eq!(x, 1920.0 - 8.0 - 600.0);
+        assert_eq!(y, 1080.0 - BAR_RESERVE_BOTTOM - 400.0);
+        // 不越界的位置原样保留
+        assert_eq!(clamp_pos((100.0, 100.0), win, Some(mon), s), (100.0, 100.0));
+        // 极端大窗钳回可摆放区左上：x = 右缘(1912)−1900 = 12（≥8 内），
+        // y = 顶预留 40
+        let (x, y) = clamp_pos((900.0, 900.0), Vec2::new(1900.0, 1050.0), Some(mon), s);
+        assert_eq!(x, 12.0);
+        assert_eq!(y, BAR_RESERVE_TOP);
+        // 查不到所在屏原样返回
+        assert_eq!(clamp_pos((50.0, 60.0), win, None, s), (50.0, 60.0));
+        assert_eq!(usable_screen(None, s), None);
     }
 
     #[test]

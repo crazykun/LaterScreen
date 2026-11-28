@@ -1706,6 +1706,31 @@ pub fn primary_monitor_scale() -> Option<f32> {
     (scale > 0.0).then_some(scale)
 }
 
+/// mac：点 (x, y)（物理像素）所在显示器的 (x, y, w, h)，物理像素。xcap 的
+/// 显示器几何是 CG 逻辑点，先按物理包围盒定位再 × scale 换算回来。
+#[cfg(target_os = "macos")]
+pub fn monitor_rect_at(x: i32, y: i32) -> Option<crate::MonitorRect> {
+    let monitors = Monitor::all().ok()?;
+    let screens = mac::screens(&monitors);
+    let i = mac::idx_at_physical(&screens, x, y)?;
+    let s = screens.get(i)?;
+    let k = s.scale as f64;
+    Some((
+        (s.x * k).round() as i32,
+        (s.y * k).round() as i32,
+        ((s.w * k).round().max(0.0)) as u32,
+        ((s.h * k).round().max(0.0)) as u32,
+    ))
+}
+
+/// Win：点 (x, y) 所在显示器的 (x, y, w, h)，物理像素（DPI 感知进程坐标系
+/// 一致，`Monitor::from_point` 直收物理）。
+#[cfg(windows)]
+pub fn monitor_rect_at(x: i32, y: i32) -> Option<crate::MonitorRect> {
+    let m = Monitor::from_point(x, y).ok()?;
+    Some((m.x().ok()?, m.y().ok()?, m.width().ok()?, m.height().ok()?))
+}
+
 // --------------------------------------------- 原生窗口句柄（M12：不透明度/穿透）
 
 #[cfg(windows)]

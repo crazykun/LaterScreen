@@ -245,6 +245,13 @@ pub fn primary_monitor_bounds() -> Option<(i32, i32, u32, u32)> {
     platform::primary_monitor_bounds().ok()
 }
 
+/// 点 (x, y)（物理像素）所在显示器的 (x, y, w, h)，物理像素。上层做
+/// 「窗口适配所在屏」（贴图初始缩放）用——多屏下应按贴图所在屏适配。
+/// 坐标超出虚拟桌面/无显示器时返回 None，调用方跳过适配。
+pub fn monitor_rect_at(x: i32, y: i32) -> Option<MonitorRect> {
+    platform::monitor_rect_at(x, y)
+}
+
 /// 主显示器缩放比（物理像素/逻辑点）。Win/mac 读系统 DPI；X11 无系统级
 /// 缩放（本 crate 坐标恒物理像素，scale=1）。取不到返回 None，调用方按
 /// 1.0 兜底。托盘贴图等无 egui 上下文的场景用来换算窗口逻辑尺寸。

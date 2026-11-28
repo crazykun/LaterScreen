@@ -988,6 +988,20 @@ pub fn primary_monitor_scale() -> Option<f32> {
     Some(1.0)
 }
 
+/// 点 (x, y) 所在显示器的 (x, y, w, h)，物理像素（X11 坐标恒物理像素）。
+/// 点不在任何显示器上返回 None。
+pub fn monitor_rect_at(x: i32, y: i32) -> Option<crate::MonitorRect> {
+    with_conn(|conn, screen| {
+        let mons = monitors(conn, screen)?;
+        let m = mons
+            .iter()
+            .find(|m| x >= m.x && x < m.x + m.width as i32 && y >= m.y && y < m.y + m.height as i32)
+            .ok_or_else(|| CaptureError("点不在任何显示器上".into()))?;
+        Ok((m.x, m.y, m.width, m.height))
+    })
+    .ok()
+}
+
 // --------------------------------------------- 原生窗口句柄（M12：不透明度/穿透）
 
 /// 跨平台 NativeWindow 的 X11 实现：仅存 window id，每次调用走独立连接

@@ -2632,11 +2632,27 @@ fn run_pin(
             return Err("空图片".into());
         }
         let panel_open = ocr_seed.is_some();
+        // 初始适配（2026-11-28）：大图缩小到窗口 ≤ 所在屏可摆放区（工具条
+        // 可见），小图放大到最低宽高，中等图 1:1。所在屏按贴图位置定位
+        //（多屏下适配所在屏而非主屏）；查不到所在屏则恒 1.0。
+        let monitor =
+            lscreen_capture::monitor_rect_at((pos.x * scale) as i32, (pos.y * scale) as i32);
+        let z0 = pin::initial_zoom(w, h, scale, panel_open, pin::usable_screen(monitor, scale));
+        let win = pin::window_size_zoomed(w, h, scale, z0, panel_open);
+        let pos = pin::clamp_pos((pos.x, pos.y), win, monitor, scale);
+        let pos = eframe::egui::Pos2::new(pos.0, pos.1);
+        if std::env::var_os("LSCREEN_PIN_DEBUG").is_some() {
+            eprintln!(
+                "lscreen pin[debug]: monitor={monitor:?} usable={:?} z0={z0} win={win:?} pos={pos:?}",
+                pin::usable_screen(monitor, scale)
+            );
+        }
         let viewport = eframe::egui::ViewportBuilder::default()
             .with_app_id("lscreen")
             .with_position(pos)
-            // 窗口尺寸 = 图像 + 四周内边距 + 底部条带；面板展开时宽度再加面板
-            .with_inner_size(pin::window_size(w, h, scale, panel_open))
+            // 窗口尺寸 = 图像显示尺寸（初始缩放）+ 四周内边距 + 底部条带；
+            // 面板展开时宽度再加面板
+            .with_inner_size(win)
             .with_decorations(false)
             .with_always_on_top()
             .with_resizable(false);
@@ -2657,6 +2673,7 @@ fn run_pin(
                     font: font::load_system_font(),
                     source,
                     ocr_seed,
+                    initial_zoom: z0,
                 };
                 Ok(Box::new(pin::PinApp::new(cc, launch)))
             }),
