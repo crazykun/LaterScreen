@@ -30,7 +30,9 @@ const MIN_ZOOM: f32 = 0.25;
 /// 放开到 16x：像素网格（≥8x 叠加）对查看小图标/像素画才有意义；大图
 /// 受 WM 最大窗口尺寸约束自然到不了这么高（窗口尺寸不随缩放变化，无
 /// 画布平移）
-const MAX_ZOOM: f32 = 16.0;
+/// 放大上限从 16x 收紧到 8x：8x 已到像素网格阈值，再大就是看色块
+/// （用户 2026-11-28「限制下最大放大缩小比例」）
+const MAX_ZOOM: f32 = 8.0;
 /// 不透明度下限：再低就基本看不见，且容易误以为贴图丢了
 const MIN_OPACITY: f32 = 0.2;
 /// 像素网格的触发阈值：每个图像像素在屏幕上 ≥8 逻辑像素时叠加网格
@@ -432,9 +434,10 @@ pub struct PinApp {
     drag: Option<DragState>,
     /// 边缘/角拖拽缩放进行中（见 ResizeState）；None = 未在缩放
     resize: Option<ResizeState>,
-    /// 横向滚动偏移（图像显示宽于框内图像区时，0..=溢出量）：宽扁图高度
-    /// 兜底后框宽封顶、图像横向溢出（用户 2026-11-28：太长就横向滚动条）
-    h_scroll: f32,
+    /// 视口中心在图像逻辑坐标里的位置（0..base）：放大超出框后拖图平移
+    /// /滚动条平移都改它，缩放时同一点保持在视口中心（中心锚语义）。
+    /// 两维都有溢出时各维独立（用户 2026-11-28：拖图看区域，别拖窗口）
+    view_center: Vec2,
     /// 屏幕缩放比（物理像素/逻辑点），QueryPointer 物理坐标换算逻辑点用
     scale: f32,
     /// 窗口左上角的屏幕逻辑点，随拖动更新。「编辑」→ 标注窗 → OCR 交付
@@ -614,7 +617,7 @@ impl PinApp {
             toast: None,
             drag: None,
             resize: None,
-            h_scroll: 0.0,
+            view_center: Vec2::new(w as f32 / scale / 2.0, h as f32 / scale / 2.0),
             scale,
             pos,
             topmost: true,
@@ -1074,7 +1077,8 @@ impl PinApp {
             self.zoom = cap.max(0.05);
         }
         self.frame_display = self.base * self.zoom;
-        self.h_scroll = 0.0;
+        // 基准尺寸变了，视口中心回图像中心
+        self.view_center = self.base / 2.0;
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.current_window_size()));
     }
 
@@ -1192,9 +1196,7 @@ impl PinApp {
     /// 档位步进（−/+ 按钮）：像主流看图软件一样吸附到干净档位，
     /// 连点不累积浮点误差
     fn step_zoom(&mut self, ctx: &egui::Context, up: bool) {
-        const STEPS: [f32; 13] = [
-            0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0,
-        ];
+        const STEPS: [f32; 11] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0];
         let cur = self.zoom;
         let next = if up {
             STEPS.iter().copied().find(|s| *s > cur + 1e-3)
@@ -1935,22 +1937,52 @@ impl eframe::App for PinApp {
         // 内边距「框」底色：与条带同色，图像浮在框上（R8）
         ui.painter()
             .rect_filled(img_area, 0.0, ui.visuals().panel_fill);
-        // 图像按 zoom 绘制，以图像区中心为锚；框固定（frame_display），
-        // 缩放只改框内图像大小，裁剪矩形钉在 image_rect——放大出界的边角
-        // 不会越出「框」（用户 2026-11-28：框不动，只变里面的图）。
-        // 横向：图像宽于图像区时按 h_scroll 平移并出滚动条（宽扁图高度
-        // 兜底后框宽封顶、图像横向溢出）；窄于时保持居中
+        // 图像按 zoom 绘制，视口中心对准 view_center（图像逻辑坐标里的
+        // 一个点）：框固定（frame_display），缩放只改框内图像大小且同一
+        // 内容点保持在中心（中心锚），裁剪矩形钉在 image_rect。view_center
+        // 可钳范围 = 可见半宽/半高——图像不超框时钳到中心（自动居中），
+        // 超框时可平移（拖图/滚动条），用户 2026-11-28：拖图看区域别拖窗口
         let disp = self.base * self.zoom;
-        let max_scroll = (disp.x - image_rect.width()).max(0.0);
-        self.h_scroll = self.h_scroll.clamp(0.0, max_scroll);
-        let left = if max_scroll > 0.0 {
-            image_rect.left() - self.h_scroll
-        } else {
-            image_rect.center().x - disp.x / 2.0
-        };
-        let shown =
-            Rect::from_min_size(Pos2::new(left, image_rect.center().y - disp.y / 2.0), disp);
+        let half_x = (disp.x.min(image_rect.width()) / 2.0) / self.zoom.max(1e-3);
+        let half_y = (disp.y.min(image_rect.height()) / 2.0) / self.zoom.max(1e-3);
+        let span_x = (self.base.x - 2.0 * half_x).max(0.0);
+        let span_y = (self.base.y - 2.0 * half_y).max(0.0);
+        self.view_center = Vec2::new(
+            self.view_center.x.clamp(half_x, self.base.x - half_x),
+            self.view_center.y.clamp(half_y, self.base.y - half_y),
+        );
+        let shown = Rect::from_center_size(
+            Pos2::new(
+                image_rect.center().x + (self.view_center.x - self.base.x / 2.0) * self.zoom,
+                image_rect.center().y + (self.view_center.y - self.base.y / 2.0) * self.zoom,
+            ),
+            disp,
+        );
+        let overflow_x = disp.x > image_rect.width() + 1.0;
+        let overflow_y = disp.y > image_rect.height() + 1.0;
         let paint = ui.painter().with_clip_rect(image_rect);
+        // ---- 图像区拖拽 = 平移图像（仅在图像超出可视区时接管；不超框时
+        // 不分配，拖动沿命中链落回根响应移窗）。放大后拖图看区域，别拖
+        // 整个窗口（用户 2026-11-28）。双击复制语义透传（与根一致）
+        if overflow_x || overflow_y {
+            let pan = ui
+                .allocate_rect(image_rect, egui::Sense::click_and_drag())
+                .on_hover_cursor(CursorIcon::Grab);
+            if pan.dragged() {
+                let d = ctx.input(|i| i.pointer.delta());
+                self.view_center = Vec2::new(
+                    self.view_center.x - d.x / self.zoom.max(1e-3),
+                    self.view_center.y - d.y / self.zoom.max(1e-3),
+                );
+                self.view_center = Vec2::new(
+                    self.view_center.x.clamp(half_x, self.base.x - half_x),
+                    self.view_center.y.clamp(half_y, self.base.y - half_y),
+                );
+            }
+            if pan.double_clicked() {
+                self.do_copy(&ctx);
+            }
+        }
         if let Some(tex) = &self.texture {
             paint.image(
                 tex.id(),
@@ -1995,38 +2027,79 @@ impl eframe::App for PinApp {
             Stroke::new(1.0, Color32::from_black_alpha(90)),
             egui::StrokeKind::Inside,
         );
-        // ---- 横向滚动条：图像宽于图像区时出现（宽扁图高度兜底后框宽
-        // 封顶在目标宽，用户 2026-11-28「太长就弄一个横向滚动条」）。覆盖
-        // 式画在图像区底部；拇指可拖，拖拽映射按内容/轨道比例。穿透模式
-        // 图像区对指针不可见，自然失效
-        if max_scroll > 1.0 {
-            const SB_H: f32 = 10.0;
+        // ---- 滚动条（横/纵各自按溢出出现）：宽扁图高度兜底后框宽封顶、
+        // 放大后两维都可能超出可视区（用户 2026-11-28：横向滚动条 + 「放
+        // 大后经常出不来滚动条」——补齐纵向）。覆盖式画在图像区右/下缘，
+        // 拇指可拖，拖拽按视口中心在图像坐标里的可用跨度比例映射。
+        // 穿透模式图像区对指针不可见，自然失效
+        const SB: f32 = 10.0;
+        let scroll_alpha = 70;
+        // 纵向（右缘）：图像高于图像区时出现
+        if span_y > 0.5 {
             let track = Rect::from_min_max(
-                Pos2::new(image_rect.left() + 2.0, image_rect.bottom() - SB_H - 2.0),
+                Pos2::new(image_rect.right() - SB - 2.0, image_rect.top() + 2.0),
                 Pos2::new(image_rect.right() - 2.0, image_rect.bottom() - 2.0),
             );
-            let track_w = track.width();
-            let thumb_w = (track_w * (image_rect.width() / disp.x)).clamp(32.0, track_w);
-            let t = (self.h_scroll / max_scroll).clamp(0.0, 1.0);
+            let track_h = track.height();
+            let thumb_h = (track_h * (image_rect.height() / disp.y)).clamp(32.0, track_h);
+            let t = ((self.view_center.y - half_y) / span_y).clamp(0.0, 1.0);
             let thumb = Rect::from_min_size(
-                Pos2::new(track.left() + t * (track_w - thumb_w), track.min.y),
-                Vec2::new(thumb_w, SB_H),
+                Pos2::new(track.left(), track.top() + t * (track_h - thumb_h)),
+                Vec2::new(SB, thumb_h),
             );
             ui.painter()
-                .rect_filled(track, SB_H / 2.0, Color32::from_black_alpha(22));
-            let thumb_resp = ui
+                .rect_filled(track, SB / 2.0, Color32::from_black_alpha(22));
+            let resp = ui
                 .allocate_rect(thumb, egui::Sense::drag())
                 .on_hover_cursor(CursorIcon::Grabbing);
             ui.painter().rect_filled(
                 thumb,
-                SB_H / 2.0,
-                Color32::from_black_alpha(if thumb_resp.dragged() { 130 } else { 70 }),
+                SB / 2.0,
+                Color32::from_black_alpha(if resp.dragged() { 130 } else { scroll_alpha }),
             );
-            if thumb_resp.dragged() {
+            if resp.dragged() {
+                let dy = ctx.input(|i| i.pointer.delta().y);
+                if dy != 0.0 {
+                    let per_px = span_y / (track_h - thumb_h).max(1.0);
+                    self.view_center.y =
+                        (self.view_center.y + dy * per_px).clamp(half_y, self.base.y - half_y);
+                }
+            }
+        }
+        // 横向（下缘）：图像宽于图像区时出现（避让纵条）
+        if span_x > 0.5 {
+            let right = if span_y > 0.5 {
+                image_rect.right() - SB - 2.0
+            } else {
+                image_rect.right() - 2.0
+            };
+            let track = Rect::from_min_max(
+                Pos2::new(image_rect.left() + 2.0, image_rect.bottom() - SB - 2.0),
+                Pos2::new(right, image_rect.bottom() - 2.0),
+            );
+            let track_w = track.width();
+            let thumb_w = (track_w * (image_rect.width() / disp.x)).clamp(32.0, track_w);
+            let t = ((self.view_center.x - half_x) / span_x).clamp(0.0, 1.0);
+            let thumb = Rect::from_min_size(
+                Pos2::new(track.left() + t * (track_w - thumb_w), track.top()),
+                Vec2::new(thumb_w, SB),
+            );
+            ui.painter()
+                .rect_filled(track, SB / 2.0, Color32::from_black_alpha(22));
+            let resp = ui
+                .allocate_rect(thumb, egui::Sense::drag())
+                .on_hover_cursor(CursorIcon::Grabbing);
+            ui.painter().rect_filled(
+                thumb,
+                SB / 2.0,
+                Color32::from_black_alpha(if resp.dragged() { 130 } else { scroll_alpha }),
+            );
+            if resp.dragged() {
                 let dx = ctx.input(|i| i.pointer.delta().x);
                 if dx != 0.0 {
-                    let per_px = max_scroll / (track_w - thumb_w).max(1.0);
-                    self.h_scroll = (self.h_scroll + dx * per_px).clamp(0.0, max_scroll);
+                    let per_px = span_x / (track_w - thumb_w).max(1.0);
+                    self.view_center.x =
+                        (self.view_center.x + dx * per_px).clamp(half_x, self.base.x - half_x);
                 }
             }
         }

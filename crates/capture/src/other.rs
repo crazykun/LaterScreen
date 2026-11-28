@@ -216,6 +216,7 @@ mod mac {
     pub const SESSION_TAP: u32 = 1;
 
     /// 一台显示器的几何快照：scale + CG 逻辑包围盒
+    #[derive(Clone)]
     pub struct Screen {
         pub scale: f32,
         pub x: f64,
@@ -631,17 +632,34 @@ pub fn pointer_state() -> Option<(i32, i32, bool)> {
 }
 
 /// mac：CGEventGetLocation 拿 CG 全局逻辑点，× 所在屏 scale 换算回物理像素
-/// （与截屏/选区同一坐标系）。
+/// （与截屏/选区同一坐标系）。显示器几何走 5s TTL 缓存——贴图拖拽/缩放
+/// 每帧都查指针位置，xcap `Monitor::all()` 逐屏枚举是毫秒级开销，60fps
+/// 下表现为肉眼可见的卡顿（用户 2026-11-28「边框拉伸很卡」的主因）；
+/// 显示器几何极少变化，热插拔最多 5s 后生效。
 #[cfg(target_os = "macos")]
 pub fn cursor_position() -> Option<(i32, i32)> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static CACHE: Mutex<Option<(Instant, Vec<mac::Screen>)>> = Mutex::new(None);
+    const TTL: Duration = Duration::from_secs(5);
+
     let ev = unsafe { mac::CGEventCreate(std::ptr::null_mut()) };
     if ev.is_null() {
         return None;
     }
     let pt = unsafe { mac::CGEventGetLocation(ev) };
     unsafe { mac::CFRelease(ev) };
-    let monitors = Monitor::all().ok()?;
-    let screens = mac::screens(&monitors);
+    let screens = {
+        let mut guard = CACHE.lock().ok()?;
+        match &*guard {
+            Some((t, s)) if t.elapsed() < TTL => s.clone(),
+            _ => {
+                let s = mac::screens(&Monitor::all().ok()?).clone();
+                *guard = Some((Instant::now(), s.clone()));
+                s
+            }
+        }
+    };
     let s = mac::idx_at_logical(&screens, pt.x, pt.y).and_then(|i| screens.get(i))?;
     let k = s.scale as f64;
     Some(((pt.x * k).round() as i32, (pt.y * k).round() as i32))
