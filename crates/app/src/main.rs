@@ -2674,6 +2674,7 @@ fn run_pin(
                     source,
                     ocr_seed,
                     initial_zoom: z0,
+                    usable: pin::usable_screen(monitor, scale),
                 };
                 Ok(Box::new(pin::PinApp::new(cc, launch)))
             }),

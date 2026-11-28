@@ -4,7 +4,8 @@
 //! 传入，本进程读完即建窗。每个贴图一个轻量进程，关闭即释放全部内存。
 //!
 //! 交互：拖拽移动窗口（手动定位，见 PinApp::drag）、滚轮缩放 25%–1600%
-//! （**窗口跟随图像显示尺寸**，以图像中心为锚放大/缩小）、**Shift+滚轮调
+//! （**框不动，只变框内图像大小**——框在建窗时按初始适配定死，见
+//! frame_display；纯图模式无框、窗口随缩放跟随）、**Shift+滚轮调
 //! 不透明度**（20%–100%）、**R/H/V 旋转 90°/水平/**
 //! 垂直翻转**（纯像素置换，复制/保存的就是变换后的画面）、高倍放大
 //! （实际显示 ≥8x）叠加像素网格、工具条**点击穿透**（图像区点击穿到
@@ -138,9 +139,8 @@ fn flip_rgba(rgba: &mut [u8], w: u32, h: u32, horizontal: bool) {
 
 /// 图像显示尺寸（逻辑点） → 窗口尺寸：加四周内边距 + 底部条带、宽度钳
 /// [`MIN_TOOLBAR_W`]；`panel_open` 再加面板宽，高度不足 [`PANEL_MIN_H`]
-/// 时抬到保底。建窗与旋转/翻转变换、面板开合共用——**窗口尺寸由图像
-/// 显示尺寸（基准 × zoom）与面板开合决定**（2026-11-28 起窗口跟随缩放，
-/// 旧 R9 固定框废弃）。
+/// 时抬到保底。建窗（传初始适配后的显示尺寸）、旋转/翻转重适配、面板
+/// 开合共用——正常模式窗口 = 固定框（见 frame_display），缩放不改它。
 fn window_size_at(image: Vec2, panel_open: bool) -> Vec2 {
     let mut x = (image.x + 2.0 * PAD).max(MIN_TOOLBAR_W);
     let mut y = image.y + 2.0 * PAD + BAR_H;
@@ -224,6 +224,18 @@ pub fn clamp_pos(
     (x, y)
 }
 
+/// 所在屏适配的 zoom 上限：逐维解 (可摆放区 − 窗口固定件) / 图像基准。
+/// 窗口 = 显示尺寸 × zoom + 固定件（PAD/条带/面板宽是加法不是比例）。
+/// 宽度钳 [`MIN_TOOLBAR_W`] 与 [`PANEL_MIN_H`] 保底只在极小显示时生效，
+/// 此处忽略（适配都发生在框要溢出的场景）。下限 0.05 防退化到 0。
+/// [`initial_zoom`]（建窗）与旋转/翻转后的重适配共用。
+fn fit_zoom(base: Vec2, panel_open: bool, usable: Vec2) -> f32 {
+    let panel = if panel_open { PANEL_W } else { 0.0 };
+    let cap_x = ((usable.x - 2.0 * PAD - panel) / base.x).max(0.0);
+    let cap_y = ((usable.y - 2.0 * PAD - BAR_H) / base.y).max(0.0);
+    cap_x.min(cap_y).max(0.05)
+}
+
 /// 贴图初始缩放：建窗前算好，建窗尺寸与 PinApp 初始 zoom 共用同一值。
 /// - **大图**：窗口（图像+框/条带/面板）超过所在屏可摆放区 → 等比缩小到
 ///   恰好放得下，工具条不被推出屏外（用户 2026-11-28：大图默认别 100%）；
@@ -241,17 +253,10 @@ pub fn initial_zoom(w: u32, h: u32, scale: f32, panel_open: bool, usable: Option
     if base.x <= 0.0 || base.y <= 0.0 {
         return 1.0;
     }
-    // 窗口 = 显示尺寸 × zoom + 固定件（PAD/条带/面板宽是加法不是比例），
-    // 逐维解 (可用 − 固定件) / 基准 = 该维 zoom 上限。宽度钳 MIN_TOOLBAR_W
-    // 与 PANEL_MIN_H 保底只在极小显示时生效，此处忽略（大图适配路径不受
-    // 影响，小图路径另有 MAX_ZOOM 兜底）
-    let panel = if panel_open { PANEL_W } else { 0.0 };
-    let cap_x = ((s.x - 2.0 * PAD - panel) / base.x).max(0.0);
-    let cap_y = ((s.y - 2.0 * PAD - BAR_H) / base.y).max(0.0);
-    let fit = cap_x.min(cap_y);
+    let fit = fit_zoom(base, panel_open, s);
     if fit < 1.0 {
         // 超大图的适配值可能低于 MIN_ZOOM 档位下限：屏幕放得下优先
-        return fit.max(0.05);
+        return fit;
     }
     // 小图放大：显示尺寸达到最低宽高
     let up = (MIN_DISPLAY_W / base.x)
@@ -363,6 +368,13 @@ pub struct PinApp {
     /// zoom=1 时的窗口逻辑尺寸（物理像素 / 屏幕缩放比）
     base: Vec2,
     zoom: f32,
+    /// 固定框所包裹的图像显示尺寸（= base × 建窗初始缩放）。正常模式窗口
+    /// 尺寸只由它决定——缩放只改框内图像大小（用户 2026-11-28）；旋转/
+    /// 翻转后按当前 zoom 重算并按所在屏重适配
+    frame_display: Vec2,
+    /// 所在屏可摆放区逻辑尺寸（建窗时算好传入，见 `usable_screen`）；
+    /// 旋转/翻转重适配用。None = 查不到所在屏，旋转后不重适配
+    usable: Option<Vec2>,
     texture: Option<egui::TextureHandle>,
     toast: Option<(String, f64)>,
     /// 手动拖拽状态。不用 ViewportCommand::StartDrag：它走 WM 交互式移动
@@ -464,6 +476,9 @@ pub struct PinLaunch {
     /// 初始缩放（建窗前由 [`initial_zoom`] 算好）：大图适应所在屏、小图
     /// 放大到最低宽高、中等图 1.0
     pub initial_zoom: f32,
+    /// 所在屏可摆放区逻辑尺寸（[`usable_screen`] 的结果）；旋转/翻转重
+    /// 适配用，None = 查不到所在屏
+    pub usable: Option<Vec2>,
 }
 
 impl PinApp {
@@ -478,6 +493,7 @@ impl PinApp {
             source,
             ocr_seed,
             initial_zoom,
+            usable,
         } = launch;
         crate::apply_window_class(cc);
         // 贴图是独立进程，必须自己挂中文字体，否则按钮/菜单/toast 的中文
@@ -520,6 +536,10 @@ impl PinApp {
             // 钳了就失去「适应屏幕」的意义（窗口再次溢出）。用户后续缩放
             // 仍按 MIN_ZOOM/MAX_ZOOM 档位钳制
             zoom: initial_zoom,
+            // 固定框 = 建窗缩放下的图像显示尺寸（与 run_pin 的建窗尺寸同
+            // 一公式），此后缩放只改框内图像（用户 2026-11-28）
+            frame_display: Vec2::new(w as f32 / scale, h as f32 / scale) * initial_zoom,
+            usable,
             texture: Some(texture),
             toast: None,
             drag: None,
@@ -671,12 +691,12 @@ impl PinApp {
         }
     }
 
-    /// 当前模式下的窗口尺寸：图像当前显示尺寸（base × zoom）+ 框（四周
-    /// 内边距 + 底部条带；纯图模式无框、宽度保底 [`MIN_TOOLBAR_W`]）；
-    /// 面板展开再加面板宽。**正常模式窗口跟随缩放**（2026-11-28 起改：
-    /// 旧 R9 固定框下 zoom>1 超出部分被裁掉完全看不见，大图初始适配也
-    /// 无从谈起），旋转/翻转/缩放/面板开合/纯图切换共用，避免某条路径
-    /// 漏掉纯图分支。
+    /// 当前模式下的窗口尺寸。**正常模式 = 建窗时定死的框**（包裹建窗
+    /// 缩放下的图像显示尺寸 + 四周内边距 + 底部条带，面板展开再加面板
+    /// 宽）——滚轮/按钮缩放只改框内图像大小、框不动（用户 2026-11-28
+    /// 明确要求，恢复旧 R9 固定框；框自身的尺寸只在建窗与旋转/翻转重
+    /// 适配时变化，见 `frame_display`）。纯图模式无框，窗口 = 图像当前
+    /// 显示尺寸（base × zoom，宽度保底 [`MIN_TOOLBAR_W`]），随缩放跟随。
     fn current_window_size(&self) -> Vec2 {
         if self.bare {
             Vec2::new(
@@ -684,7 +704,7 @@ impl PinApp {
                 self.base.y * self.zoom,
             )
         } else {
-            window_size_at(self.base * self.zoom, self.panel_open)
+            window_size_at(self.frame_display, self.panel_open)
         }
     }
 
@@ -970,6 +990,18 @@ impl PinApp {
                 egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &self.rgba);
             t.set(img, texture_options());
         }
+        // 旋转/翻转后基准尺寸变化：框按当前 zoom 重算；超出所在屏可摆放
+        // 区时缩小 zoom 重适配（大图适配后旋转 90° 必然超屏，工具条不能
+        // 再次被推出屏外），缩放提示如实变化（随后被旋转 toast 覆盖）
+        let fit = self
+            .usable
+            .filter(|s| s.x > 0.0 && s.y > 0.0)
+            .map(|s| fit_zoom(self.base, self.panel_open, s));
+        let cap = fit.unwrap_or(f32::MAX);
+        if self.zoom > cap {
+            self.zoom = cap.max(0.05);
+        }
+        self.frame_display = self.base * self.zoom;
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.current_window_size()));
     }
 
@@ -993,15 +1025,19 @@ impl PinApp {
         );
     }
 
-    /// 设定缩放（工具条 −/+/百分比与键盘 +/−/0 用）。窗口跟随图像显示
-    /// 尺寸（2026-11-28 起两种模式一致），图像以中心为锚缩放。
+    /// 设定缩放（工具条 −/+/百分比与键盘 +/−/0 用）。**框不动**（尺寸在
+    /// 建窗时定死），只有框内图像以中心为锚缩放，超出部分裁掉
+    /// （用户 2026-11-28：外面框不要变大小，只变里面的图）。
     fn set_zoom(&mut self, ctx: &egui::Context, zoom: f32) {
         let z = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
         if (z - self.zoom).abs() < 1e-3 {
             return;
         }
         self.zoom = z;
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.current_window_size()));
+        // 纯图模式无框：窗口 = 图像当前显示尺寸，缩放时跟随
+        if self.bare {
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.current_window_size()));
+        }
         let pct = (z * 100.0).round() as i32;
         self.toast(ctx, format!("{pct}%"));
     }
@@ -1069,8 +1105,8 @@ impl PinApp {
         self.toast = Some((msg.into(), ctx.input(|i| i.time) + TOAST_SECS));
     }
 
-    /// 滚轮缩放：窗口跟随图像显示尺寸（与 set_zoom 同步），以图像中心
-    /// 为锚放大/缩小。Shift+滚轮仍是不透明度。
+    /// 滚轮缩放：与 set_zoom 同语义——框不动，只有框内图像以中心为锚
+    /// 缩放，超出部分裁掉。Shift+滚轮仍是不透明度。
     fn handle_zoom(&mut self, ctx: &egui::Context) {
         // Shift+滚轮被 egui 默认归为「水平滚动」（horizontal_scroll_modifier
         // = SHIFT），值落在 delta.x——纵轴读取对 Shift 组合恒为 0，必须合成
@@ -1094,7 +1130,10 @@ impl PinApp {
         }
         let old_zoom = self.zoom;
         self.zoom = new_zoom;
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.current_window_size()));
+        // 纯图模式无框：窗口跟随图像显示尺寸
+        if self.bare {
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.current_window_size()));
+        }
 
         let pct = (new_zoom * 100.0).round() as i32;
         let dir = if new_zoom > old_zoom { "+" } else { "" };
@@ -1746,8 +1785,9 @@ impl eframe::App for PinApp {
         // 内边距「框」底色：与条带同色，图像浮在框上（R8）
         ui.painter()
             .rect_filled(img_area, 0.0, ui.visuals().panel_fill);
-        // 图像按 zoom 绘制，以图像区中心为锚；窗口跟随显示尺寸（见
-        // current_window_size），clip 兜住取整误差
+        // 图像按 zoom 绘制，以图像区中心为锚；框固定（frame_display），
+        // 缩放只改框内图像大小，裁剪矩形钉在 image_rect——放大出界的边角
+        // 不会越出「框」（用户 2026-11-28：框不动，只变里面的图）
         let shown = Rect::from_center_size(image_rect.center(), self.base * self.zoom);
         let paint = ui.painter().with_clip_rect(image_rect);
         if let Some(tex) = &self.texture {
