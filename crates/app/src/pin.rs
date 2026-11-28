@@ -224,21 +224,30 @@ pub fn clamp_pos(
     (x, y)
 }
 
-/// 所在屏适配的 zoom 上限：逐维解 (可摆放区 − 窗口固定件) / 图像基准。
+/// 大图适配的目标占比（可摆放区的该比例）。按「恰好铺满」适配时全屏
+/// 截图贴出来仍占屏 ~92%，视觉上和又开一张全屏没区别，工具条被挤在
+/// 图与 Dock 的缝里（用户 2026-11-28 反馈「还是有点大」）——留 ~1/4
+/// 呼吸感，贴图、工具条与桌面同屏共存。
+const FIT_SCREEN_PORTION: f32 = 0.75;
+
+/// 所在屏适配的 zoom 上限：逐维解 (可摆放区×占比 − 窗口固定件) / 图像基准。
 /// 窗口 = 显示尺寸 × zoom + 固定件（PAD/条带/面板宽是加法不是比例）。
 /// 宽度钳 [`MIN_TOOLBAR_W`] 与 [`PANEL_MIN_H`] 保底只在极小显示时生效，
 /// 此处忽略（适配都发生在框要溢出的场景）。下限 0.05 防退化到 0。
 /// [`initial_zoom`]（建窗）与旋转/翻转后的重适配共用。
 fn fit_zoom(base: Vec2, panel_open: bool, usable: Vec2) -> f32 {
     let panel = if panel_open { PANEL_W } else { 0.0 };
-    let cap_x = ((usable.x - 2.0 * PAD - panel) / base.x).max(0.0);
-    let cap_y = ((usable.y - 2.0 * PAD - BAR_H) / base.y).max(0.0);
+    let tx = (usable.x * FIT_SCREEN_PORTION - 2.0 * PAD - panel).max(0.0);
+    let ty = (usable.y * FIT_SCREEN_PORTION - 2.0 * PAD - BAR_H).max(0.0);
+    let cap_x = (tx / base.x).max(0.0);
+    let cap_y = (ty / base.y).max(0.0);
     cap_x.min(cap_y).max(0.05)
 }
 
 /// 贴图初始缩放：建窗前算好，建窗尺寸与 PinApp 初始 zoom 共用同一值。
 /// - **大图**：窗口（图像+框/条带/面板）超过所在屏可摆放区 → 等比缩小到
-///   恰好放得下，工具条不被推出屏外（用户 2026-11-28：大图默认别 100%）；
+///   可摆放区的 75% 以内（[`FIT_SCREEN_PORTION`]），工具条与桌面同屏共存
+///   （用户 2026-11-28：大图默认别 100%、全屏图也别铺满）；
 /// - **小图**：图像显示尺寸不足最低宽高 → 等比放大（钳 [`MAX_ZOOM`]，再
 ///   钳不超过所在屏——细长横条按高放大可能横向爆宽）；
 /// - 中等图恒 1.0：1:1 贴图语义不变。
@@ -2314,17 +2323,17 @@ mod tests {
 
     #[test]
     fn initial_zoom_fits_big_image_to_screen() {
-        // 2800×1600 图在 1600×900 可摆放区（scale=1）：窗口 = 显示+固定件
-        // → fit = min((1600−20)/2800, (900−54)/1600) = min(0.564, 0.529)
+        // 2800×1600 图在 1600×900 可摆放区（scale=1）：目标 = 可摆放区×0.75
+        // → fit = min((1200−20)/2800, (675−54)/1600) = min(0.421, 0.388)
         let z = initial_zoom(2800, 1600, 1.0, false, Some(Vec2::new(1600.0, 900.0)));
-        let expected = ((1600.0 - 2.0 * PAD) / 2800.0).min((900.0 - 2.0 * PAD - BAR_H) / 1600.0);
+        let expected = ((1600.0 * FIT_SCREEN_PORTION - 2.0 * PAD) / 2800.0)
+            .min((900.0 * FIT_SCREEN_PORTION - 2.0 * PAD - BAR_H) / 1600.0);
         assert!((z - expected).abs() < 1e-4, "z={z} expected≈{expected}");
-        // 适配后窗口（含框）必须 ≤ 可摆放区
+        // 适配后窗口必须 ≤ 目标区（可摆放区×0.75，留呼吸感不铺满）
         let win = window_size_zoomed(2800, 1600, 1.0, z, false);
-        assert!(
-            win.x <= 1600.0 + 1e-3 && win.y <= 900.0 + 1e-3,
-            "win={win:?}"
-        );
+        let tx = 1600.0 * FIT_SCREEN_PORTION;
+        let ty = 900.0 * FIT_SCREEN_PORTION;
+        assert!(win.x <= tx + 1e-3 && win.y <= ty + 1e-3, "win={win:?}");
         // 面板展开时宽度预算计入 PANEL_W：同样的大图 fit 更小
         let zp = initial_zoom(2800, 1600, 1.0, true, Some(Vec2::new(1600.0, 900.0)));
         assert!(zp < z, "panel_open 应使 fit 更小：{zp} vs {z}");
@@ -2332,7 +2341,7 @@ mod tests {
 
     #[test]
     fn initial_zoom_upscales_small_image_to_minimums() {
-        // 80×80 小图在 1600×900：不超屏（fit = min(19.75, 10.575) ≥ 1）
+        // 80×80 小图在 1600×900：不超屏（fit = min(14.75, 7.76) ≥ 1）
         // → 放大到显示宽 390（zoom = 390/80 = 4.875）
         let z = initial_zoom(80, 80, 1.0, false, Some(Vec2::new(1600.0, 900.0)));
         assert!((z - MIN_DISPLAY_W / 80.0).abs() < 1e-4, "z={z}");
@@ -2341,20 +2350,23 @@ mod tests {
         // 放大后的窗口高 ≥ MIN_WINDOW_H
         assert!(win.y >= MIN_WINDOW_H - 1e-3, "win={win:?}");
         // 极端细长横条（400×5）：按高放大（96/5=19.2 → 钳 MAX_ZOOM=16）会
-        // 横向爆宽 6420 → 再钳屏幕：z = (1600−20)/400 = 3.95
+        // 横向爆宽 6420 → 再钳屏幕：z = (1200−20)/400 = 2.95
         let z2 = initial_zoom(400, 5, 1.0, false, Some(Vec2::new(1600.0, 900.0)));
-        assert!((z2 - (1600.0 - 2.0 * PAD) / 400.0).abs() < 1e-4, "z2={z2}");
-        let win2 = window_size_zoomed(400, 5, 1.0, z2, false);
         assert!(
-            win2.x <= 1600.0 + 1e-3 && win2.y <= 900.0 + 1e-3,
-            "win={win2:?}"
+            (z2 - (1600.0 * FIT_SCREEN_PORTION - 2.0 * PAD) / 400.0).abs() < 1e-4,
+            "z2={z2}"
         );
+        let win2 = window_size_zoomed(400, 5, 1.0, z2, false);
+        let tx = 1600.0 * FIT_SCREEN_PORTION;
+        let ty = 900.0 * FIT_SCREEN_PORTION;
+        assert!(win2.x <= tx + 1e-3 && win2.y <= ty + 1e-3, "win={win2:?}");
         assert!(z2 < MAX_ZOOM, "横向爆宽必须被屏幕钳回：z2={z2}");
     }
 
     #[test]
     fn initial_zoom_medium_image_stays_100() {
-        // 800×600 在 1600×900：窗口 820×654 放得下 → 恒 1.0（1:1 语义）
+        // 800×600 在 1600×900：目标区 fit = min(1.475, 1.035) ≥ 1、放大档 = 1
+        // → 恒 1.0（1:1 语义）
         assert_eq!(
             initial_zoom(800, 600, 1.0, false, Some(Vec2::new(1600.0, 900.0))),
             1.0
