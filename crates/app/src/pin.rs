@@ -1943,8 +1943,15 @@ impl eframe::App for PinApp {
         // 可钳范围 = 可见半宽/半高——图像不超框时钳到中心（自动居中），
         // 超框时可平移（拖图/滚动条），用户 2026-11-28：拖图看区域别拖窗口
         let disp = self.base * self.zoom;
-        let half_x = (disp.x.min(image_rect.width()) / 2.0) / self.zoom.max(1e-3);
-        let half_y = (disp.y.min(image_rect.height()) / 2.0) / self.zoom.max(1e-3);
+        // 可见半宽/半高不可能超过图像半宽/半高——但「显示尺寸 ≈ 区尺寸」
+        // 的边界上 f32 舍入会给出 half > base/2 的假值（min(disp, area) 在
+        // 两侧跳变），clamp 断言 min > max 直接 abort（真机 2026-11-28：
+        // min = 960.00006 > max = 959.99994，滚轮穿过建窗适配比例即崩）。
+        // 钳到 base/2：边界缩放自动回到中心锚，语义正确
+        let half_x =
+            ((disp.x.min(image_rect.width()) / 2.0) / self.zoom.max(1e-3)).min(self.base.x / 2.0);
+        let half_y =
+            ((disp.y.min(image_rect.height()) / 2.0) / self.zoom.max(1e-3)).min(self.base.y / 2.0);
         let span_x = (self.base.x - 2.0 * half_x).max(0.0);
         let span_y = (self.base.y - 2.0 * half_y).max(0.0);
         self.view_center = Vec2::new(
@@ -1970,9 +1977,11 @@ impl eframe::App for PinApp {
                 .on_hover_cursor(CursorIcon::Grab);
             if pan.dragged() {
                 let d = ctx.input(|i| i.pointer.delta());
+                // 抓取语义：图像跟手——拖右图像右移（视口中心 = 图像坐标
+                // 点随指针同向移动）。此前写反（用户 2026-11-28）
                 self.view_center = Vec2::new(
-                    self.view_center.x - d.x / self.zoom.max(1e-3),
-                    self.view_center.y - d.y / self.zoom.max(1e-3),
+                    self.view_center.x + d.x / self.zoom.max(1e-3),
+                    self.view_center.y + d.y / self.zoom.max(1e-3),
                 );
                 self.view_center = Vec2::new(
                     self.view_center.x.clamp(half_x, self.base.x - half_x),
