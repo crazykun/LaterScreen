@@ -18,7 +18,7 @@
 //! 新增的空间上，图像显示区域不受挤压；开合只改窗口宽度。
 
 use eframe::egui;
-use egui::{Color32, Pos2, Rect, Stroke, Vec2, ViewportCommand};
+use egui::{Color32, CursorIcon, Pos2, Rect, Stroke, Vec2, ViewportCommand};
 
 use crate::export;
 use crate::history;
@@ -33,6 +33,8 @@ const MAX_ZOOM: f32 = 16.0;
 const MIN_OPACITY: f32 = 0.2;
 /// 像素网格的触发阈值：每个图像像素在屏幕上 ≥8 逻辑像素时叠加网格
 const PIXEL_GRID_MIN: f32 = 8.0;
+/// 边缘/角缩放手柄的命中厚度（逻辑像素，窗口四边内侧）
+const HANDLE_PX: f32 = 8.0;
 /// 缩放指示条/工具条的显示时长（秒）
 const TOAST_SECS: f64 = 1.6;
 /// 底部工具条条带高度：窗口高 = 图像显示高 + 2*PAD + BAR_H，按钮在
@@ -397,6 +399,8 @@ pub struct PinApp {
     /// 位置比真实值多出刚移动的 Δ，会把自己的移动误判为指针移动再移一次，
     /// 逐帧自激成「窗口乱跑」。
     drag: Option<DragState>,
+    /// 边缘/角拖拽缩放进行中（见 ResizeState）；None = 未在缩放
+    resize: Option<ResizeState>,
     /// 屏幕缩放比（物理像素/逻辑点），QueryPointer 物理坐标换算逻辑点用
     scale: f32,
     /// 窗口左上角的屏幕逻辑点，随拖动更新。「编辑」→ 标注窗 → OCR 交付
@@ -460,6 +464,24 @@ struct DragState {
     grab_offset: Vec2,
     /// 上次发送的窗口目标位置（相等则不重发）
     sent: Pos2,
+}
+
+/// 边缘/角拖拽缩放的状态（用户 2026-11-28）。拖拽 = 带对侧锚点的等比
+/// 缩放：zoom 变化、框始终紧贴图像；东/南手柄锚在窗口左上（不动），
+/// 西/北手柄锚在对侧边/角，窗口位置随缩放平移。
+struct ResizeState {
+    /// 激活的方位（角 = 相邻两条同时 true）：东/南/西/北
+    east: bool,
+    south: bool,
+    west: bool,
+    north: bool,
+    /// 起手时窗口左上角（屏幕逻辑点）——东/南缩放的固定锚点
+    anchor: Pos2,
+    /// 起手时图像显示尺寸（base × zoom）
+    start_display: Vec2,
+    /// 起手时窗口尺寸：对侧固定边/角坐标 = anchor + start_window；
+    /// 显示尺寸 = 窗口尺寸 − 固定件（两者差值）
+    start_window: Vec2,
 }
 
 /// 贴图启动载荷：run_pin 读图后一次性交给 PinApp（收拢 new 的参数个数）。
@@ -552,6 +574,7 @@ impl PinApp {
             texture: Some(texture),
             toast: None,
             drag: None,
+            resize: None,
             scale,
             pos,
             topmost: true,
@@ -1032,6 +1055,82 @@ impl PinApp {
                 "垂直翻转"
             },
         );
+    }
+
+    /// 边缘/角拖拽缩放的逐帧处理（手柄见 ui 末尾；状态见 ResizeState）。
+    /// 指针位置换算各维目标显示尺寸 → 等比 zoom（角手柄取两维较大者，
+    /// 指针至少落在一维的框角上）→ 更新框；西/北锚在对侧边/角，窗口
+    /// 位置随新尺寸平移（用起手窗口尺寸推对侧坐标，窗口保底宽/高由
+    /// current_window_size 统一生效）。
+    fn handle_frame_resize(&mut self, ctx: &egui::Context) {
+        let Some(r) = self.resize.as_ref() else {
+            return;
+        };
+        if !ctx.input(|i| i.pointer.primary_down()) {
+            // 松手收尾：如实提示当前缩放
+            self.resize = None;
+            let pct = (self.zoom * 100.0).round() as i32;
+            self.toast(ctx, format!("{pct}%"));
+            return;
+        }
+        let scale = self.scale;
+        // 与移动拖拽同一双源：优先绝对指针坐标（与窗口尺寸/位置变化解耦，
+        // 无自激回路），拿不到退回 egui 局部坐标且仅在指针真实移动时
+        let pointer = lscreen_capture::cursor_position()
+            .map(|(x, y)| Pos2::new(x as f32 / scale, y as f32 / scale))
+            .or_else(|| {
+                ctx.input(|i| {
+                    let fresh = i.pointer.delta() != Vec2::ZERO;
+                    match (fresh, i.viewport().outer_rect, i.pointer.latest_pos()) {
+                        (true, Some(o), Some(c)) => Some(o.min + c.to_vec2()),
+                        _ => None,
+                    }
+                })
+            });
+        let Some(p) = pointer else {
+            return;
+        };
+        // 各维目标：显示尺寸 = 指针到固定边/角的距离 − 固定件（起手窗口
+        // 尺寸 − 起手显示尺寸）；角手柄取两维较大者
+        let chrome = r.start_window - r.start_display;
+        let mut zooms = Vec::new();
+        if r.east {
+            zooms.push((p.x - r.anchor.x - chrome.x) / self.base.x);
+        }
+        if r.south {
+            zooms.push((p.y - r.anchor.y - chrome.y) / self.base.y);
+        }
+        if r.west {
+            zooms.push((r.anchor.x + r.start_window.x - p.x - chrome.x) / self.base.x);
+        }
+        if r.north {
+            zooms.push((r.anchor.y + r.start_window.y - p.y - chrome.y) / self.base.y);
+        }
+        let Some(z_raw) = zooms.into_iter().reduce(f32::max) else {
+            return;
+        };
+        let z = z_raw.clamp(MIN_ZOOM, MAX_ZOOM);
+        if (z - self.zoom).abs() < 1e-3 {
+            return;
+        }
+        self.zoom = z;
+        self.frame_display = self.base * z;
+        let win = self.current_window_size();
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(win));
+        // 西/北：对侧边/角固定，窗口位置 = 固定边角 − 新窗口尺寸
+        if r.west || r.north {
+            let mut target = r.anchor;
+            if r.west {
+                target.x = r.anchor.x + r.start_window.x - win.x;
+            }
+            if r.north {
+                target.y = r.anchor.y + r.start_window.y - win.y;
+            }
+            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(target));
+            self.pos = (target.x, target.y);
+        }
+        // 窗口尺寸变化 → 底部条带位置变化，强制下一帧重发输入区
+        self.through_shape = None;
     }
 
     /// 设定缩放（工具条 −/+/百分比与键盘 +/−/0 用）。**框不动**（尺寸在
@@ -1978,6 +2077,88 @@ impl eframe::App for PinApp {
         }
         if zreset {
             self.set_zoom(&ctx, 1.0);
+        }
+
+        // ---- 边缘/角拖拽缩放（用户 2026-11-28）：8 个手柄区覆盖四边与
+        // 四角，最后分配 = 命中在顶、优先于移动。拖拽 = 带对侧锚点的等比
+        // 缩放：zoom 变化、框始终紧贴图像。西/北手柄锚在对侧边，窗口位置
+        // 随缩放平移——Wayland 禁止客户端自设坐标（OuterPosition no-op），
+        // 只保留东/南/东南。穿透中窗口对指针不可见，手柄自然收不到事件。
+        // 缩放范围与滚轮一致（MIN_ZOOM–MAX_ZOOM），下限另含工具条最小
+        // 宽高对应的 zoom——框紧贴图像，不能缩到工具条保底以下
+        if !self.through {
+            let h = HANDLE_PX;
+            let (fmin, fmax) = (full.min, full.max);
+            let mid_w = full.width() - 2.0 * h;
+            let mid_h = full.height() - 2.0 * h;
+            let corner = |cx: f32, cy: f32| Rect::from_min_size(Pos2::new(cx, cy), Vec2::new(h, h));
+            // (矩形, 光标, [东, 南, 西, 北])
+            let mut zones = vec![
+                (
+                    Rect::from_min_size(Pos2::new(fmin.x + h, fmin.y), Vec2::new(mid_w, h)),
+                    CursorIcon::ResizeNorth,
+                    [false, false, false, true],
+                ),
+                (
+                    Rect::from_min_size(Pos2::new(fmax.x - h, fmin.y + h), Vec2::new(h, mid_h)),
+                    CursorIcon::ResizeEast,
+                    [true, false, false, false],
+                ),
+                (
+                    Rect::from_min_size(Pos2::new(fmin.x + h, fmax.y - h), Vec2::new(mid_w, h)),
+                    CursorIcon::ResizeSouth,
+                    [false, true, false, false],
+                ),
+                (
+                    Rect::from_min_size(Pos2::new(fmin.x, fmin.y + h), Vec2::new(h, mid_h)),
+                    CursorIcon::ResizeWest,
+                    [false, false, true, false],
+                ),
+            ];
+            if !lscreen_capture::is_wayland() {
+                zones.push((
+                    corner(fmin.x, fmin.y),
+                    CursorIcon::ResizeNorthWest,
+                    [false, false, true, true],
+                ));
+                zones.push((
+                    corner(fmax.x - h, fmin.y),
+                    CursorIcon::ResizeNorthEast,
+                    [true, false, false, true],
+                ));
+                zones.push((
+                    corner(fmin.x, fmax.y - h),
+                    CursorIcon::ResizeSouthWest,
+                    [false, true, true, false],
+                ));
+                zones.push((
+                    corner(fmax.x - h, fmax.y - h),
+                    CursorIcon::ResizeSouthEast,
+                    [true, true, false, false],
+                ));
+            }
+            for (rect, icon, edges) in zones {
+                let resp = ui
+                    .allocate_rect(rect, egui::Sense::drag())
+                    .on_hover_cursor(icon);
+                if resp.drag_started() {
+                    if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
+                        self.resize = Some(ResizeState {
+                            east: edges[0],
+                            south: edges[1],
+                            west: edges[2],
+                            north: edges[3],
+                            anchor: outer.min,
+                            start_display: self.frame_display,
+                            start_window: outer.size(),
+                        });
+                        break;
+                    }
+                }
+            }
+            if self.resize.is_some() {
+                self.handle_frame_resize(&ctx);
+            }
         }
     }
 }
