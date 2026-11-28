@@ -2637,8 +2637,9 @@ fn run_pin(
         //（多屏下适配所在屏而非主屏）；查不到所在屏则恒 1.0。
         let monitor =
             lscreen_capture::monitor_rect_at((pos.x * scale) as i32, (pos.y * scale) as i32);
-        let z0 = pin::initial_zoom(w, h, scale, panel_open, pin::usable_screen(monitor, scale));
-        let win = pin::window_size_zoomed(w, h, scale, z0, panel_open);
+        let (z0, frame_display) =
+            pin::initial_layout(w, h, scale, panel_open, pin::usable_screen(monitor, scale));
+        let win = pin::window_size_for_frame(frame_display, panel_open);
         let pos = pin::clamp_pos((pos.x, pos.y), win, monitor, scale);
         let pos = eframe::egui::Pos2::new(pos.0, pos.1);
         if std::env::var_os("LSCREEN_PIN_DEBUG").is_some() {
@@ -2674,6 +2675,7 @@ fn run_pin(
                     source,
                     ocr_seed,
                     initial_zoom: z0,
+                    frame_display,
                     usable: pin::usable_screen(monitor, scale),
                 };
                 Ok(Box::new(pin::PinApp::new(cc, launch)))
